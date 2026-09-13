@@ -60,21 +60,20 @@ security_ssh_show() {
 security_apply_ssh_key_only() {
   require_root
   security_audit_log "security ssh-key-only"
-  local cfg="/etc/ssh/sshd_config"
-  cp -a "$cfg" "${cfg}.bak-cecp-$(date +%Y%m%d%H%M%S)"
+  local cfg="/etc/ssh/sshd_config" bak
+  bak="${cfg}.bak-cecp-$(date +%Y%m%d%H%M%S)"
+  cp -a "$cfg" "$bak"
   sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$cfg"
   sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' "$cfg"
   sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' "$cfg" 2>/dev/null || true
   sed -i 's/^#\?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' "$cfg" 2>/dev/null || true
-  # drop-in wins on modern OpenSSH
-  mkdir -p /etc/ssh/sshd_config.d
-  cat >/etc/ssh/sshd_config.d/99-cecp-keyonly.conf <<'EOF'
-PasswordAuthentication no
+  if ! sshd_apply_dropin /etc/ssh/sshd_config.d/99-cecp-keyonly.conf "PasswordAuthentication no
 PubkeyAuthentication yes
 KbdInteractiveAuthentication no
-ChallengeResponseAuthentication no
-EOF
-  systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null
+ChallengeResponseAuthentication no"; then
+    cp -a "$bak" "$cfg"
+    panel_die "SSH key-only NOT applied (sshd config test failed; restored $cfg)"
+  fi
   panel_log "SSH: PasswordAuthentication=no (ensure your SSH key works before disconnecting!)"
 }
 
@@ -83,11 +82,17 @@ security_ssh_set_port() {
   local port="${1:-}"
   [[ "$port" =~ ^[0-9]+$ ]] || panel_die "Usage: cecp-panel security ssh-port PORT"
   (( port >= 22 && port <= 65535 )) || panel_die "Port must be 22-65535"
+  if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+    panel_die "sshd is socket-activated (ssh.socket): Port in sshd_config is ignored. Change ListenStream in ssh.socket instead."
+  fi
   security_audit_log "security ssh-port $port"
-  mkdir -p /etc/ssh/sshd_config.d
-  cat >/etc/ssh/sshd_config.d/99-cecp-port.conf <<EOF
-Port ${port}
-EOF
+  # SELinux (Alma/Rocky default): sshd cannot bind a port not labelled ssh_port_t -> lockout on restart.
+  if (( port != 22 )) && command -v getenforce &>/dev/null && [[ "$(getenforce)" != "Disabled" ]]; then
+    command -v semanage &>/dev/null || dnf -y install policycoreutils-python-utils >/dev/null 2>&1 || true
+    command -v semanage &>/dev/null || panel_die "SELinux is enabled but semanage is missing — refusing to change SSH port"
+    semanage port -a -t ssh_port_t -p tcp "$port" 2>/dev/null || semanage port -m -t ssh_port_t -p tcp "$port" \
+      || panel_die "semanage could not label port $port as ssh_port_t"
+  fi
   # firewall allow new port before reload
   if command -v firewall-cmd &>/dev/null; then
     firewall-cmd --permanent --add-port="${port}/tcp" 2>/dev/null || true
@@ -95,8 +100,8 @@ EOF
   elif command -v ufw &>/dev/null; then
     ufw allow "${port}/tcp" 2>/dev/null || true
   fi
-  systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || \
-    systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null
+  sshd_apply_dropin /etc/ssh/sshd_config.d/99-cecp-port.conf "Port ${port}" \
+    || panel_die "SSH port NOT changed (sshd config test failed)"
   panel_log "SSH port set to ${port}. Keep current session open; test new port before closing."
 }
 
@@ -104,18 +109,44 @@ security_ssh_harden() {
   # Non-destructive defaults: prohibit password root, keep password auth unless key-only applied
   require_root
   security_audit_log "security ssh-harden"
-  mkdir -p /etc/ssh/sshd_config.d
-  cat >/etc/ssh/sshd_config.d/99-cecp-harden.conf <<'EOF'
-PermitRootLogin prohibit-password
+  sshd_apply_dropin /etc/ssh/sshd_config.d/99-cecp-harden.conf "PermitRootLogin prohibit-password
 PubkeyAuthentication yes
 X11Forwarding no
 MaxAuthTries 4
 ClientAliveInterval 300
 ClientAliveCountMax 2
-LoginGraceTime 30
-EOF
-  systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+LoginGraceTime 30" || panel_die "SSH harden NOT applied (sshd config test failed)"
   panel_log "SSH harden applied (PermitRootLogin=prohibit-password). Use ssh-key-only after key verified."
+}
+
+# Repair SFTP drop-ins damaged by 1.5.0 ("Match User" written without a user name).
+security_ssh_repair() {
+  require_root
+  security_audit_log "security ssh-repair"
+  local qdir f user
+  qdir="$VAR_LIB/quarantine/sshd-$(date +%Y%m%d%H%M%S)"
+  local -a users=()
+  shopt -s nullglob
+  for f in /etc/ssh/sshd_config.d/cecp-site_*.conf; do
+    user="$(basename "$f" .conf)"
+    user="${user#cecp-}"
+    grep -qE "^Match User ${user}\$" "$f" && continue
+    mkdir -p "$qdir"
+    mv "$f" "$qdir/"
+    panel_log "Quarantined damaged SFTP drop-in: $f -> $qdir/"
+    if id "$user" &>/dev/null; then users+=("$user"); fi
+  done
+  shopt -u nullglob
+  if [[ ! -d "$qdir" ]]; then
+    panel_log "No damaged SFTP drop-ins found"
+    return 0
+  fi
+  sshd_test_and_reload || panel_die "sshd -t still failing — inspect /etc/ssh/sshd_config.d manually"
+  for user in "${users[@]}"; do
+    site_sftp_enable "$user"
+    panel_log "Rewrote SFTP drop-in for $user"
+  done
+  panel_log "SSH drop-in repair done"
 }
 
 # ---------------------------------------------------------------------------

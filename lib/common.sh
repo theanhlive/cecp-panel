@@ -134,6 +134,42 @@ nginx_test_and_reload() {
   return 1
 }
 
+# Validate sshd config before reloading so a bad drop-in can never lock SSH out.
+sshd_test_and_reload() {
+  local sshd_bin errlog
+  sshd_bin="$(command -v sshd 2>/dev/null || echo /usr/sbin/sshd)"
+  # Debian/Ubuntu: `sshd -t` needs the privsep dir even when sshd is socket-activated.
+  [[ -f /etc/debian_version ]] && mkdir -p /run/sshd
+  errlog="$(mktemp)"
+  if ! "$sshd_bin" -t 2>"$errlog"; then
+    panel_log "ERROR: sshd -t failed:"
+    sed 's/^/    /' "$errlog" >&2
+    rm -f "$errlog"
+    return 1
+  fi
+  rm -f "$errlog"
+  systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+}
+
+# Write an sshd drop-in, then test+reload; on failure restore the previous file (or remove it).
+sshd_apply_dropin() {
+  local file="$1" content="$2" backup=""
+  mkdir -p /etc/ssh/sshd_config.d
+  if [[ -f "$file" ]]; then
+    backup="$(mktemp)"
+    cp -a "$file" "$backup"
+  fi
+  printf '%s\n' "$content" >"$file"
+  chmod 600 "$file"
+  if sshd_test_and_reload; then
+    [[ -z "$backup" ]] || rm -f "$backup"
+    return 0
+  fi
+  if [[ -n "$backup" ]]; then mv -f "$backup" "$file"; else rm -f "$file"; fi
+  panel_log "ERROR: reverted $file — sshd NOT reloaded"
+  return 1
+}
+
 php_fpm_reload() {
   if systemctl is-active --quiet php-fpm 2>/dev/null; then
     systemctl reload php-fpm 2>/dev/null || systemctl restart php-fpm

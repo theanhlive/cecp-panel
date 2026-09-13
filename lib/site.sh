@@ -183,7 +183,11 @@ site_remove() {
     svc="$(echo "$remi_pool" | sed -E 's#^/etc/opt/remi/(php[0-9]+)/.*#\1#')-php-fpm"
     systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
   done
-  rm -f "/etc/cron.d/cecp-wp-${slug}" "/etc/ssh/sshd_config.d/cecp-${site_user}.conf"
+  rm -f "/etc/cron.d/cecp-wp-${slug}"
+  if [[ -f "/etc/ssh/sshd_config.d/cecp-${site_user}.conf" ]]; then
+    rm -f "/etc/ssh/sshd_config.d/cecp-${site_user}.conf"
+    sshd_test_and_reload || panel_log "WARN: sshd -t failed after removing SFTP drop-in — check manually"
+  fi
   # shellcheck source=/dev/null
   source "$PANEL_ROOT/lib/mysql.sh"
   mysql_drop_site_db "$db_name" "$db_user"
@@ -276,17 +280,14 @@ EOF
 }
 
 site_sftp_enable() {
-  local site_user="$1"
+  local site_user="${1:-}"
   require_root
-  mkdir -p /etc/ssh/sshd_config.d
-  cat >"/etc/ssh/sshd_config.d/cecp-${site_user}.conf" <<EOF
-Match User $site_user
-    ChrootDirectory /home/$site_user
+  [[ "$site_user" =~ ^site_[a-z0-9_]+$ ]] || panel_die "Refusing SFTP drop-in for invalid site user: '${site_user}'"
+  sshd_apply_dropin "/etc/ssh/sshd_config.d/cecp-${site_user}.conf" "Match User ${site_user}
+    ChrootDirectory /home/${site_user}
     ForceCommand internal-sftp
     AllowTcpForwarding no
-    X11Forwarding no
-EOF
-  systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+    X11Forwarding no" || panel_die "SFTP not enabled for ${site_user} (sshd config test failed)"
 }
 
 site_sftp_password() {

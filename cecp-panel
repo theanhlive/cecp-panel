@@ -49,7 +49,7 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel dns list|add|point|ssl-mode
   cecp-panel cf status|purge|purge-url|brotli|cache-level|minify|recommend [args]
   cecp-panel backup setup|status|run|list|prune|restore|enable-cron|...
-  cecp-panel security fail2ban|fail2ban-full|firewall|ssh|ssh-key-only|ssh-harden
+  cecp-panel security fail2ban|fail2ban-full|firewall|ssh|ssh-key-only|ssh-harden|ssh-repair
   cecp-panel security ssh-port|mariadb-bind|apply-production|check|unattended
   cecp-panel system info|ensure-swap|swap|disk-clean|maintain|tune
   cecp-panel mysql secure
@@ -222,6 +222,7 @@ case "$cmd" in
       ssh) security_ssh_show ;;
       ssh-key-only) require_root; security_apply_ssh_key_only ;;
       ssh-harden) require_root; security_ssh_harden ;;
+      ssh-repair) require_root; security_ssh_repair ;;
       ssh-port) require_root; security_ssh_set_port "${1:-}" ;;
       mariadb-bind) require_root; security_mariadb_bind_local ;;
       apply-production) require_root; security_apply_production ;;
