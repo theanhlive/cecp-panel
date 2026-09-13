@@ -3,7 +3,7 @@
 # shellcheck disable=SC2034  # globals consumed by other lib files
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.8.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.9.0-beta}"
 PANEL_ROOT="${PANEL_ROOT:-/opt/cecp-panel}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/cecp-panel}"
 ETC_DIR="/etc/cecp-panel"
@@ -123,6 +123,16 @@ secure_source() {
   (( (8#$mode & 8#022) == 0 )) || panel_die "Refusing to source $f: writable by group/others (mode $mode)"
   # shellcheck source=/dev/null
   source "$f"
+}
+
+# Serialize destructive operations on one site (live restore, WP update, staging push). The
+# lock is held until the panel process exits.
+site_lock() {
+  local f
+  f="$VAR_LIB/locks/$(domain_slug "$1").lock"
+  mkdir -p "$VAR_LIB/locks"
+  exec {CECP_LOCK_FD}>"$f"
+  flock -n "$CECP_LOCK_FD" || panel_die "Another panel operation is running on $1 (lock $f) — try again later"
 }
 
 site_meta_path() {
@@ -331,14 +341,15 @@ php_fpm_fix_socket_owner() {
   shopt -u nullglob
 }
 
-# Reload the default PHP-FPM and every running Remi php*-php-fpm service.
+# Reload the default PHP-FPM, every running Remi php*-php-fpm service and every per-site
+# master of sites with resource limits (cecp-php-fpm@SLUG).
 php_fpm_reload_all() {
   php_fpm_reload
   local svc
   while read -r svc; do
     [[ -n "$svc" ]] || continue
     systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
-  done < <(systemctl list-units 'php*-php-fpm.service' --type=service --state=running --no-legend 2>/dev/null | awk '{print $1}')
+  done < <(systemctl list-units 'php*-php-fpm.service' 'cecp-php-fpm@*.service' --type=service --state=running --no-legend 2>/dev/null | awk '{print $1}')
 }
 
 php_fpm_reload() {

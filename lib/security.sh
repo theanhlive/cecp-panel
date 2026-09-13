@@ -472,7 +472,7 @@ security_self_check() {
     else
       _ck FAIL "$dom: uploaded .php files can execute — run: cecp-panel site rebuild-vhost $dom"
     fi
-    if grep -q 'cecp-headers.conf' "$vhost"; then _ck PASS "$dom: security headers on every response"
+    if grep -qE 'cecp-headers(-noindex)?\.conf' "$vhost"; then _ck PASS "$dom: security headers on every response"
     else _ck WARN "$dom: old vhost (headers dropped on PHP/static) — run: cecp-panel site rebuild-vhost $dom"; fi
     local sock
     sock="$(site_json_get_or "$dom" php_sock "")"

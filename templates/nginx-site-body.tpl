@@ -4,8 +4,18 @@
     access_log /var/log/nginx/{{DOMAIN}}-access.log cecp;
     error_log  /var/log/nginx/{{DOMAIN}}-error.log;
 
-    include /etc/nginx/snippets/cecp-headers.conf;
+    # Follows PHP post_max_size (nginx default is 1m: media uploads failed with 413).
+    client_max_body_size {{BODY_SIZE}};
+
+    include {{HEADERS}};
 {{ADMIN_GUARD}}
+    # Certificate issuance/renewal must work even when the whole site is behind basic auth.
+    location ^~ /.well-known/acme-challenge/ {
+        auth_basic off;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
     # Deny rules come first: nginx uses the FIRST matching regex location, so anything after
     # "location ~ \.php$" would never apply (uploaded .php files would execute).
     location ~* /(?:uploads|files)/.*\.(?:php[0-9]?|phtml|phar)$ { deny all; }
@@ -23,7 +33,7 @@
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_pass unix:{{PHP_SOCK}};
-        fastcgi_read_timeout 120s;
+        fastcgi_read_timeout {{FCGI_TIMEOUT}};
     }
 
     location / {
@@ -46,7 +56,7 @@
         }
         add_header Vary Accept;
         add_header Cache-Control "public, max-age=2592000";
-        include /etc/nginx/snippets/cecp-headers.conf;
+        include {{HEADERS}};
         try_files $cecp_img$cecp_img_avif $cecp_img$cecp_webp_ext $uri =404;
     }
 
@@ -54,7 +64,7 @@
         expires 30d;
         access_log off;
         add_header Cache-Control "public, max-age=2592000";
-        include /etc/nginx/snippets/cecp-headers.conf;
+        include {{HEADERS}};
     }
 
     location ~ \.php$ {
@@ -65,7 +75,7 @@
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_pass unix:{{PHP_SOCK}};
-        fastcgi_read_timeout 120s;
+        fastcgi_read_timeout {{FCGI_TIMEOUT}};
         fastcgi_buffers 16 16k;
         fastcgi_buffer_size 32k;
 
@@ -89,5 +99,5 @@
         fastcgi_cache_valid 200 301 302 {{CACHE_TTL}};
         fastcgi_cache_valid 404 1m;
         add_header X-CECP-Cache $upstream_cache_status;
-        include /etc/nginx/snippets/cecp-headers.conf;
+        include {{HEADERS}};
     }

@@ -222,6 +222,9 @@ system_maintain() {
   find "$VAR_LIB/restore" -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} + 2>/dev/null || true
   find "$VAR_LIB" -maxdepth 1 -name 'verify.*' -mtime +1 -exec rm -rf {} + 2>/dev/null || true
   find "$VAR_LIB/backup-staging" -mindepth 1 -maxdepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+  # Safety copies of staging pushes / WP updates and DB exports: kept 14 days for manual undo.
+  find "$VAR_LIB/staging-push" "$VAR_LIB/wp-update" -mindepth 1 -maxdepth 1 -mtime +14 -exec rm -rf {} + 2>/dev/null || true
+  find "$VAR_LIB/db-exports" -mindepth 1 -maxdepth 1 -name '*.sql.gz' -mtime +14 -delete 2>/dev/null || true
 }
 
 # Rotate the panel's own logs (per-site nginx logs are covered by the distro's nginx rule).

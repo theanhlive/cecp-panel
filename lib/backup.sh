@@ -236,7 +236,9 @@ backup_stage_config() {
            /etc/opt/remi/php*/php-fpm.d/cecp-"${slug}".conf "/etc/cron.d/cecp-wp-${slug}" \
            "/etc/ssh/sshd_config.d/cecp-${site_user}.conf" "/etc/nginx/cecp-auth/${slug}.htpasswd" \
            "/etc/letsencrypt/renewal/${domain}.conf" "/etc/letsencrypt/live/${domain}" \
-           "/etc/letsencrypt/archive/${domain}"; do
+           "/etc/letsencrypt/archive/${domain}" "/etc/nginx/cecp-auth/${slug}-site.htpasswd" \
+           "/etc/cecp-panel/fpm/${slug}.conf" "/etc/cecp-panel/fpm/${slug}.pool.conf" \
+           "/etc/systemd/system/cecp-php-fpm@${slug}.service.d"; do
     [[ -e "$f" ]] && files+=("${f#/}")
   done
   (( ${#files[@]} )) || return 0
@@ -596,6 +598,7 @@ backup_restore_live() {
     read -r -p "Type the domain to replace the LIVE site with this snapshot: " answer
     [[ "$answer" == "$domain" ]] || { rm -rf "$work"; panel_die "Aborted"; }
   fi
+  site_lock "$domain"
   panel_log "Saving current state of $domain ..."
   backup_restore_safety_copy "$domain" "$work/pre" || { rm -rf "$work"; panel_die "Could not save the current site — live restore aborted, nothing changed"; }
   panel_log "Restoring $domain from $snapshot_id ..."

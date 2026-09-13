@@ -24,6 +24,10 @@ ensure_nginx_global() {
     panel_log "Installed/updated shared nginx config -> $target"
   fi
   install -m 644 "$PANEL_ROOT/templates/nginx-snippet-headers.conf" /etc/nginx/snippets/cecp-headers.conf
+  # Staging / preview sites: same headers + never index (vhost picks it via meta noindex).
+  { cat "$PANEL_ROOT/templates/nginx-snippet-headers.conf"
+    echo 'add_header X-Robots-Tag "noindex, nofollow" always;'
+  } | install -m 644 /dev/stdin /etc/nginx/snippets/cecp-headers-noindex.conf
   install -m 644 "$PANEL_ROOT/templates/nginx-snippet-ssl.conf" /etc/nginx/snippets/cecp-ssl-params.conf
   if [[ ! -f /etc/nginx/conf.d/cecp-cloudflare-realip.conf ]]; then
     cf_realip_render "$PANEL_ROOT/templates/cloudflare-ips.txt"

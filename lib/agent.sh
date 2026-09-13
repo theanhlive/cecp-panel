@@ -33,63 +33,11 @@ if [[ -f "$ENV_FILE" ]]; then
   source "$ENV_FILE"
 fi
 mkdir -p "$(dirname "$OUT")"
-export OUT CECP_API_URL CECP_VPS_ID CECP_AGENT_TOKEN
-python3 - <<'PY'
-import json, os, socket, time
-from pathlib import Path
-
-def read_json(p):
-    try:
-        with open(p, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-panel = read_json("/etc/cecp-panel/panel.json") or {}
-sites_dir = Path("/var/lib/cecp-panel/sites")
-sites = []
-if sites_dir.is_dir():
-    for f in sites_dir.glob("*.json"):
-        d = read_json(f) or {}
-        dom = d.get("domain") or f.stem
-        sites.append({
-            "domain": dom,
-            "ssl": bool(d.get("ssl")),
-            "wordpress": bool(d.get("wordpress")),
-        })
-mem = {}
-try:
-    with open("/proc/meminfo", encoding="utf-8") as f:
-        for line in f:
-            if line.startswith(("MemTotal:", "MemAvailable:", "SwapTotal:")):
-                k, v = line.split(":", 1)
-                mem[k.strip()] = int(v.split()[0])
-except OSError:
-    pass
-disk = {}
-try:
-    st = os.statvfs("/")
-    disk["root_total_kb"] = (st.f_blocks * st.f_frsize) // 1024
-    disk["root_avail_kb"] = (st.f_bavail * st.f_frsize) // 1024
-    if disk["root_total_kb"]:
-        disk["root_use_pct"] = int(100 * (1 - disk["root_avail_kb"] / disk["root_total_kb"]))
-except OSError:
-    pass
-data = {
-    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    "vps_id": os.environ.get("CECP_VPS_ID") or None,
-    "hostname": socket.gethostname(),
-    "panel_installed": os.path.isfile("/usr/local/bin/cecp-panel"),
-    "panel_version": panel.get("version"),
-    "sites": sites,
-    "domains_hosted": [s["domain"] for s in sites],
-    "memory_kb": mem,
-    "disk": disk,
-    "load": list(os.getloadavg()),
-}
-with open(os.environ["OUT"], "w", encoding="utf-8") as fh:
-    json.dump(data, fh, indent=2)
-PY
+# Same document as `cecp-panel status --json` (1.9+: per-site disk/DB, cache hit ratio, SSL
+# days, backup/uptime/update state); the pre-1.9 heartbeat keys are part of it.
+CECP_VPS_ID="${CECP_VPS_ID:-}" /usr/local/bin/cecp-panel status --json >"$OUT.tmp" \
+  && mv -f "$OUT.tmp" "$OUT"
+chmod 600 "$OUT"
 api="${CECP_API_URL:-}"
 tok="${CECP_AGENT_TOKEN:-}"
 vid="${CECP_VPS_ID:-}"
@@ -101,7 +49,7 @@ if [[ -n "$api" && -n "$tok" && -n "$vid" ]]; then
     -d @"$OUT" >/dev/null 2>>/var/log/cecp-panel/agent.log || true
 fi
 AGENTEOF
-  chmod 755 "$AGENT_BIN"
+  chmod 700 "$AGENT_BIN"
   cat >/etc/cron.d/cecp-agent <<EOF
 */5 * * * * root $AGENT_BIN >>/var/log/cecp-panel/agent.log 2>&1
 EOF

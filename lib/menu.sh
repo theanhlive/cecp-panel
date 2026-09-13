@@ -529,6 +529,7 @@ menu_main() {
     echo "16) ModSecurity (optional)"
     echo "17) View logs"
     echo "18) Monitoring (status / run / enable / disable)"
+    echo "19) Agency tools (staging, safe WP updates, limits, PHP config, DB)"
     echo " 0) Exit"
     echo "========================================================================="
     read -r -p "Choice [0]: " choice
@@ -564,10 +565,70 @@ menu_main() {
           *) monitor_status ;;
         esac
         ;;
+      19) menu_agency ;;
       0) exit 0 ;;
       *) echo "Unknown option" ;;
     esac
   done
+}
+
+menu_agency() {
+  local c d a
+  while true; do
+    echo ""
+    echo "== Agency tools =="
+    echo " 1) Create staging copy          2) Push staging to live"
+    echo " 3) Update WordPress (safe)      4) WordPress auto-update on/off"
+    echo " 5) Undo last WordPress update   6) Resource limits (CPU/RAM)"
+    echo " 7) PHP settings of a site       8) Site-wide basic auth on/off"
+    echo " 9) Export database             10) Database sizes"
+    echo "11) Slow query log on/off       12) Slow query report"
+    echo " 0) Back"
+    read -r -p "Choice: " c
+    case "$c" in
+      1) read -r -p "Live domain: " d; [[ -n "$d" ]] && site_staging "$d" ;;
+      2)
+        read -r -p "Live domain: " d
+        read -r -p "What [both/files/db]: " a
+        case "${a:-both}" in
+          files) site_staging_push "$d" --files-only ;;
+          db) site_staging_push "$d" --db-only ;;
+          *) site_staging_push "$d" ;;
+        esac
+        ;;
+      3) read -r -p "Domain: " d; [[ -n "$d" ]] && wp_update_site "$d" ;;
+      4) read -r -p "Domain: " d; read -r -p "on / off: " a; [[ -n "$d" && -n "$a" ]] && wp_auto_update "$d" "$a" ;;
+      5) read -r -p "Domain: " d; [[ -n "$d" ]] && wp_update_rollback "$d" ;;
+      6)
+        read -r -p "Domain: " d
+        read -r -p "CPU % of one core [100], or 'off': " a
+        if [[ "$a" == off ]]; then site_limits "$d" off
+        else
+          local m
+          read -r -p "RAM [1G]: " m
+          site_limits "$d" --cpu "${a:-100}" --mem "${m:-1G}"
+        fi
+        ;;
+      7)
+        read -r -p "Domain: " d
+        read -r -p "key=value (empty = show): " a
+        # shellcheck disable=SC2086  # several key=value pairs on purpose
+        [[ -n "$d" ]] && php_config "$d" $a
+        ;;
+      8) read -r -p "Domain: " d; read -r -p "on / off: " a; [[ -n "$d" && -n "$a" ]] && site_auth "$d" "$a" ;;
+      9) read -r -p "Domain: " d; [[ -n "$d" ]] && db_export "$d" ;;
+      10) db_size ;;
+      11) read -r -p "on / off: " a; db_slow_log "${a:-status}" ;;
+      12) db_slow_report 15 ;;
+      0) break ;;
+    esac
+  done
+}
+
+# cecp-panel status --json — machine-readable (CECP Core, n8n, agent heartbeat).
+status_json() {
+  CECP_PANEL_VERSION="$CECP_PANEL_VERSION" CECP_SITES_DIR="$SITES_DIR" CECP_VAR_LIB="$VAR_LIB" \
+    python3 "$PANEL_ROOT/lib/status.py"
 }
 
 show_status() {

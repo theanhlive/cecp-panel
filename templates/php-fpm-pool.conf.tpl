@@ -7,7 +7,8 @@ listen.owner = nginx
 listen.group = nginx
 listen.mode = 0660
 pm = ondemand
-; Sized from RAM and site count at render time (cecp-panel site rebuild-vhost --all re-sizes).
+; Sized from RAM and site count at render time (cecp-panel site rebuild-vhost --all re-sizes),
+; unless fixed with: cecp-panel php config {{DOMAIN}} pm_max_children=N
 pm.max_children = {{PM_MAX_CHILDREN}}
 ; 60s: with 10s, quiet sites respawned a worker on almost every request (slower TTFB).
 pm.process_idle_timeout = 60s
@@ -17,10 +18,13 @@ php_admin_value[open_basedir] = {{DOCROOT}}:{{SITE_HOME}}/tmp
 php_admin_value[upload_tmp_dir] = {{SITE_HOME}}/tmp
 php_admin_value[session.save_path] = {{SITE_HOME}}/tmp
 php_admin_value[sys_temp_dir] = {{SITE_HOME}}/tmp
-php_admin_value[memory_limit] = 256M
-php_admin_value[post_max_size] = 64M
-php_admin_value[upload_max_filesize] = 64M
-php_admin_value[max_execution_time] = 120
+; Per-site values: cecp-panel php config {{DOMAIN}} key=value ...
+php_admin_value[memory_limit] = {{MEMORY_LIMIT}}
+php_admin_value[post_max_size] = {{POST_MAX_SIZE}}
+php_admin_value[upload_max_filesize] = {{UPLOAD_MAX_FILESIZE}}
+php_admin_value[max_execution_time] = {{MAX_EXECUTION_TIME}}
+php_admin_value[max_input_time] = {{MAX_INPUT_TIME}}
+php_admin_value[max_input_vars] = {{MAX_INPUT_VARS}}
 php_admin_flag[log_errors] = on
 php_admin_flag[expose_php] = off
 php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen,parse_ini_file,show_source,pcntl_exec,pcntl_fork

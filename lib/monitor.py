@@ -78,13 +78,19 @@ def check_services(site_list):
     for opt in ("redis", "fail2ban"):
         if unit_exists(opt) and sh("systemctl", "is-enabled", opt)[1] == "enabled":
             wanted.append(opt)
+    isolated = set()
     for s in site_list:
         v = str(s.get("php_version", "80"))
-        if v != "80":
+        if s.get("php_isolated") and s.get("pool_name"):
+            # Own PHP-FPM master (cecp-panel site limits); template instances are not listed
+            # by list-unit-files, so skip that existence check for them.
+            isolated.add(f"cecp-php-fpm@{s['pool_name']}")
+            wanted.append(f"cecp-php-fpm@{s['pool_name']}")
+        elif v != "80":
             wanted.append(f"php{v}-php-fpm")
     checks, extra = [], []
     for svc in dict.fromkeys(wanted):
-        if not unit_exists(svc):
+        if svc not in isolated and not unit_exists(svc):
             continue
         active = sh("systemctl", "is-active", svc)[1] == "active"
         healed = False
@@ -101,12 +107,18 @@ def check_services(site_list):
     return checks, extra
 
 
-def http_probe(domain, ssl=False):
+def http_probe(domain, ssl=False, auth=None):
     scheme = "https" if ssl else "http"
+    # -K - : basic-auth credentials of staging sites come on stdin, never in argv.
     cmd = ["curl", "-sk", "-o", "/dev/null", "-w", "%{http_code} %{time_starttransfer}", "-m", "15",
            "--resolve", f"{domain}:80:127.0.0.1", "--resolve", f"{domain}:443:127.0.0.1",
-           "-H", "Cookie: wordpress_logged_in_cecp_healthcheck=1", f"{scheme}://{domain}/"]
-    rc, out = sh(*cmd, timeout=20)
+           "-H", "Cookie: wordpress_logged_in_cecp_healthcheck=1", "-K", "-", f"{scheme}://{domain}/"]
+    cfg = 'user = "%s:%s"\n' % auth if auth else ""
+    try:
+        p = subprocess.run(cmd, input=cfg, capture_output=True, text=True, timeout=20)
+        rc, out = p.returncode, p.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        rc, out = 1, ""
     parts = out.split()
     code = parts[0] if parts else "000"
     ttfb = float(parts[1]) if len(parts) > 1 else 0.0
@@ -118,10 +130,11 @@ def check_sites(site_list):
     for s in site_list:
         d = s["domain"]
         ssl = bool(s.get("ssl"))
-        code, ttfb = http_probe(d, ssl)
+        auth = (s.get("site_auth_user", ""), s.get("site_auth_pass", "")) if s.get("site_auth") else None
+        code, ttfb = http_probe(d, ssl, auth)
         if not code.startswith(("2", "3")):
             time.sleep(5)  # one retry: do not page for a single slow request or a reload blip
-            code, ttfb = http_probe(d, ssl)
+            code, ttfb = http_probe(d, ssl, auth)
         ok = code.startswith(("2", "3"))
         checks.append(Check(f"site:{d}", ok, "critical", "site_down", "site_recovered",
                             f"Site DOWN: {d} (HTTP {code})", f"Site back UP: {d} (HTTP {code})",

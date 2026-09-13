@@ -35,7 +35,8 @@ site_http_check() {
   [[ "$(site_json_get_or "$domain" ssl false)" == "True" ]] && scheme="https"
   code="$(curl -sk -o /dev/null -w '%{http_code}' -m 15 \
     --resolve "${domain}:80:127.0.0.1" --resolve "${domain}:443:127.0.0.1" \
-    -H 'Cookie: wordpress_logged_in_cecp_healthcheck=1' "${scheme}://${domain}/" 2>/dev/null || true)"
+    -H 'Cookie: wordpress_logged_in_cecp_healthcheck=1' -K <(site_auth_curl_config "$domain") \
+    "${scheme}://${domain}/" 2>/dev/null || true)"
   code="${code:-000}"
   echo "$code"
   [[ "$code" =~ ^[23][0-9][0-9]$ ]]
@@ -90,11 +91,18 @@ site_admin_guard_http() {
   echo "}"
 }
 
-# server-context part: 403 for non-allowlisted IPs and/or basic auth, admin area only.
+# server-context part: 403 for non-allowlisted IPs and/or basic auth, admin area only — or
+# basic auth on the whole site (staging sites: meta site_auth).
 site_admin_guard() {
   local domain="$1" slug="$2" ips auth
   ips="$(site_json_get_or "$domain" admin_protect_ips "")"
   auth="$(site_json_get_or "$domain" admin_protect_auth false)"
+  if [[ "$(site_json_get_or "$domain" site_auth false)" == "True" ]]; then
+    echo "    # Whole site behind basic auth (cecp-panel site auth)"
+    echo "    auth_basic \"Restricted\";"
+    echo "    auth_basic_user_file ${ADMIN_AUTH_DIR}/${slug}-site.htpasswd;"
+    auth=False  # one auth_basic per server: the site-wide one already covers wp-admin
+  fi
   [[ -n "$ips" || "$auth" == "True" ]] || return 0
   echo "    # wp-admin / wp-login protection (cecp-panel site protect-admin)"
   if [[ -n "$ips" ]]; then
@@ -186,6 +194,63 @@ print(",".join(nets))
   panel_log "wp-admin protection for $domain: $action"
 }
 
+# cecp-panel site auth DOMAIN on [--user NAME] | off | status | reset-password
+# Basic auth on the whole site (staging, previews for clients). ACME challenges stay open.
+site_auth() {
+  local domain="${1:-}" action="${2:-status}"
+  shift $(( $# < 2 ? $# : 2 ))
+  domain="${domain,,}"
+  require_root
+  validate_domain "$domain"
+  [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
+  local slug htfile user pass hash
+  slug="$(domain_slug "$domain")"
+  htfile="${ADMIN_AUTH_DIR}/${slug}-site.htpasswd"
+  case "$action" in
+    on|reset-password)
+      user="$(site_json_get_or "$domain" site_auth_user "")"
+      user="${user:-preview}"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --user) user="${2:-}"; shift 2 || true ;;
+          *) panel_die "Unknown option: $1" ;;
+        esac
+      done
+      [[ "$user" =~ ^[a-z][a-z0-9_-]{2,31}$ ]] || panel_die "User must be 3-32 chars [a-z0-9_-]"
+      pass="$(site_json_get_or "$domain" site_auth_pass "")"
+      if [[ "$action" == "reset-password" || -z "$pass" || ! -f "$htfile" ]]; then
+        pass="$(rand_alnum 20)"
+      fi
+      hash="$(printf '%s' "$pass" | openssl passwd -6 -stdin)"
+      install -d -m 750 -o root -g nginx "$ADMIN_AUTH_DIR" 2>/dev/null || install -d -m 750 "$ADMIN_AUTH_DIR"
+      printf '%s:%s\n' "$user" "$hash" >"$htfile"
+      chown root:nginx "$htfile" 2>/dev/null || true
+      chmod 640 "$htfile"
+      site_json_set "$domain" site_auth true site_auth_user "$user" site_auth_pass "$pass"
+      panel_secret "Basic auth for $domain — user: $user  password: $pass"
+      ;;
+    off)
+      rm -f "$htfile"
+      site_json_set "$domain" site_auth false site_auth_user "" site_auth_pass ""
+      ;;
+    status)
+      echo "Site-wide basic auth for $domain: $(site_json_get_or "$domain" site_auth false) (user: $(site_json_get_or "$domain" site_auth_user -))"
+      return 0
+      ;;
+    *) panel_die "Usage: cecp-panel site auth DOMAIN on [--user NAME] | off | status | reset-password" ;;
+  esac
+  site_render_vhost "$domain"
+  nginx_test_and_reload || panel_die "nginx rejected the vhost for $domain (config rolled back)"
+  panel_log "Site-wide basic auth for $domain: $action"
+}
+
+# curl config lines (for -K) that let panel health checks through site-wide basic auth;
+# credentials stay off argv.
+site_auth_curl_config() {
+  [[ "$(site_json_get_or "$1" site_auth false)" == "True" ]] || return 0
+  printf 'user = "%s:%s"\n' "$(site_json_get_or "$1" site_auth_user "")" "$(site_json_get_or "$1" site_auth_pass "")"
+}
+
 # Render the site's nginx vhost: HTTPS variant (HTTP/2, HSTS, 80→301) when a Let's Encrypt
 # certificate exists, plain HTTP otherwise. Caller reloads nginx (nginx_test_and_reload).
 site_render_vhost() {
@@ -205,11 +270,17 @@ site_render_vhost() {
   else
     avif='".no-avif"'
   fi
+  local headers=/etc/nginx/snippets/cecp-headers.conf post_mb exec_s
+  # Staging copies must never be indexed: X-Robots-Tag on every response.
+  [[ "$(site_json_get_or "$domain" noindex false)" == "True" ]] && headers=/etc/nginx/snippets/cecp-headers-noindex.conf
+  post_mb="$(php_cfg_mb "$(php_cfg_get "$domain" post_max_size)")"
+  exec_s="$(php_cfg_get "$domain" max_execution_time)"
   ensure_nginx_global
   body="$(mktemp)"
   template_render "$PANEL_ROOT/templates/nginx-site-body.tpl" "$body" \
     DOMAIN "$domain" DOCROOT "$docroot" PHP_SOCK "$php_sock" CACHE_TTL "$ttl" IMG_AVIF "$avif" \
-    ADMIN_GUARD "$(site_admin_guard "$domain" "$slug")"
+    ADMIN_GUARD "$(site_admin_guard "$domain" "$slug")" HEADERS "$headers" \
+    BODY_SIZE "$(( post_mb + 1 ))m" FCGI_TIMEOUT "$(( exec_s + 30 ))s"
   if cert_dir="$(site_cert_dir "$domain")"; then
     template_render "$PANEL_ROOT/templates/nginx-vhost-ssl.conf.tpl" "$out" \
       DOMAIN "$domain" DOCROOT "$docroot" LISTEN_SSL "$(nginx_listen_ssl_lines)" CERT_DIR "$cert_dir" \
@@ -239,11 +310,27 @@ site_render_pool() {
   fpm_dir="$(php_fpm_d_dir "$php_ver")"
   site_ensure_tmp "$site_user"
   rm -f "/etc/php-fpm.d/cecp-${slug}.conf" /etc/opt/remi/php*/php-fpm.d/cecp-"${slug}".conf
-  mkdir -p "$fpm_dir"
-  template_render "$PANEL_ROOT/templates/php-fpm-pool.conf.tpl" "${fpm_dir}/cecp-${slug}.conf" \
+  local pool_file="${fpm_dir}/cecp-${slug}.conf" children
+  # Sites with resource limits run their pool under their own FPM master (cecp-php-fpm@SLUG).
+  if [[ "$(site_json_get_or "$domain" php_isolated false)" == "True" ]]; then
+    pool_file="$FPM_ISOLATED_DIR/${slug}.pool.conf"
+    limits_write_master "$domain"
+  else
+    rm -f "$FPM_ISOLATED_DIR/${slug}.conf" "$FPM_ISOLATED_DIR/${slug}.pool.conf"
+  fi
+  mkdir -p "$(dirname "$pool_file")"
+  children="$(php_cfg_get "$domain" pm_max_children)"
+  [[ "$children" == auto ]] && children="$(php_pool_max_children)"
+  template_render "$PANEL_ROOT/templates/php-fpm-pool.conf.tpl" "$pool_file" \
     DOMAIN "$domain" POOL_NAME "$pool_name" SITE_USER "$site_user" DOCROOT "$docroot" \
     SITE_HOME "/home/${site_user}" PHP_SOCK "$php_sock" PHP_VERSION "$php_ver" \
-    PM_MAX_CHILDREN "$(php_pool_max_children)"
+    PM_MAX_CHILDREN "$children" \
+    MEMORY_LIMIT "$(php_cfg_get "$domain" memory_limit)" \
+    POST_MAX_SIZE "$(php_cfg_get "$domain" post_max_size)" \
+    UPLOAD_MAX_FILESIZE "$(php_cfg_get "$domain" upload_max_filesize)" \
+    MAX_EXECUTION_TIME "$(php_cfg_get "$domain" max_execution_time)" \
+    MAX_INPUT_TIME "$(php_cfg_get "$domain" max_input_time)" \
+    MAX_INPUT_VARS "$(php_cfg_get "$domain" max_input_vars)"
 }
 
 # Re-apply current templates (vhost + pool) to an existing site, with nginx rollback on error.
@@ -258,6 +345,11 @@ site_rebuild_vhost() {
   site_render_pool "$domain"
   site_render_vhost "$domain"
   php_fpm_reload_all
+  if [[ "$(site_json_get_or "$domain" php_isolated false)" == "True" ]]; then
+    systemctl enable --now "cecp-php-fpm@$(domain_slug "$domain").service" >/dev/null 2>&1 \
+      || panel_log "WARN: cecp-php-fpm@$(domain_slug "$domain") did not start (journalctl -u cecp-php-fpm@$(domain_slug "$domain"))"
+    php_fpm_fix_socket_owner
+  fi
   nginx_test_and_reload || panel_die "nginx rejected the rebuilt vhost for $domain (config rolled back)"
   panel_log "Rebuilt vhost + pool: $domain"
 }
@@ -394,7 +486,7 @@ EOF
 
   # Default: bật backup tự động (cron daily + retention) và backup lần đầu cho site mới.
   # An toàn — bỏ qua nếu Drive chưa kết nối, không làm hỏng việc tạo site.
-  if declare -F backup_autoenable_for_new_site >/dev/null 2>&1; then
+  if [[ "${CECP_NO_AUTOBACKUP:-0}" != 1 ]] && declare -F backup_autoenable_for_new_site >/dev/null 2>&1; then
     backup_autoenable_for_new_site "$domain" || true
   fi
 }
@@ -455,7 +547,17 @@ site_remove() {
     systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
   done
   systemctl disable --now "cecp-purge@${slug}.path" >/dev/null 2>&1 || true
-  rm -f "/etc/cron.d/cecp-wp-${slug}" "${ADMIN_AUTH_DIR}/${slug}.htpasswd"
+  if [[ "$(site_json_get_or "$domain" php_isolated false)" == "True" ]]; then
+    systemctl disable --now "cecp-php-fpm@${slug}.service" >/dev/null 2>&1 || true
+    rm -rf "/etc/systemd/system/cecp-php-fpm@${slug}.service.d"
+    rm -f "$FPM_ISOLATED_DIR/${slug}.conf" "$FPM_ISOLATED_DIR/${slug}.pool.conf"
+    systemctl daemon-reload
+  fi
+  # A staging copy points at its parent (and the parent at it): keep both metas consistent.
+  local parent
+  parent="$(site_json_get_or "$domain" staging_of "")"
+  [[ -n "$parent" && -f "$(site_meta_path "$parent")" ]] && site_json_set "$parent" staging_site ""
+  rm -f "/etc/cron.d/cecp-wp-${slug}" "${ADMIN_AUTH_DIR}/${slug}.htpasswd" "${ADMIN_AUTH_DIR}/${slug}-site.htpasswd"
   if [[ -f "/etc/ssh/sshd_config.d/cecp-${site_user}.conf" ]]; then
     rm -f "/etc/ssh/sshd_config.d/cecp-${site_user}.conf"
     sshd_test_and_reload || panel_log "WARN: sshd -t failed after removing SFTP drop-in — check manually"
@@ -493,39 +595,74 @@ site_duplicate() {
   validate_domain "$dst"
   [[ -f "$(site_meta_path "$src")" ]] || panel_die "Source not found: $src"
   [[ ! -f "$(site_meta_path "$dst")" ]] || panel_die "Target exists: $dst"
-  local src_doc
+  local src_doc src_wp
   src_doc="$(site_json_get "$src" docroot)"
-  site_add "$dst" n
-  local dst_doc src_cnf dst_cnf
+  src_wp="$(wp_site_is_wordpress "$src" 2>/dev/null || echo False)"
+  # No first backup of the still-empty copy (site_add would take one).
+  CECP_NO_AUTOBACKUP=1 site_add "$dst" n
+  local dst_doc dst_cnf
   dst_doc="$(site_json_get "$dst" docroot)"
   panel_log "Copying files $src → $dst ..."
-  rsync -a "$src_doc/" "$dst_doc/" 2>/dev/null || cp -a "$src_doc/." "$dst_doc/"
+  rsync -a --delete "$src_doc/" "$dst_doc/" 2>/dev/null || cp -a "$src_doc/." "$dst_doc/"
   chown -R "$(site_json_get "$dst" site_user):" "$dst_doc"
   # The auto-purge config names the source site's queue; enable it on the copy separately.
   rm -f "$dst_doc/wp-content/mu-plugins/cecp-cache-purge.php" "$dst_doc/wp-content/mu-plugins/cecp-cache-purge.json"
+  if [[ "$src_wp" == "True" ]]; then
+    # The copied wp-config.php still holds the SOURCE database credentials: without this the
+    # copy (and the search-replace below) would write to the source site's database.
+    site_json_set "$dst" wordpress true
+    site_wp_config_sync "$dst"
+  fi
   panel_log "Copying database $(site_json_get "$src" db_name) → $(site_json_get "$dst" db_name) ..."
-  src_cnf="$(mysql_client_cnf "$(site_json_get "$src" db_user)" "$(site_json_get "$src" db_pass)")"
+  # Dump as root (routines/triggers of any definer), import as the copy's own DB user so the
+  # dump can only land in its database; DEFINER clauses would need SUPER.
   dst_cnf="$(mysql_client_cnf "$(site_json_get "$dst" db_user)" "$(site_json_get "$dst" db_pass)")"
-  mysqldump --defaults-extra-file="$src_cnf" "$(site_json_get "$src" db_name)" \
+  mysqldump --single-transaction --quick --routines --triggers "$(site_json_get "$src" db_name)" \
+    | sed -E 's/DEFINER=`[^`]+`@`[^`]+`//g' \
     | mysql --defaults-extra-file="$dst_cnf" "$(site_json_get "$dst" db_name)"
-  rm -f "$src_cnf" "$dst_cnf"
+  rm -f "$dst_cnf"
   selinux_fixup_path "$dst_doc"
-  if [[ -n "${3:-}" && -f "${3:-}" ]]; then
-    site_wordpress_clone_fixup "$src" "$dst" "$3"
-  elif [[ "$(wp_site_is_wordpress "$dst" 2>/dev/null || echo False)" == "True" ]]; then
-    site_wordpress_clone_fixup "$src" "$dst" ""
+  if [[ "$src_wp" == "True" ]]; then
+    # Same for Redis: the copy must get its own ACL user and key prefix, not the source's.
+    if [[ "$(site_json_get_or "$src" redis false)" == "True" ]] || grep -q "WP_REDIS_" "$dst_doc/wp-config.php" 2>/dev/null; then
+      optimize_redis_wp "$dst" || panel_log "WARN: Redis object cache for $dst could not be configured"
+    fi
+    site_wordpress_clone_fixup "$src" "$dst" "${3:-}"
+    [[ "${CECP_DUPLICATE_NO_CRON:-0}" == 1 ]] || wp_install_system_cron "$dst"
   fi
   panel_log "Duplicated $src → $dst"
 }
 
+# Set siteurl/home and verify them (WP-CLI calls it an error when the value is unchanged).
+site_wp_set_urls() {
+  local domain="$1" url="$2" k
+  for k in siteurl home; do
+    [[ "$(wp_site_exec "$domain" option get "$k" 2>/dev/null)" == "$url" ]] && continue
+    wp_site_exec "$domain" option update "$k" "$url" >/dev/null 2>&1 || true
+    wp_site_exec "$domain" cache flush >/dev/null 2>&1 || true
+    [[ "$(wp_site_exec "$domain" option get "$k" 2>/dev/null)" == "$url" ]] \
+      || panel_die "Could not set WordPress $k of $domain to $url"
+  done
+}
+
+# Rewrite URLs of SRC to DST inside DST's database. The scheme follows DST's certificate
+# (a copy without HTTPS must not point at https://), JSON-escaped URLs (page builders) too.
 site_wordpress_clone_fixup() {
-  local src="${1,,}" dst="${2,,}" repl_file="${3:-}"
+  local src="${1,,}" dst="${2,,}" repl_file="${3:-}" scheme=http
   [[ "$(wp_site_is_wordpress "$dst" 2>/dev/null || echo False)" == "True" ]] || return 0
-  panel_log "WordPress URL/search-replace for $dst ..."
-  wp_site_exec "$dst" search-replace "https://${src}" "https://${dst}" --all-tables --skip-columns-guid 2>/dev/null || true
-  wp_site_exec "$dst" search-replace "http://${src}" "https://${dst}" --all-tables 2>/dev/null || true
-  wp_site_exec "$dst" option update siteurl "https://${dst}" 2>/dev/null || true
-  wp_site_exec "$dst" option update home "https://${dst}" 2>/dev/null || true
+  site_cert_dir "$dst" >/dev/null && scheme=https
+  panel_log "WordPress URL/search-replace for $dst ($scheme) ..."
+  wp_site_exec "$dst" search-replace "//${src}" "//${dst}" --all-tables --skip-columns=guid --quiet
+  wp_site_exec "$dst" search-replace "\\/\\/${src}" "\\/\\/${dst}" --all-tables --skip-columns=guid --quiet 2>/dev/null || true
+  if [[ "$scheme" == https ]]; then
+    wp_site_exec "$dst" search-replace "http://${dst}" "https://${dst}" --all-tables --skip-columns=guid --quiet 2>/dev/null || true
+  else
+    wp_site_exec "$dst" search-replace "https://${dst}" "http://${dst}" --all-tables --skip-columns=guid --quiet 2>/dev/null || true
+  fi
+  # search-replace writes SQL directly: a persistent object cache (Redis) still holds the old
+  # options, and update_option against it "fails" (0 rows changed). Flush first.
+  wp_site_exec "$dst" cache flush >/dev/null 2>&1 || true
+  site_wp_set_urls "$dst" "${scheme}://${dst}"
   if [[ -n "$repl_file" && -f "$repl_file" ]]; then
     local line old new
     while IFS= read -r line; do

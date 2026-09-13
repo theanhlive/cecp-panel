@@ -52,14 +52,128 @@ php_install_version() {
   ver="$(php_version_normalize "${1:-}")"
   require_root
   php_ensure_remi
-  local pfx
+  local pfx ext
   pfx="$(php_remipkg_prefix "$ver")"
   panel_log "Installing Remi PHP ${ver} (${pfx}) ..."
-  dnf -y install "${pfx}-php-fpm" "${pfx}-php-cli" "${pfx}-php-mysqlnd" \
-    "${pfx}-php-gd" "${pfx}-php-xml" "${pfx}-php-mbstring" "${pfx}-php-json" \
-    "${pfx}-php-opcache" 2>/dev/null || dnf -y install "${pfx}-php-fpm" "${pfx}-php-cli" "${pfx}-php-mysqlnd"
+  dnf -y install "${pfx}-php-fpm" "${pfx}-php-cli" "${pfx}-php-mysqlnd" "${pfx}-php-opcache" \
+    || panel_die "Could not install PHP ${ver} from Remi"
+  # Extensions WordPress/WooCommerce use; one by one so a missing package (json is built in
+  # from PHP 8, redis is pecl-redis5/6 depending on the version) does not abort the rest.
+  for ext in gd xml mbstring intl zip bcmath soap sodium pecl-imagick-im7 pecl-redis6 pecl-redis5; do
+    dnf -y -q install "${pfx}-php-${ext}" >/dev/null 2>&1 || true
+  done
   systemctl enable --now "${pfx}-php-fpm" 2>/dev/null || true
   panel_log "PHP ${ver} installed. Service: ${pfx}-php-fpm"
+}
+
+# ---------------------------------------------------------------------------
+# Per-site PHP settings (cecp-panel php config). Stored in site meta as php_<key>.
+# ---------------------------------------------------------------------------
+PHP_CFG_KEYS="memory_limit upload_max_filesize post_max_size max_execution_time max_input_time max_input_vars pm_max_children"
+
+php_cfg_default() {
+  case "$1" in
+    memory_limit) echo 256M ;;
+    upload_max_filesize|post_max_size) echo 64M ;;
+    max_execution_time|max_input_time) echo 120 ;;
+    max_input_vars) echo 3000 ;;
+    pm_max_children) echo auto ;;
+  esac
+}
+
+php_cfg_get() {
+  local v
+  v="$(site_json_get_or "$1" "php_$2" "")"
+  echo "${v:-$(php_cfg_default "$2")}"
+}
+
+# "512M" / "2G" -> megabytes
+php_cfg_mb() {
+  local v="${1^^}"
+  [[ "$v" =~ ^([0-9]{1,5})([MG])$ ]] || { echo 64; return 0; }
+  if [[ "${BASH_REMATCH[2]}" == G ]]; then echo $(( BASH_REMATCH[1] * 1024 )); else echo "${BASH_REMATCH[1]}"; fi
+}
+
+# Normalize + range-check one value; prints the value to store.
+php_cfg_validate() {
+  local key="$1" val="$2" mb
+  case "$key" in
+    memory_limit|upload_max_filesize|post_max_size)
+      [[ "${val^^}" =~ ^[0-9]{1,5}[MG]$ ]] || panel_die "$key: use a size like 256M or 1G"
+      mb="$(php_cfg_mb "$val")"
+      if [[ "$key" == memory_limit ]]; then
+        (( mb >= 64 && mb <= 8192 )) || panel_die "memory_limit must be 64M..8G"
+      else
+        (( mb >= 2 && mb <= 4096 )) || panel_die "$key must be 2M..4G"
+      fi
+      echo "${mb}M"
+      ;;
+    max_execution_time|max_input_time)
+      [[ "$val" =~ ^[0-9]{1,4}$ ]] && (( val >= 10 && val <= 3600 )) || panel_die "$key must be 10..3600 (seconds)"
+      echo "$val"
+      ;;
+    max_input_vars)
+      [[ "$val" =~ ^[0-9]{1,6}$ ]] && (( val >= 1000 && val <= 100000 )) || panel_die "max_input_vars must be 1000..100000"
+      echo "$val"
+      ;;
+    pm_max_children)
+      [[ "$val" == auto ]] && { echo auto; return 0; }
+      [[ "$val" =~ ^[0-9]{1,3}$ ]] && (( val >= 2 && val <= 256 )) || panel_die "pm_max_children must be 2..256 or auto"
+      echo "$val"
+      ;;
+    *) panel_die "Unknown setting '$key' (allowed: ${PHP_CFG_KEYS// /, })" ;;
+  esac
+}
+
+# cecp-panel php config DOMAIN [key=value ...] | DOMAIN --reset [key ...]
+php_config() {
+  local domain="${1:-}"
+  shift || true
+  domain="${domain,,}"
+  require_root
+  validate_domain "$domain"
+  [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
+  local kv key val k
+  local -a sets=()
+  if [[ $# -eq 0 ]]; then
+    echo "=== PHP settings: $domain (PHP $(site_json_get_or "$domain" php_version 80)) ==="
+    for k in $PHP_CFG_KEYS; do
+      val="$(site_json_get_or "$domain" "php_$k" "")"
+      printf '  %-20s %-8s %s\n' "$k" "$(php_cfg_get "$domain" "$k")" "$([[ -n "$val" ]] && echo "(custom)" || echo "(default)")"
+    done
+    [[ "$(php_cfg_get "$domain" pm_max_children)" == auto ]] && echo "  (pm_max_children auto = $(php_pool_max_children) on this server)"
+    return 0
+  fi
+  if [[ "$1" == "--reset" ]]; then
+    shift
+    local -a keys=("$@")
+    # shellcheck disable=SC2206  # default: every key (space-separated list)
+    (( ${#keys[@]} )) || keys=($PHP_CFG_KEYS)
+    for k in "${keys[@]}"; do
+      [[ " $PHP_CFG_KEYS " == *" $k "* ]] || panel_die "Unknown setting '$k'"
+      sets+=("php_$k" "")
+    done
+  else
+    for kv in "$@"; do
+      [[ "$kv" == *=* ]] || panel_die "Use key=value (e.g. memory_limit=512M)"
+      key="${kv%%=*}"
+      val="$(php_cfg_validate "$key" "${kv#*=}")"
+      sets+=("php_$key" "$val")
+    done
+  fi
+  site_json_set "$domain" "${sets[@]}"
+  # post_max_size must hold the largest upload, or PHP drops the whole request body.
+  if (( $(php_cfg_mb "$(php_cfg_get "$domain" post_max_size)") < $(php_cfg_mb "$(php_cfg_get "$domain" upload_max_filesize)") )); then
+    site_json_set "$domain" php_post_max_size "$(php_cfg_get "$domain" upload_max_filesize)"
+    panel_log "post_max_size raised to $(php_cfg_get "$domain" post_max_size) (must be >= upload_max_filesize)"
+  fi
+  site_render_pool "$domain"
+  site_render_vhost "$domain"
+  php_fpm_reload_all
+  php_fpm_fix_socket_owner
+  nginx_test_and_reload || panel_die "nginx rejected the vhost for $domain (config rolled back)"
+  panel_log "PHP settings updated for $domain"
+  php_config "$domain"
 }
 
 php_fpm_d_dir() {
@@ -96,6 +210,18 @@ php_set_site_version() {
   fi
   local php_sock
   php_sock="$(php_fpm_sock_for_version "$norm" "$(site_json_get "$domain" pool_name)")"
+  if [[ "$(site_json_get_or "$domain" php_isolated false)" == "True" ]]; then
+    # Own FPM master (site limits): same socket, new binary — restart that service only.
+    site_json_set "$domain" php_version "$norm"
+    site_render_pool "$domain"
+    site_render_vhost "$domain"
+    systemctl restart "cecp-php-fpm@$(domain_slug "$domain").service" \
+      || panel_die "PHP ${norm} did not start for $domain (journalctl -u cecp-php-fpm@$(domain_slug "$domain"))"
+    php_fpm_fix_socket_owner
+    nginx_test_and_reload || panel_die "nginx rejected the vhost for $domain (config rolled back)"
+    panel_log "Site $domain now uses PHP ${norm} (isolated FPM)"
+    return 0
+  fi
   site_json_set "$domain" php_version "$norm" php_sock "$php_sock"
   site_render_pool "$domain"
   site_render_vhost "$domain"
