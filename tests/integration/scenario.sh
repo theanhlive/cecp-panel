@@ -23,7 +23,7 @@ D2="second.test"; SU2="site_second_test"
 DOCROOT="/home/$SU/public_html"
 DROPIN="/etc/ssh/sshd_config.d/cecp-${SU}.conf"
 VERSION="$(sed -nE 's/^CECP_PANEL_VERSION="\$\{CECP_PANEL_VERSION:-([^}]+)\}"$/\1/p' /opt/cecp-panel/lib/common.sh)"
-for h in "$D" "$D2" a-b.test a.b.test "shop.$D"; do
+for h in "$D" "$D2" a-b.test a.b.test "shop.$D" "staging.$D"; do
   grep -q " $h\$" /etc/hosts || echo "127.0.0.1 $h" >>/etc/hosts
 done
 
@@ -562,6 +562,159 @@ check "site remove shop.$D" cecp-panel site remove "shop.$D"
 unset CECP_CERTBOT
 kill "$MOCK" 2>/dev/null
 rm -f /etc/cecp-panel/credentials.env
+
+meta_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "/var/lib/cecp-panel/sites/$1.json" "$2"; }
+POOL="/etc/php-fpm.d/cecp-$SLUG.conf"
+VHOST="/etc/nginx/conf.d/cecp-$SLUG.conf"
+runuser -u "$SU" -- bash -c "printf '%s' '<?php echo ini_get(\"memory_limit\"), \"|\", ini_get(\"upload_max_filesize\"), \"|\", ini_get(\"max_input_vars\");' >$DOCROOT/cecp-ini.php"
+php_ini() { curl -s "http://$D/cecp-ini.php?r=$RANDOM"; }
+
+echo "=== Per-site PHP settings ==="
+check "php config shows defaults" bash -c "cecp-panel php config $D | grep -q 'memory_limit *256M *(default)'"
+check "php config sets values" cecp-panel php config "$D" memory_limit=512M upload_max_filesize=128M max_execution_time=300 max_input_vars=5000
+check "pool has the values; post_max_size raised to the upload size" \
+  bash -c "grep -q 'memory_limit\] = 512M' $POOL && grep -q 'upload_max_filesize\] = 128M' $POOL && grep -q 'post_max_size\] = 128M' $POOL && grep -q 'max_input_vars\] = 5000' $POOL"
+check "nginx body size and FastCGI timeout follow PHP" \
+  bash -c "grep -q 'client_max_body_size 129m;' $VHOST && grep -q 'fastcgi_read_timeout 330s;' $VHOST"
+settle
+check "PHP sees the new values" test "$(php_ini)" = "512M|128M|5000"
+head -c 5000000 /dev/zero >/tmp/5m.bin
+check "5 MB upload is not refused by nginx (was 413 with the 1m default)" \
+  bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' -F f=@/tmp/5m.bin http://$D/?upload-probe)\" != 413 ]"
+check "invalid PHP settings rejected" bash -c "! cecp-panel php config $D memory_limit=99T && ! cecp-panel php config $D foo=1 && ! cecp-panel php config $D max_execution_time=5 && ! cecp-panel php config $D 'memory_limit=512M;id'"
+check "php config --reset" bash -c "cecp-panel php config $D --reset memory_limit >/dev/null && grep -q 'memory_limit\] = 256M' $POOL"
+
+echo "=== Per-site resource limits (own PHP-FPM) ==="
+check "site limits --cpu 50 --mem 768M --tasks 128" cecp-panel site limits "$D" --cpu 50 --mem 768M --tasks 128
+UNIT="cecp-php-fpm@$SLUG.service"
+check "limited PHP-FPM unit active" systemctl is-active --quiet "$UNIT"
+check "systemd carries the limits" \
+  bash -c "p=\$(systemctl show -p CPUQuotaPerSecUSec -p MemoryMax -p TasksMax $UNIT); echo \"\$p\"; grep -qx 'CPUQuotaPerSecUSec=500ms' <<<\"\$p\" && grep -qx 'MemoryMax=805306368' <<<\"\$p\" && grep -qx 'TasksMax=128' <<<\"\$p\""
+check "vhost uses the unit's socket; pool left the shared FPM" \
+  bash -c "grep -q 'unix:/run/cecp-php-fpm/$SLUG/php.sock' $VHOST && [ ! -e $POOL ]"
+check "site serves WordPress through its own PHP-FPM" serves_wp
+check "the site's PHP workers run in the limited cgroup" \
+  bash -c "php_pid=\$(pgrep -u $SU -f 'pool $SLUG' | head -1); [ -n \"\$php_pid\" ] && grep -q 'cecp-php-fpm@$SLUG.service' /proc/\$php_pid/cgroup"
+systemctl restart php-fpm
+settle
+check "restarting the shared PHP-FPM does not cut the limited site off" serves_wp
+check "other sites unaffected" serves_wp "$D2"
+check "php config applies to the limited site" bash -c "cecp-panel php config $D memory_limit=384M >/dev/null && sleep 1.5 && [ \"\$(curl -s http://$D/cecp-ini.php?r=\$RANDOM)\" = '384M|128M|5000' ]"
+check "site limits show" bash -c "cecp-panel site limits $D show | grep -q 'CPU 50% of one core'"
+check "rebuild-vhost keeps the limited site on its own PHP-FPM" \
+  bash -c "cecp-panel site rebuild-vhost $D >/dev/null && systemctl is-active --quiet $UNIT && [ ! -e $POOL ] && sleep 1.5 && curl -s http://$D/ | grep -q wp-content"
+check "invalid limits rejected" bash -c "! cecp-panel site limits $D --cpu 5 && ! cecp-panel site limits $D --mem 1T && ! cecp-panel site limits $D --tasks x"
+check "monitor watches the limited PHP-FPM" bash -c "cecp-panel monitor run >/dev/null 2>&1; cecp-panel monitor status | grep -q 'service:cecp-php-fpm@$SLUG'"
+check "site limits off" cecp-panel site limits "$D" off
+settle
+check "back on the shared PHP-FPM" bash -c "grep -q 'unix:/run/php-fpm/$SLUG.sock' $VHOST && [ -e $POOL ] && ! systemctl is-active --quiet $UNIT"
+check "site serves WordPress after limits off" serves_wp
+
+echo "=== Staging ==="
+SD="staging.$D"; SSU="site_staging_${SLUG}"; SDOC="/home/$SSU/public_html"
+wp_s() { runuser -u "$SSU" -- php /usr/local/bin/wp --path="$SDOC" "$@"; }
+wp_d option update blogname "Live Name" >/dev/null
+check "site staging $D" cecp-panel site staging "$D"
+check "staging linked to its live site" test "$(meta_of "$SD" staging_of) $(meta_of "$D" staging_site)" = "$D $SD"
+check "staging wp-config uses the staging database (not live)" \
+  bash -c "grep -q \"'DB_NAME', 'db_staging_${SLUG}'\" $SDOC/wp-config.php && ! grep -q \"'db_${SLUG}'\" $SDOC/wp-config.php"
+check "staging has its own Redis ACL user" bash -c "grep -q \"cecp_staging_${SLUG}\" $SDOC/wp-config.php && ! grep -q \"'cecp_${SLUG}'\" $SDOC/wp-config.php"
+check "staging URLs rewritten, live untouched" test "$(wp_s option get home) $(wp_d option get home)" = "http://$SD http://$D"
+SPASS="$(meta_of "$SD" site_auth_pass)"
+check "staging asks for a password (401)" test "$(status_of "http://$SD/")" = 401
+check "staging serves WordPress with the password, marked noindex" \
+  bash -c "curl -s -u 'staging:$SPASS' http://$SD/ | grep -q wp-content && curl -sI -u 'staging:$SPASS' http://$SD/ | grep -qi '^x-robots-tag: noindex'"
+check "live site is not noindex" bash -c "! curl -sI http://$D/ | grep -qi x-robots-tag"
+check "staging guard mu-plugin (root-owned) blocks e-mail" \
+  bash -c "[ \"\$(stat -c %U $SDOC/wp-content/mu-plugins/cecp-staging.php)\" = root ] && [ \"\$(runuser -u $SSU -- php /usr/local/bin/wp --path=$SDOC eval 'var_export(wp_mail(\"x@example.com\", \"t\", \"b\"));')\" = false ]"
+check "monitor passes staging basic auth" bash -c "cecp-panel monitor run >/dev/null 2>&1; cecp-panel monitor status | grep 'site:$SD' | grep -q OK"
+wp_s option update blogname "From Staging" >/dev/null
+runuser -u "$SSU" -- bash -c "mkdir -p $SDOC/wp-content/uploads && echo staging-only >$SDOC/wp-content/uploads/staging-only.txt"
+check "staging-push --dry-run changes nothing" \
+  bash -c "cecp-panel site staging-push $D --dry-run | grep -q 'will be LOST' && [ \"\$(runuser -u $SU -- php /usr/local/bin/wp --path=$DOCROOT option get blogname)\" = 'Live Name' ]"
+check "staging-push refuses without --yes when not interactive" bash -c "! cecp-panel site staging-push $D </dev/null"
+check "staging-push --yes" cecp-panel site staging-push "$D" --yes
+check "live has the staging content" test "$(wp_d option get blogname)" = "From Staging"
+check "live keeps its own URLs, DB credentials and search visibility" \
+  bash -c "[ \"\$(runuser -u $SU -- php /usr/local/bin/wp --path=$DOCROOT option get home)\" = 'http://$D' ] && grep -q \"'DB_NAME', 'db_${SLUG}'\" $DOCROOT/wp-config.php && [ \"\$(runuser -u $SU -- php /usr/local/bin/wp --path=$DOCROOT option get blog_public)\" = 1 ]"
+check "staging files arrived, staging guard did not" \
+  bash -c "[ -f $DOCROOT/wp-content/uploads/staging-only.txt ] && [ ! -e $DOCROOT/wp-content/mu-plugins/cecp-staging.php ] && [ -f $DOCROOT/wp-content/mu-plugins/cecp-cache-purge.php ]"
+check "live serves WordPress after the push" serves_wp
+cp -a "$SDOC/index.php" /tmp/staging-index.php
+printf '<?php http_response_code(500); exit;\n' >"$SDOC/index.php"
+check "a broken push is rolled back" bash -c "! cecp-panel site staging-push $D --files-only --yes"
+check "live answers after the rolled-back push" serves_wp
+staging_link_cleared() { cecp-panel site remove "$SD" && [ -z "$(meta_of "$D" staging_site)" ]; }
+check "site remove staging clears the link" staging_link_cleared
+
+echo "=== Safe WordPress updates ==="
+check "precondition: old plugin installed (hello-dolly 1.6)" wp_d plugin install hello-dolly --version=1.6 --force --activate
+check "wp update --dry-run lists the update" bash -c "cecp-panel wp update $D --dry-run | grep -q 'hello-dolly 1.6 ->'"
+check "wp update" cecp-panel wp update "$D"
+plugin_updated() { [ "$(wp_d plugin get hello-dolly --field=version)" != 1.6 ] && [ "$(meta_of "$D" wp_last_update_result)" = ok ]; }
+check "plugin updated, result recorded" plugin_updated
+check "site serves WordPress after the update" serves_wp
+wp_d plugin install hello-dolly --version=1.6 --force >/dev/null 2>&1
+# A mu-plugin that turns fatal once hello-dolly is newer than 1.6: an update that breaks the site.
+runuser -u "$SU" -- bash -c "cat >$DOCROOT/wp-content/mu-plugins/zz-break.php" <<'PHP'
+<?php
+$f = WP_PLUGIN_DIR . '/hello-dolly/hello.php';
+if (is_file($f) && preg_match('/Version:\s*([0-9.]+)/', (string) file_get_contents($f), $m) && version_compare($m[1], '1.6', '>')) {
+    throw new Error('cecp test: incompatible plugin update');
+}
+PHP
+check "an update that breaks WordPress is rolled back" bash -c "! cecp-panel wp update $D"
+check "plugin is back on the old version" test "$(wp_d plugin get hello-dolly --field=version)" = 1.6
+check "site serves WordPress after the rollback" serves_wp
+check "rollback recorded" bash -c "cecp-panel wp auto-update $D status | grep -q 'rolled_back'"
+rm -f "$DOCROOT/wp-content/mu-plugins/zz-break.php"
+check "wp rollback (manual undo) works" bash -c "cecp-panel wp rollback $D --yes && sleep 1 && curl -s http://$D/ | grep -q wp-content"
+rm -f "$DOCROOT/wp-content/mu-plugins/zz-break.php"  # the undo brought back the pre-update files
+check "wp auto-update on installs the daily job" \
+  bash -c "cecp-panel wp auto-update $D on --exclude akismet && grep -q 'wp update --scheduled' /etc/cron.d/cecp-wp-update"
+check "wp auto-update rejects bad exclusions" bash -c "! cecp-panel wp auto-update $D on --exclude 'a;id'"
+
+echo "=== status --json ==="
+status_json_ok() {
+  cecp-panel status --json >/tmp/status.json || return 1
+  python3 - "$D" /tmp/status.json <<'PY'
+import json, sys
+dom, path = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+s = next(x for x in d["sites"] if x["domain"] == dom)
+assert d["schema"] == 2 and dom in d["domains_hosted"] and d["services"]["nginx"] == "active", d
+assert s["cache"]["ttl"] == "1h" and s["cache"]["auto_purge"] is True, s
+assert s["disk_mb"] and s["disk_mb"] > 0 and s["db_mb"] is not None and s["wp"]["auto_update"] is True, s
+assert s["php_version"] == "80" and s["limits"] is None, s
+PY
+}
+heartbeat_ok() {
+  cecp-panel agent install >/dev/null 2>&1
+  python3 - /var/lib/cecp-panel/agent/heartbeat.json <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["schema"] == 2 and d["sites"], d
+PY
+}
+check "status --json describes sites" status_json_ok
+check "agent heartbeat uses the status document" heartbeat_ok
+
+echo "=== Database tools ==="
+check "db export" bash -c "f=\$(cecp-panel db export $D | tail -1) && [ \"\$(stat -c %a \$f)\" = 600 ] && gzip -t \$f && zcat \$f | grep -q 'CREATE TABLE .wp_options.'"
+check "db export refuses a web-reachable path" bash -c "! cecp-panel db export $D $DOCROOT/dump.sql.gz && [ ! -e $DOCROOT/dump.sql.gz ]"
+check "db size lists the site" bash -c "cecp-panel db size | grep -q '^$D '"
+EXPORT="$(find /var/lib/cecp-panel/db-exports -name "${SLUG}-*.sql.gz" ! -name '*before-import*' -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2)"
+wp_d option update blogname "Changed after export" >/dev/null
+check "db import --yes restores the exported data" \
+  bash -c "cecp-panel db import $D $EXPORT --yes && [ \"\$(runuser -u $SU -- php /usr/local/bin/wp --path=$DOCROOT option get blogname)\" = 'From Staging' ]"
+printf 'DROP DATABASE db_second_test;\n' >/tmp/evil.sql
+check "a dump touching another site's database fails (runs as the site DB user)" bash -c "! cecp-panel db import $D /tmp/evil.sql --yes"
+check "the other site's database survived" mysql -e 'USE db_second_test'
+check "site restored after the failed import" serves_wp
+check "slow query log on" cecp-panel db slow-log on 0.1
+mysql -e 'SELECT SLEEP(0.3)' >/dev/null
+check "slow-report shows the slow query" bash -c "cecp-panel db slow-report | grep -qi sleep"
+check "slow query log off" cecp-panel db slow-log off
 
 echo "=== site remove ==="
 check "site remove $D2" cecp-panel site remove "$D2"
