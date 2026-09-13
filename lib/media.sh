@@ -254,7 +254,7 @@ media_status() {
   if [[ -z "$domain" ]]; then
     echo "=== Media optimize (all sites) ==="
     shopt -s nullglob
-    local f d
+    local f
     local any=0
     for f in "$SITES_DIR"/*.json; do
       [[ -f "$f" ]] || continue

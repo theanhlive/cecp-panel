@@ -90,7 +90,7 @@ php_set_site_version() {
   if [[ "$norm" != "80" ]]; then
     php_install_version "$norm"
   fi
-  local meta slug pool_name site_user docroot php_sock old_slug
+  local meta slug pool_name site_user docroot php_sock
   meta="$(site_meta_path "$domain")"
   slug="$(domain_slug "$domain")"
   pool_name="$(python3 -c "import json; print(json.load(open('$meta'))['pool_name'])")"

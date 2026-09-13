@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Shared helpers for CECP Panel (sourced, not executed directly)
+# shellcheck disable=SC2034  # globals consumed by other lib files
 set -euo pipefail
 
 CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.5.0-beta}"
@@ -116,7 +117,8 @@ nginx_test_and_reload() {
 
   if [[ -d "$NGINX_LKG_DIR/conf.d" ]]; then
     panel_log "Rolling back /etc/nginx/conf.d to last known-good snapshot ..."
-    local quarantine="/var/lib/cecp-panel/nginx-broken-$(date +%Y%m%d_%H%M%S)"
+    local quarantine
+    quarantine="/var/lib/cecp-panel/nginx-broken-$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$quarantine"
     cp -a /etc/nginx/conf.d "$quarantine/conf.d" 2>/dev/null || true
     rm -rf /etc/nginx/conf.d

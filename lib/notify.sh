@@ -139,8 +139,6 @@ notify_health() {
   notify_check_disk
   # fail2ban banned count spike (informational)
   if command -v fail2ban-client &>/dev/null; then
-    local banned
-    banned="$(fail2ban-client status 2>/dev/null | grep -c 'Jail list' || true)"
     echo "fail2ban jails configured: check status for bans"
   fi
 }

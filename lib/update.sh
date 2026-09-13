@@ -18,6 +18,7 @@ update_save_mirror() {
 
 update_load_mirror() {
   CECP_PANEL_RAW_BASE=""
+  # shellcheck source=/dev/null
   [[ -f "$PANEL_ENV" ]] && source "$PANEL_ENV"
   CECP_PANEL_RAW_BASE="${CECP_PANEL_RAW_BASE:-${CECP_PANEL_BUNDLE_URL:-}}"
 }

@@ -6,8 +6,10 @@ SWAP_FILE="/swapfile"
 MAINTAIN_CRON="/etc/cron.d/cecp-system-maintain"
 
 system_load_config() {
-  [[ -f "$SYSTEM_ENV" ]] && # shellcheck source=/dev/null
+  if [[ -f "$SYSTEM_ENV" ]]; then
+    # shellcheck source=/dev/null
     source "$SYSTEM_ENV"
+  fi
   : "${SWAP_MIN_TOTAL_MB:=512}"
   : "${SWAP_MAX_GB:=4}"
   : "${JOURNAL_RETENTION_DAYS:=7}"
@@ -102,7 +104,7 @@ system_swap_ensure() {
   require_root
   system_ensure_config
   system_load_config
-  local cur_mb rec_gb rec_mb
+  local cur_mb rec_gb
   cur_mb="$(system_swap_total_mb)"
   if [[ "$cur_mb" -ge "$SWAP_MIN_TOTAL_MB" ]]; then
     panel_log "Swap OK: ${cur_mb}MB (min ${SWAP_MIN_TOTAL_MB}MB)"

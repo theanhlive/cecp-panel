@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # ANSI colors — safe when not a TTY
+# shellcheck disable=SC2034  # palette consumed by other lib files
 if [[ -t 1 ]] && [[ "${NO_COLOR:-}" != "1" ]]; then
   C_RESET=$'\033[0m'
   C_BOLD=$'\033[1m'

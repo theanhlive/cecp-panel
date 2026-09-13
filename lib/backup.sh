@@ -183,14 +183,13 @@ backup_setup() {
 backup_stage_site() {
   local domain="$1"
   local meta="$2"
-  local site_user docroot db_name db_user
-  site_user="$(python3 -c "import json; print(json.load(open('$meta'))['site_user'])")"
+  local docroot db_name db_user db_pass stage
   docroot="$(python3 -c "import json; print(json.load(open('$meta'))['docroot'])")"
   db_name="$(python3 -c "import json; print(json.load(open('$meta'))['db_name'])")"
   db_user="$(python3 -c "import json; print(json.load(open('$meta'))['db_user'])")"
   db_pass="$(python3 -c "import json; print(json.load(open('$meta'))['db_pass'])")"
 
-  local stage="$BACKUP_STAGING/$(domain_slug "$domain")-$(date +%Y%m%d_%H%M%S)"
+  stage="$BACKUP_STAGING/$(domain_slug "$domain")-$(date +%Y%m%d_%H%M%S)"
   mkdir -p "$stage/files"
   cp "$(site_meta_path "$domain")" "$stage/site.json"
   mysqldump -u"$db_user" -p"$db_pass" "$db_name" >"$stage/database.sql"

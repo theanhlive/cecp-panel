@@ -34,10 +34,10 @@ die() { echo "[cecp-panel] ERROR: $*" >&2; exit 1; }
 detect_os() {
   if [[ -f /etc/almalinux-release ]]; then
     OS_FAMILY=rhel
-    OS_VERSION="$(rpm -E %{rhel} 2>/dev/null || echo 9)"
+    OS_VERSION="$(rpm -E '%{rhel}' 2>/dev/null || echo 9)"
   elif [[ -f /etc/rocky-release ]]; then
     OS_FAMILY=rhel
-    OS_VERSION="$(rpm -E %{rhel} 2>/dev/null || echo 9)"
+    OS_VERSION="$(rpm -E '%{rhel}' 2>/dev/null || echo 9)"
   elif [[ -f /etc/redhat-release ]] && grep -qi centos /etc/redhat-release 2>/dev/null; then
     OS_FAMILY=rhel
     OS_VERSION="8"

@@ -235,7 +235,8 @@ ssl_fix_for_domain() {
   local has_le=false
   [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]] && has_le=true
 
-  local nginx_ssl_conf="/etc/nginx/conf.d/cecp-$(domain_slug "$domain").conf"
+  local nginx_ssl_conf
+  nginx_ssl_conf="/etc/nginx/conf.d/cecp-$(domain_slug "$domain").conf"
   local nginx_has_ssl=false
   grep -q "listen.*443 ssl" "$nginx_ssl_conf" 2>/dev/null && nginx_has_ssl=true
 
@@ -254,7 +255,7 @@ ssl_fix_for_domain() {
 
   # ── 2. Determine proxy state ──
   if [[ -n "$cf_zone" ]]; then
-    local cf_proxied="" cf_ssl_mode="" cf_record_ip="" cf_record_id=""
+    local cf_proxied="" cf_ssl_mode="" cf_record_ip=""
 
     # Try API first
     if $cf_has_api; then
@@ -262,7 +263,6 @@ ssl_fix_for_domain() {
       cf_proxy_json="$(ssl_cf_get_a_proxy "$domain" "$cf_zone" 2>/dev/null || echo '{}')"
       cf_proxied="$(echo "$cf_proxy_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('proxied', ''))" 2>/dev/null || echo '')"
       cf_record_ip="$(echo "$cf_proxy_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('content', ''))" 2>/dev/null || echo '')"
-      cf_record_id="$(echo "$cf_proxy_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id', ''))" 2>/dev/null || echo '')"
       cf_ssl_json="$(ssl_cf_get_ssl_mode "$cf_zone" 2>/dev/null || echo '{}')"
       cf_ssl_mode="$(echo "$cf_ssl_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('value', ''))" 2>/dev/null || echo '')"
     fi

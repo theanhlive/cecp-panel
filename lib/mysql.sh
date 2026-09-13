@@ -33,7 +33,7 @@ EOF
 }
 
 mysql_create_site_db() {
-  local domain="$1" db_name="$2" db_user="$3" db_pass="$4"
+  local db_name="$2" db_user="$3" db_pass="$4"
   mysql_ensure_running
   mysql -e "CREATE DATABASE IF NOT EXISTS \`${db_name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
   mysql -e "CREATE USER IF NOT EXISTS '${db_user}'@'localhost' IDENTIFIED BY '${db_pass}';"
