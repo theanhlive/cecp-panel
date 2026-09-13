@@ -1,0 +1,368 @@
+#!/usr/bin/env bash
+# CECP Panel — full standalone CLI (LarVPS-style workflow)
+set -euo pipefail
+
+if [[ -L "${BASH_SOURCE[0]}" ]]; then
+  PANEL_ROOT="/opt/cecp-panel"
+elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh" ]]; then
+  PANEL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+  PANEL_ROOT="/opt/cecp-panel"
+fi
+
+# shellcheck source=lib/common.sh
+source "$PANEL_ROOT/lib/common.sh"
+# shellcheck source=/dev/null
+[[ -f "$PANEL_ROOT/lib/colors.sh" ]] && source "$PANEL_ROOT/lib/colors.sh"
+source "$PANEL_ROOT/lib/mysql.sh"
+source "$PANEL_ROOT/lib/ssl.sh"
+source "$PANEL_ROOT/lib/site.sh"
+source "$PANEL_ROOT/lib/backup.sh"
+source "$PANEL_ROOT/lib/dns.sh"
+source "$PANEL_ROOT/lib/security.sh"
+source "$PANEL_ROOT/lib/system.sh"
+source "$PANEL_ROOT/lib/agent.sh"
+source "$PANEL_ROOT/lib/onboard.sh"
+source "$PANEL_ROOT/lib/php_mgr.sh"
+source "$PANEL_ROOT/lib/update.sh"
+source "$PANEL_ROOT/lib/wordpress.sh"
+source "$PANEL_ROOT/lib/optimize.sh"
+source "$PANEL_ROOT/lib/media.sh"
+source "$PANEL_ROOT/lib/notify.sh"
+source "$PANEL_ROOT/lib/cloudflare.sh"
+source "$PANEL_ROOT/lib/modsec.sh"
+source "$PANEL_ROOT/lib/logview.sh"
+source "$PANEL_ROOT/lib/menu.sh"
+
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.5.0-beta}"
+
+usage() {
+  cat <<EOF
+CECP Panel v$CECP_PANEL_VERSION
+
+  cecp-panel                         Interactive menu
+  cecp-panel status                  Rich health status
+
+  cecp-panel site list|add|remove|duplicate|sftp-info|sftp-password
+    site add DOMAIN [--wordpress|--wp] [--php 82] [--ssl] [--redis]
+  cecp-panel ssl list|issue|fix|renew|status|remove
+  cecp-panel dns list|add|point|ssl-mode
+  cecp-panel cf status|purge|purge-url|brotli|cache-level|minify|recommend [args]
+  cecp-panel backup setup|status|run|list|prune|restore|enable-cron|...
+  cecp-panel security fail2ban|fail2ban-full|firewall|ssh|ssh-key-only|ssh-harden
+  cecp-panel security ssh-port|mariadb-bind|apply-production|check|unattended
+  cecp-panel system info|ensure-swap|swap|disk-clean|maintain|tune
+  cecp-panel mysql secure
+  cecp-panel agent install|status
+  cecp-panel onboard
+  cecp-panel php list|install VER|set DOMAIN VER
+  cecp-panel update check|mirror|panel|component|os
+  cecp-panel wp harden|optimize|cron|status DOMAIN
+  cecp-panel optimize site|nginx|redis|redis-wp|mariadb|opcache|kernel|purge|stack|bench|webp|brotli
+  cecp-panel media enable|disable|status|run|run-all|enable-cron|disable-cron
+    media enable DOMAIN [--max-width 1920] [--quality 80] [--no-upload] [--no-cron] [--no-webp]
+    media run DOMAIN [--dry-run] [--limit N]   # only if enabled for that site
+  cecp-panel notify setup|status|test|health|enable-cron|disable-cron
+  cecp-panel modsec status|install|enable|disable|blocking
+  cecp-panel log panel|audit|nginx|php|mysql|fail2ban|notify [DOMAIN] [LINES]
+EOF
+}
+
+site_add_with_flags() {
+  local dom="${1:-}"
+  shift || true
+  [[ -n "$dom" ]] || panel_die "Usage: cecp-panel site add DOMAIN [--wordpress] [--php 82] [--ssl] [--redis]"
+  local wp=n php_ver="" do_ssl=0 do_redis=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --wordpress|--wp) wp=y; shift ;;
+      --php)
+        php_ver="${2:-}"; shift 2 || panel_die "--php requires version (81|82|83)"
+        ;;
+      --php=*) php_ver="${1#--php=}"; shift ;;
+      --ssl) do_ssl=1; shift ;;
+      --redis) do_redis=1; shift ;;
+      *) panel_die "Unknown flag: $1" ;;
+    esac
+  done
+  site_add "$dom" "$wp"
+  if [[ -n "$php_ver" ]]; then
+    php_set_site_version "$dom" "$php_ver"
+  fi
+  if [[ "$do_redis" == "1" ]]; then
+    if [[ "$wp" =~ ^[yY] ]]; then
+      optimize_redis_wp "$dom" || true
+    else
+      panel_log "WARN: --redis ignored (not WordPress)"
+    fi
+  fi
+  if [[ "$do_ssl" == "1" ]]; then
+    ssl_issue_for_domain "$dom" || panel_log "WARN: SSL issue failed for $dom (DNS ready?)"
+  fi
+  panel_log "site add complete: $dom wp=$wp php=${php_ver:-default} ssl=$do_ssl redis=$do_redis"
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  ""|menu) require_root; menu_main ;;
+  status) show_status ;;
+  site)
+    sub="${1:-}"; shift || true
+    require_root
+    case "$sub" in
+      list) site_list ;;
+      list-json) site_list_json ;;
+      add)
+        site_add_with_flags "$@"
+        ;;
+      remove) [[ -n "${1:-}" ]] && site_remove "$1" || panel_die "Usage: cecp-panel site remove DOMAIN" ;;
+      duplicate)
+        [[ -n "${1:-}" && -n "${2:-}" ]] || panel_die "Usage: cecp-panel site duplicate SRC DST [REPLACEMENTS_JSON]"
+        site_duplicate "$1" "$2" "${3:-}"
+        ;;
+      sftp-info) [[ -n "${1:-}" ]] && site_sftp_info "$1" || panel_die "Usage: cecp-panel site sftp-info DOMAIN" ;;
+      sftp-password) [[ -n "${1:-}" ]] && site_sftp_password "$1" "${2:-}" || panel_die "Usage: cecp-panel site sftp-password DOMAIN [PASS]" ;;
+      *) panel_die "Usage: cecp-panel site list|add|remove|duplicate|sftp-info|sftp-password" ;;
+    esac
+    ;;
+  ssl)
+    sub="${1:-}"; shift || true
+    require_root
+    case "$sub" in
+      list) ssl_list ;;
+      issue) [[ -n "${1:-}" ]] && ssl_issue_for_domain "$1" || panel_die "Usage: cecp-panel ssl issue DOMAIN" ;;
+      fix)
+        if [[ "${1:-}" == "--all" ]]; then
+          ssl_fix_all
+        elif [[ -n "${1:-}" ]]; then
+          auto="no"
+          [[ "${2:-}" == "--auto" ]] && auto="yes"
+          ssl_fix_for_domain "$1" "$auto"
+        else
+          panel_die "Usage: cecp-panel ssl fix DOMAIN [--auto] | --all"
+        fi
+        ;;
+      renew) ssl_renew_all ;;
+      status) ssl_status ;;
+      remove) [[ -n "${1:-}" ]] && ssl_remove_for_domain "$1" || panel_die "Usage: cecp-panel ssl remove DOMAIN" ;;
+      *) panel_die "Usage: cecp-panel ssl list|issue|fix|renew|status|remove" ;;
+    esac
+    ;;
+  dns)
+    sub="${1:-}"; shift || true
+    require_root
+    case "$sub" in
+      list) dns_list_a ;;
+      add)
+        [[ -n "${1:-}" && -n "${2:-}" ]] || panel_die "Usage: cecp-panel dns add NAME IP [proxied]"
+        dns_add_a "$1" "$2" "${3:-true}"
+        ;;
+      point) dns_point_site "${1:-}" "${2:-}" "${3:-}" ;;
+      ssl-mode) dns_set_ssl_mode "${1:-}" "${2:-}" ;;
+      *) panel_die "Usage: cecp-panel dns list|add|point|ssl-mode" ;;
+    esac
+    ;;
+  cf|cloudflare)
+    sub="${1:-}"; shift || true
+    require_root
+    case "$sub" in
+      status) cf_status "${1:-}" ;;
+      purge) cf_purge "${1:-all}" ;;
+      purge-url) cf_purge_url "${1:-}" ;;
+      brotli) cf_set_brotli "${1:-on}" "${2:-}" ;;
+      cache-level) cf_set_cache_level "${1:-aggressive}" "${2:-}" ;;
+      minify) cf_set_minify "${1:-}" ;;
+      recommend|tips) cf_recommend ;;
+      *) panel_die "Usage: cecp-panel cf status|purge|purge-url|brotli|cache-level|minify|recommend" ;;
+    esac
+    ;;
+  backup)
+    sub="${1:-}"; shift || true
+    require_root
+    case "$sub" in
+      setup) backup_setup ;;
+      status) backup_status ;;
+      policy) backup_policy_show ;;
+      run)
+        if [[ "${1:-}" == "--all" ]]; then backup_run_all
+        elif [[ -n "${1:-}" ]]; then backup_run_one "$1"
+        else panel_die "Usage: cecp-panel backup run DOMAIN|--all"
+        fi
+        ;;
+      list) backup_list ;;
+      list-json) backup_list_json "${1:-}" ;;
+      config-get) backup_config_get ;;
+      configure)
+        [[ -n "${6:-}" ]] || panel_die "Usage: cecp-panel backup configure HOUR MINUTE DOW KEEP_DAILY KEEP_WEEKLY KEEP_MONTHLY [KEEP_YEARLY]"
+        backup_configure "$1" "$2" "$3" "$4" "$5" "$6" "${7:-0}"
+        ;;
+      prune|forget) backup_apply_retention ;;
+      prune-dry-run) backup_apply_retention --dry-run ;;
+      restore)
+        [[ -n "${1:-}" && -n "${2:-}" ]] || panel_die "Usage: cecp-panel backup restore DOMAIN SNAPSHOT_ID [TARGET_DIR] [RESTIC_REPO]"
+        backup_restore "$1" "$2" "${3:-}" "${4:-}"
+        ;;
+      enable-cron) backup_enable_cron ;;
+      oauth-import)
+        shift
+        backup_oauth_import "${*:-}"
+        ;;
+      oauth-status) backup_oauth_status ;;
+      *) panel_die "Usage: cecp-panel backup setup|status|oauth-import|oauth-status|run|list|prune|restore|enable-cron" ;;
+    esac
+    ;;
+  security)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      fail2ban) security_fail2ban_status ;;
+      fail2ban-full) require_root; security_fail2ban_full ;;
+      firewall) security_firewall_status ;;
+      ssh) security_ssh_show ;;
+      ssh-key-only) require_root; security_apply_ssh_key_only ;;
+      ssh-harden) require_root; security_ssh_harden ;;
+      ssh-port) require_root; security_ssh_set_port "${1:-}" ;;
+      mariadb-bind) require_root; security_mariadb_bind_local ;;
+      apply-production) require_root; security_apply_production ;;
+      check|self-check) security_self_check ;;
+      unattended|auto-update) require_root; security_unattended_updates ;;
+      *) panel_die "Usage: cecp-panel security ...|unattended" ;;
+    esac
+    ;;
+  system)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      info) system_info ;;
+      ensure-swap) require_root; system_swap_ensure ;;
+      swap) require_root; system_swap_add "${1:-2}" ;;
+      clean-logs) require_root; system_clean_logs ;;
+      disk-clean) require_root; system_disk_clean ;;
+      maintain) require_root; system_maintain ;;
+      tune|tune-install) require_root; system_tune_install ;;
+      enable-cron) require_root; system_enable_maintain_cron ;;
+      *) panel_die "Usage: cecp-panel system info|ensure-swap|swap [GB]|disk-clean|maintain|tune" ;;
+    esac
+    ;;
+  mysql)
+    sub="${1:-secure}"; shift || true
+    require_root
+    case "$sub" in
+      secure) mysql_secure_basics ;;
+      *) panel_die "Usage: cecp-panel mysql secure" ;;
+    esac
+    ;;
+  agent)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      install) agent_install ;;
+      status) agent_status ;;
+      *) panel_die "Usage: cecp-panel agent install|status" ;;
+    esac
+    ;;
+  onboard) onboard_main ;;
+  wp)
+    sub="${1:-}"; shift || true
+    require_root
+    case "$sub" in
+      harden) [[ -n "${1:-}" ]] && wp_harden_site "$1" || panel_die "Usage: cecp-panel wp harden DOMAIN" ;;
+      optimize) [[ -n "${1:-}" ]] && wp_optimize_site "$1" || panel_die "Usage: cecp-panel wp optimize DOMAIN" ;;
+      cron) [[ -n "${1:-}" ]] && wp_install_system_cron "$1" || panel_die "Usage: cecp-panel wp cron DOMAIN" ;;
+      status) [[ -n "${1:-}" ]] && wp_status_site "$1" || panel_die "Usage: cecp-panel wp status DOMAIN" ;;
+      *) panel_die "Usage: cecp-panel wp harden|optimize|cron|status DOMAIN" ;;
+    esac
+    ;;
+  optimize)
+    sub="${1:-}"; shift || true
+    require_root
+    case "$sub" in
+      site) [[ -n "${1:-}" ]] && optimize_site "$1" || panel_die "Usage: cecp-panel optimize site DOMAIN" ;;
+      nginx) optimize_nginx_global ;;
+      redis) optimize_install_redis ;;
+      redis-wp) [[ -n "${1:-}" ]] && optimize_redis_wp "$1" || panel_die "Usage: cecp-panel optimize redis-wp DOMAIN" ;;
+      mariadb) optimize_mariadb_tune ;;
+      opcache|jit) optimize_opcache_jit ;;
+      kernel|bbr) optimize_kernel_bbr ;;
+      purge) optimize_purge_cache "${1:-all}" ;;
+      stack) optimize_stack ;;
+      bench) optimize_bench "${1:-}" ;;
+      webp) [[ -n "${1:-}" ]] && optimize_webp "$1" || panel_die "Usage: cecp-panel optimize webp DOMAIN" ;;
+      brotli) optimize_brotli ;;
+      *) panel_die "Usage: cecp-panel optimize site|nginx|redis|redis-wp|mariadb|opcache|kernel|purge|stack|bench|webp|brotli" ;;
+    esac
+    ;;
+  media)
+    sub="${1:-}"; shift || true
+    require_root
+    case "$sub" in
+      enable)
+        [[ -n "${1:-}" ]] || panel_die "Usage: cecp-panel media enable DOMAIN [--max-width N] [--quality N] [--no-upload] [--no-cron] [--no-webp]"
+        media_enable "$@"
+        ;;
+      disable)
+        [[ -n "${1:-}" ]] || panel_die "Usage: cecp-panel media disable DOMAIN"
+        media_disable "$1"
+        ;;
+      status) media_status "${1:-}" ;;
+      run)
+        [[ -n "${1:-}" ]] || panel_die "Usage: cecp-panel media run DOMAIN [--dry-run] [--limit N]"
+        media_run "$@"
+        ;;
+      run-all) media_run_all ;;
+      enable-cron) media_enable_cron ;;
+      disable-cron) media_disable_cron ;;
+      *) panel_die "Usage: cecp-panel media enable|disable|status|run|run-all|enable-cron|disable-cron" ;;
+    esac
+    ;;
+  notify)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      setup) require_root; notify_setup ;;
+      status) notify_status ;;
+      test) require_root; notify_test ;;
+      health) notify_health ;;
+      enable-cron) require_root; notify_enable_cron ;;
+      disable-cron) require_root; notify_disable_cron ;;
+      send) notify_send "$*" ;;
+      *) panel_die "Usage: cecp-panel notify setup|status|test|health|enable-cron|disable-cron" ;;
+    esac
+    ;;
+  modsec|modsecurity)
+    sub="${1:-}"; shift || true
+    require_root
+    case "$sub" in
+      status) modsec_status ;;
+      install) modsec_install ;;
+      enable) modsec_enable ;;
+      disable) modsec_disable ;;
+      blocking|block) modsec_blocking ;;
+      *) panel_die "Usage: cecp-panel modsec status|install|enable|disable|blocking" ;;
+    esac
+    ;;
+  log|logs)
+    log_view "${1:-panel}" "${2:-}" "${3:-80}"
+    ;;
+  php)
+    sub="${1:-}"; shift || true
+    require_root
+    case "$sub" in
+      list) php_list_versions ;;
+      install) [[ -n "${1:-}" ]] && php_install_version "$1" || panel_die "Usage: cecp-panel php install 81|82|83" ;;
+      set) [[ -n "${1:-}" && -n "${2:-}" ]] && php_set_site_version "$1" "$2" || panel_die "Usage: cecp-panel php set DOMAIN 82" ;;
+      *) panel_die "Usage: cecp-panel php list|install|set" ;;
+    esac
+    ;;
+  update)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      check) update_check ;;
+      mirror) require_root; update_mirror_set "${1:-}" ;;
+      panel) require_root; update_panel "${1:-}" ;;
+      component) require_root; update_component "${1:-all}" ;;
+      os) require_root; update_component os ;;
+      *) panel_die "Usage: cecp-panel update check|mirror|panel|component|os" ;;
+    esac
+    ;;
+  -h|--help|help) usage ;;
+  *) usage; exit 1 ;;
+esac

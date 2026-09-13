@@ -1,0 +1,6 @@
+dist/
+etc/credentials.env
+*.env
+!*.env.example
+*.tmp
+tests/integration/.work/
