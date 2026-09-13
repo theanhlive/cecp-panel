@@ -250,6 +250,142 @@ else
   bad "fail2ban is not running in the container"
 fi
 
+echo "=== Events + signed webhook (n8n) ==="
+WH=/tmp/webhook.log
+rm -f "$WH"
+python3 "$HERE/webhook_rx.py" 8799 "$WH" & WHPID=$!
+sleep 1
+wh_count() { python3 "$HERE/webhook_rx.py" count "$WH" "$1"; }
+wait_event() {  # wait_event EVENT [MIN_COUNT] — deliveries are synchronous but give the receiver a moment
+  for _ in 1 2 3 4 5; do
+    [ "$(wh_count "$1")" -ge "${2:-1}" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+check "notify webhook URL configures URL + secret" cecp-panel notify webhook http://127.0.0.1:8799/hook
+WHSECRET="$(sed -nE 's/^WEBHOOK_SECRET=(.*)$/\1/p' /etc/cecp-panel/notify.env)"
+check "webhook received a correctly signed event" \
+  bash -c "sleep 1; python3 $HERE/webhook_rx.py check $WH '$WHSECRET' webhook_configured"
+check "wrong secret does not validate" bash -c "! python3 $HERE/webhook_rx.py check $WH wrongsecret webhook_configured"
+check "events.log records the event (640)" \
+  bash -c "grep -q '\"event\":\"webhook_configured\"' /var/log/cecp-panel/events.log && [ \"\$(stat -c %a /var/log/cecp-panel/events.log)\" = 640 ]"
+check "webhook secret not written to panel.log" bash -c "! grep -qF '$WHSECRET' /var/log/cecp-panel/panel.log"
+
+echo "=== wp-login rate limit + protect-admin ==="
+settle
+check "protect-admin on (basic auth)" cecp-panel site protect-admin "$D" on
+settle
+APASS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("admin_protect_pass",""))' "/var/lib/cecp-panel/sites/$D.json")"
+check "wp-login.php asks for credentials (401)" test "$(status_of "http://$D/wp-login.php")" = 401
+check "wp-admin asks for credentials (401)" test "$(status_of "http://$D/wp-admin/")" = 401
+# wp_harden sets FORCE_SSL_ADMIN, so WordPress answers wp-login.php over http with 302 → https.
+reaches_wp_login() { [[ "$(status_of "$@" "http://$D/wp-login.php")" =~ ^(200|302)$ ]]; }
+check "correct credentials pass through to WordPress" reaches_wp_login -u "cecp:$APASS"
+check "wp-admin with credentials reaches WordPress (not 401)" \
+  bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' -u 'cecp:$APASS' http://$D/wp-admin/)\" != 401 ]"
+check "admin-ajax.php stays public" bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' http://$D/wp-admin/admin-ajax.php)\" != 401 ]"
+check "front end unaffected" serves_wp
+check "basic-auth password not in panel.log" bash -c "! grep -qF '$APASS' /var/log/cecp-panel/panel.log"
+check "protect-admin IP allowlist blocks other IPs (403)" \
+  bash -c "cecp-panel site protect-admin $D on --ip 203.0.113.0/24 --no-auth && sleep 1.5 && [ \"\$(curl -s -o /dev/null -w '%{http_code}' http://$D/wp-login.php)\" = 403 ]"
+check "protect-admin IP allowlist lets listed IPs in" cecp-panel site protect-admin "$D" on --ip 127.0.0.1/32 --no-auth
+settle
+check "listed IP reaches wp-login.php" reaches_wp_login
+check "protect-admin rejects invalid CIDRs" bash -c "! cecp-panel site protect-admin $D on --ip '1.2.3.4/99'"
+check "protect-admin off" cecp-panel site protect-admin "$D" off
+settle
+check "wp-login.php open again" reaches_wp_login
+# Last in this section: the flood uses up the login bucket for a while.
+check "wp-login.php is rate-limited (429 after the burst)" \
+  bash -c "for i in \$(seq 30); do curl -s -o /dev/null -w '%{http_code}\n' http://$D/wp-login.php; done | grep -q 429"
+
+echo "=== Backup: local repository, failure reporting, verify ==="
+wp_d() { runuser -u "$SU" -- php /usr/local/bin/wp --path="$DOCROOT" "$@"; }
+printf 'RESTIC_REPOSITORY=/var/backups/cecp-restic\n' | install -m 600 /dev/stdin /etc/cecp-panel/backup.env
+check "backup setup with a local repository" cecp-panel backup setup
+check "backup run succeeds" cecp-panel backup run "$D"
+bstate() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], {}).get(sys.argv[3], ""))' /var/lib/cecp-panel/backup-state.json "$D" "$1"; }
+check "backup state records last_ok" test -n "$(bstate last_ok)"
+check "snapshot includes site config (vhost, pool)" \
+  bash -c "RESTIC_PASSWORD_FILE=/etc/cecp-panel/restic-password restic -r /var/backups/cecp-restic ls latest --tag $D | grep -q config.tar.gz"
+cp -a /etc/cecp-panel/restic-password /tmp/restic-password.good
+echo wrongpassword >/etc/cecp-panel/restic-password
+check "a failing backup exits non-zero" bash -c "! cecp-panel backup run $D"
+check "failure is recorded in backup state" test -n "$(bstate last_error)"
+check "backup_failed event delivered" wait_event backup_failed
+cp -a /tmp/restic-password.good /etc/cecp-panel/restic-password
+check "backup works again and reports recovery" bash -c "cecp-panel backup run $D && sleep 1 && [ \"\$(python3 $HERE/webhook_rx.py count $WH backup_recovered)\" -ge 1 ]"
+check "backup verify restores and test-imports the latest dump" bash -c "cecp-panel backup verify $D | grep -q 'Verify OK'"
+check "backup status shows per-site state" bash -c "cecp-panel backup status | grep -q 'last_ok='"
+
+echo "=== Live restore with automatic rollback ==="
+ORIG_NAME="$(wp_d option get blogname)"
+wp_d option update blogname "Changed after backup" >/dev/null
+check "restore --live --dry-run changes nothing" \
+  bash -c "cecp-panel backup restore $D latest --live --dry-run | grep -q 'Live restore plan' && [ \"\$(runuser -u $SU -- php /usr/local/bin/wp --path=$DOCROOT option get blogname)\" = 'Changed after backup' ]"
+check "restore --live refuses without --yes when not interactive" bash -c "! cecp-panel backup restore $D latest --live </dev/null"
+check "restore --live --yes" cecp-panel backup restore "$D" latest --live --yes
+check "database content is back (blogname)" test "$(wp_d option get blogname)" = "$ORIG_NAME"
+check "site serves WordPress after restore" serves_wp
+check "restore_done event delivered" wait_event restore_done
+cp -a "$DOCROOT/index.php" /tmp/index.php.good
+printf '<?php http_response_code(500); exit;\n' >"$DOCROOT/index.php"
+cecp-panel backup run "$D" >/dev/null 2>&1
+BROKEN_SNAP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]]["last_snapshot"])' /var/lib/cecp-panel/backup-state.json "$D")"
+install -m 644 -o "$SU" -g "$SU" /tmp/index.php.good "$DOCROOT/index.php"
+# OPcache revalidates every 60 s: reload so file edits take effect immediately.
+php_live() { systemctl reload php-fpm; settle; }
+uncached_ok() { [[ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Cookie: wordpress_logged_in_x=1' "http://$D/")" =~ ^(200|301|302)$ ]]; }
+php_live
+check "precondition: site healthy (uncached) before restoring a broken snapshot" uncached_ok
+check "restoring a broken snapshot fails and rolls back" bash -c "! cecp-panel backup restore $D $BROKEN_SNAP --live --yes"
+check "site answers (uncached) after rollback" uncached_ok
+check "site still serves WordPress after rollback" serves_wp
+check "rolled-back files are the pre-restore ones" cmp -s /tmp/index.php.good "$DOCROOT/index.php"
+check "restore_rolled_back event delivered" wait_event restore_rolled_back
+
+echo "=== Monitoring + self-healing ==="
+check "monitor enable" cecp-panel monitor enable
+check "restart-on-failure drop-in installed" test -f /etc/systemd/system/nginx.service.d/cecp-restart.conf
+check "first run raises no alerts on a healthy host" test "$(wh_count site_down)" = 0
+check "monitor status lists checks" bash -c "cecp-panel monitor status | grep -q 'site:$D'"
+systemctl stop php-fpm
+check "stopped php-fpm is restarted by the monitor" bash -c "cecp-panel monitor run && systemctl is-active --quiet php-fpm"
+check "service_restarted event delivered" wait_event service_restarted
+printf '<?php http_response_code(500); exit;\n' >"$DOCROOT/index.php"
+php_live
+cecp-panel monitor run >/dev/null 2>&1
+check "site_down alert raised" wait_event site_down 1
+cecp-panel monitor run >/dev/null 2>&1
+check "no repeated alert while still down" test "$(wh_count site_down)" = 1
+install -m 644 -o "$SU" -g "$SU" /tmp/index.php.good "$DOCROOT/index.php"
+php_live
+cecp-panel monitor run >/dev/null 2>&1
+check "site_recovered alert raised" wait_event site_recovered
+chown root:root "/run/php-fpm/${SLUG}.sock"
+check "monitor repairs PHP-FPM socket ownership" \
+  bash -c "cecp-panel monitor run && [ \"\$(stat -c %U /run/php-fpm/${SLUG}.sock)\" = nginx ]"
+check "socket_fixed event delivered" wait_event socket_fixed
+cecp-panel backup enable-cron >/dev/null
+touch -d '3 days ago' /etc/cron.d/cecp-panel-backup
+python3 - /var/lib/cecp-panel/backup-state.json "$D" <<'PY'
+import json, sys, time
+p, d = sys.argv[1], sys.argv[2]
+data = json.load(open(p))
+data[d]["last_ok"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3 * 86400))
+json.dump(data, open(p, "w"))
+PY
+cecp-panel monitor run >/dev/null 2>&1
+check "stale backups are reported" wait_event backup_stale
+check "backup cron also schedules weekly verify" grep -q 'backup verify --all' /etc/cron.d/cecp-panel-backup
+kill "$WHPID" 2>/dev/null
+
+echo "=== Log rotation ==="
+check "logrotate rule installed" bash -c "cecp-panel system tune >/dev/null 2>&1; test -f /etc/logrotate.d/cecp-panel"
+check "logrotate rule is valid" logrotate -d /etc/logrotate.d/cecp-panel
+check "per-site nginx logs are covered by a rotate rule" bash -c "grep -rqE '/var/log/nginx/\\*\\.?log' /etc/logrotate.d/"
+
 echo "=== Production profile + self-check ==="
 echo "2026-01-01T00:00:00Z WordPress admin user: admin | pass: Legacy1234Secret (save now)" >>/var/log/cecp-panel/panel.log
 chmod 644 /var/log/cecp-panel/panel.log
@@ -290,6 +426,7 @@ check "site artifacts are gone" bash -c "
   ! id $SU && ! id $SU2 &&
   ! mysql -e 'USE db_$SLUG'"
 check "Redis ACL users removed" bash -c "! grep -q $UA /etc/redis/cecp-acl.conf"
+check "protect-admin htpasswd removed" test ! -e "/etc/nginx/cecp-auth/${SLUG}.htpasswd"
 check "sshd config valid after remove" sshd -t
 check "nginx config valid after remove" nginx -t
 
