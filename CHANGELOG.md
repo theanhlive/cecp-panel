@@ -1,5 +1,80 @@
 # Changelog
 
+## 1.9.0-beta — vận hành agency (đợt 3)
+
+### Staging 1 lệnh (B1)
+- `site staging DOMAIN [--name staging.DOMAIN] [--no-auth]` tạo bản sao đầy đủ (file + DB). Staging có user/pool/DB/Redis ACL riêng.
+- Tự đổi URL trong DB, kể cả URL dạng JSON của page builder. Scheme http/https theo cert của staging, và site con một cấp tự dùng cert wildcard nếu có.
+- Mặc định staging:
+  - có basic auth và header `X-Robots-Tag: noindex`;
+  - `WP_ENVIRONMENT_TYPE=staging`;
+  - có mu-plugin chặn gửi e-mail và job nền (Action Scheduler) để khách thật không nhận mail đơn hàng từ bản sao;
+  - không chạy wp-cron.
+- `site staging-push DOMAIN [--files-only|--db-only] [--dry-run] [--yes]`:
+  - lưu bản an toàn của site thật trước khi đẩy;
+  - giữ `wp-config.php` và trạng thái hiển thị với Google của site thật, đổi URL staging về domain thật, gỡ mu-plugin staging, bật lại auto-purge;
+  - site không lên thì **tự rollback**;
+  - khi đẩy DB, CLI cảnh báo rõ rằng đơn hàng/bình luận phát sinh sau khi tạo staging sẽ mất.
+- `site remove staging.DOMAIN` xóa staging và gỡ liên kết với site gốc.
+- `site auth DOMAIN on|off|reset-password`: basic auth cho toàn site (preview cho khách). Challenge ACME vẫn mở, monitor và health check vẫn qua được.
+
+### Cập nhật WordPress an toàn (A6)
+- `wp update DOMAIN [--exclude a,b] [--no-major] [--dry-run]`:
+  - lập kế hoạch (core/plugin/theme), kiểm tra site khỏe **trước** khi cập nhật, rồi tạo bản an toàn (file + DB);
+  - cập nhật bằng user của site;
+  - kiểm tra lại: WordPress phải load được với mọi plugin (`wp eval`) và trang chủ phải trả 2xx/3xx khi bỏ qua cache;
+  - lỗi thì **tự rollback** và gửi sự kiện `wp_update_rolled_back` kèm lý do.
+- `wp auto-update DOMAIN on [--exclude …] [--no-major] | off | status`: cập nhật tự động lúc 03:40 hằng ngày, có rollback.
+- `wp rollback DOMAIN [--yes]`: hoàn tác lần cập nhật gần nhất.
+- Mỗi site chỉ khóa một thao tác nguy hiểm tại một thời điểm (restore / update / staging-push).
+
+### Giới hạn tài nguyên từng site (B4)
+- `site limits DOMAIN --cpu 100 --mem 1G [--tasks 256] | off | show`:
+  - PHP của site chạy trong PHP-FPM master riêng (`cecp-php-fpm@SLUG`, thuộc `cecp-sites.slice`) với `CPUQuota`/`MemoryMax`/`TasksMax` của systemd;
+  - site bị hack hoặc plugin lỗi chỉ dùng hết phần của nó, không kéo sập cả VPS;
+  - socket nằm ngoài `/run/php-fpm`, nên restart PHP-FPM chung (mỗi lần thêm site) không làm site giới hạn bị 502;
+  - áp dụng lỗi thì tự hoàn nguyên. Monitor theo dõi cả các service này.
+
+### Cấu hình PHP từng site (A9)
+- `php config DOMAIN memory_limit=512M upload_max_filesize=128M max_execution_time=300 max_input_vars=5000 pm_max_children=8`. Có `--reset`.
+- Chỉ nhận các key trong danh sách cho phép, có kiểm tra khoảng giá trị. `post_max_size` tự nâng cho ≥ `upload_max_filesize`.
+- **Sửa lỗi upload:** nginx chưa từng đặt `client_max_body_size`, nên mặc định 1 MB làm mọi upload > 1 MB báo lỗi 413. Nay giá trị này theo `post_max_size`, và `fastcgi_read_timeout` theo `max_execution_time`.
+- `php install 83|84`: cài thêm intl/zip/bcmath/imagick/redis (từng gói, thiếu gói nào thì bỏ qua gói đó).
+
+### `status --json` + heartbeat (A10)
+- `cecp-panel status --json` cho CECP Core/n8n: service; và theo từng site:
+  - dung lượng đĩa (cache 6 h), kích thước DB;
+  - tỉ lệ cache HIT, TTL/auto-purge/edge;
+  - số ngày SSL còn lại;
+  - backup (last_ok/verify), uptime;
+  - cập nhật WP, limits, liên kết staging.
+- Heartbeat của agent dùng chung tài liệu này (giữ các key cũ). Chạy lại `agent install` để cập nhật script.
+
+### Công cụ DB (B6)
+- `db export DOMAIN [FILE]`: gzip, quyền 600, không cho ghi vào `/home` (thư mục web tải được).
+- `db import DOMAIN FILE [--replace-url OLD] [--yes]`:
+  - dump bản hiện tại trước khi import;
+  - import bằng **user DB của site**, nên dump có `USE`/`DROP` DB khác sẽ thất bại thay vì phá site khác; bỏ `DEFINER`;
+  - site không lên thì tự khôi phục DB cũ.
+- `db shell|info DOMAIN` (mật khẩu không nằm trên argv; `db info` hướng dẫn SSH tunnel cho TablePlus/DBeaver), `db size`, `db slow-log on [GIÂY]|off|status`, `db slow-report [TOP]`.
+- **Không làm Adminer web:** tải PHP bên thứ ba khi chưa pin được checksum và mở giao diện DB ra Internet là rủi ro. Dùng `db shell` hoặc SSH tunnel thay thế.
+
+### Sửa lỗi
+- `site duplicate`:
+  - bản sao giữ nguyên `wp-config.php` của site nguồn, nên **ghi thẳng vào DB của site nguồn** (và dùng chung Redis của nó); nay dùng DB và Redis ACL riêng;
+  - bản sao WordPress không được đánh dấu là WordPress, nên không đổi URL;
+  - luôn ép `https://` kể cả khi chưa có cert.
+- Header bảo mật: `security check` chấp nhận snippet noindex của staging.
+- `system maintain` dọn bản an toàn của staging-push/wp-update/db-import sau 14 ngày.
+
+### Nâng cấp từ 1.8
+```bash
+cecp-panel site rebuild-vhost --all     # client_max_body_size, timeout, snippet noindex, pool mới
+cecp-panel agent install                # heartbeat dùng status --json (nếu có agent)
+cecp-panel wp auto-update example.com on --exclude woocommerce   # tùy chọn, từng site
+cecp-panel site limits example.com --cpu 100 --mem 1G            # tùy chọn: site nặng/rủi ro
+```
+
 ## 1.8.0-beta — tăng tốc website (đợt 2)
 
 ### Tự purge cache khi sửa nội dung (A4)

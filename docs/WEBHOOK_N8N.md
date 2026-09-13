@@ -30,7 +30,7 @@ Body:
   "domain": "shop.example.com",
   "host": "vps1.example.com",
   "ts": "2026-09-13T08:00:00Z",
-  "panel_version": "1.8.0-beta",
+  "panel_version": "1.9.0-beta",
   "details": { "http_code": "502", "ttfb_ms": 15002 }
 }
 ```
@@ -51,6 +51,8 @@ Body:
 | `backup_verify_failed` | critical | `backup verify` không restore/import được |
 | `backup_retention_failed` | warning | `restic forget --prune` lỗi |
 | `restore_done` / `restore_rolled_back` / `restore_failed` | info / critical / critical | kết quả `backup restore --live` |
+| `wp_update_done` / `wp_update_rolled_back` / `wp_update_failed` | info / critical / critical | `wp update` (thủ công hoặc auto-update); `details.plan` = danh sách core/plugin/theme, `details.reason` = lý do rollback |
+| `staging_pushed` / `staging_push_rolled_back` / `staging_push_failed` | info / critical / critical | kết quả `site staging-push` |
 | `ssl_expiring`, `disk_high` (cron `notify health` hằng ngày) | warning | tóm tắt hằng ngày |
 | `webhook_configured`, `test` | info | cấu hình / thử |
 

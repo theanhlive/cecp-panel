@@ -1,6 +1,16 @@
-# CECP Panel v1.8 — tính năng
+# CECP Panel v1.9 — tính năng
 
 **Ưu tiên:** Bảo mật → WordPress → Tốc độ → UX → Cloudflare edge → Advanced optional
+
+## v1.9 (vận hành agency) — chi tiết: [CHANGELOG.md](CHANGELOG.md)
+
+- `site staging DOMAIN` / `site staging-push DOMAIN`: staging 1 lệnh (có mật khẩu, noindex, chặn mail), đẩy lên site thật có rollback
+- `wp update DOMAIN` / `wp auto-update DOMAIN on` / `wp rollback DOMAIN`: cập nhật WordPress có bản an toàn, kiểm tra sức khỏe, tự rollback
+- `site limits DOMAIN --cpu 100 --mem 1G`: PHP-FPM riêng giới hạn CPU/RAM
+- `php config DOMAIN memory_limit=512M …`: cấu hình PHP từng site; upload lớn không còn lỗi 413
+- `site auth DOMAIN on`: basic auth toàn site (preview cho khách)
+- `status --json`: trạng thái chi tiết cho CECP Core / n8n (heartbeat dùng chung)
+- `db export|import|shell|info|size|slow-log|slow-report`
 
 ## v1.8 (tăng tốc website) — chi tiết: [CHANGELOG.md](CHANGELOG.md)
 
@@ -92,7 +102,8 @@ cecp-panel log nginx example.com
 ## Chưa có (roadmap 1.6+)
 
 - OpenLiteSpeed dual-stack
-- File Manager / staging
+- File Manager
+- Quét malware, SMTP cho WordPress, quota đĩa từng site, HTTP/3, ký release minisign (B7–B11)
 - WebUI agency (CECP control plane)
 - HTTP/3 QUIC (phụ thuộc build nginx)
 - Media: keep-original, queue Redis
