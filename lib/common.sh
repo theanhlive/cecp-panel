@@ -172,6 +172,38 @@ sshd_apply_dropin() {
   return 1
 }
 
+# After ADDING a pool, restart instead of reload: on reload PHP-FPM (seen with AlmaLinux 9
+# php-fpm 8.0.30) re-owns every inherited socket as root:root, so nginx gets EACCES and the
+# OTHER sites answer 502 until the next restart.
+php_fpm_restart_for_new_pool() {
+  local svc="${1:-php-fpm}"
+  systemctl restart "$svc" 2>/dev/null || panel_log "WARN: could not restart $svc"
+  php_fpm_fix_socket_owner
+}
+
+# Safety net: every panel pool socket must be owned by nginx (listen.owner).
+php_fpm_fix_socket_owner() {
+  id nginx &>/dev/null || return 0
+  local f sock owner
+  shopt -s nullglob
+  for f in "$SITES_DIR"/*.json; do
+    sock="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("php_sock",""))' "$f")"
+    [[ -n "$sock" ]] || continue
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      [[ -S "$sock" ]] && break
+      sleep 0.3
+    done
+    [[ -S "$sock" ]] || continue
+    owner="$(stat -c %U:%G "$sock")"
+    if [[ "$owner" != "nginx:nginx" ]]; then
+      chown nginx:nginx "$sock"
+      chmod 660 "$sock"
+      panel_log "Fixed PHP-FPM socket owner $sock (was $owner)"
+    fi
+  done
+  shopt -u nullglob
+}
+
 php_fpm_reload() {
   if systemctl is-active --quiet php-fpm 2>/dev/null; then
     systemctl reload php-fpm 2>/dev/null || systemctl restart php-fpm

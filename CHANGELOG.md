@@ -11,6 +11,11 @@ Bản 1.5.0-beta bị một công cụ chuyển CRLF→LF làm mất ký tự `r
 - `ssl fix`: câu trả lời Y/n bị bỏ qua.
 - `site remove` luôn lỗi (Python inline thiếu `)`); nay dọn thêm pool Remi, cron wp-cron, drop-in SFTP.
 - wp-cron hệ thống không chạy (user site không ghi được log vào `/var/log/cecp-panel`) trong khi `DISABLE_WP_CRON=true`.
+- **Thêm site làm các site khác bị 502**: sau khi thêm pool, `reload` PHP-FPM (AlmaLinux 9, php-fpm 8.0) đổi chủ mọi socket cũ thành `root:root` → nginx bị từ chối. Nay `restart` khi thêm pool và kiểm tra lại quyền socket.
+- `site add --wp` luôn dừng ở bước harden (`wp rewrite structure` thiếu tham số) → cron, reload và backup tự động cuối `site add` không chạy.
+- `optimize stack` dừng ở bước nginx trên AlmaLinux (`keepalive_timeout` bị khai báo trùng).
+- `site remove` âm thầm thoát với site chưa có SSL.
+- Installer lỗi trên image có `curl-minimal`.
 
 ### An toàn
 - Mọi thay đổi sshd đi qua `sshd -t`; lỗi thì hoàn tác, không reload.

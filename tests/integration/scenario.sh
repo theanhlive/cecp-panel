@@ -39,6 +39,11 @@ serves_wp() {
 }
 check "site add --wp" cecp-panel site add "$D" --wp
 check "site serves WordPress" serves_wp
+grep -q " second.test\$" /etc/hosts || echo "127.0.0.1 second.test" >>/etc/hosts
+check "adding another site keeps this site's PHP socket owned by nginx" \
+  bash -c "cecp-panel site add second.test && [ \"\$(stat -c %U /run/php-fpm/${SLUG}.sock)\" = nginx ]"
+check "this site still reaches PHP (no 502)" bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' 'http://$D/?s=probe')\" = 200 ]"
+check "remove the second site" cecp-panel site remove second.test
 
 echo "=== SFTP / sshd guard ==="
 check "sftp-password writes a valid drop-in" \

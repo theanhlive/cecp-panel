@@ -119,11 +119,11 @@ json.dump(d, open(p,"w"), indent=2)
 open(p,"a").write("\n")
 PY
   chmod 600 "$meta"
+  # The pool joined this FPM service: restart (a reload re-owns other sockets as root).
   if [[ "$norm" == "80" ]]; then
-    php_fpm_reload
+    php_fpm_restart_for_new_pool php-fpm
   else
-    systemctl reload "$(php_remipkg_prefix "$norm")-php-fpm" 2>/dev/null || \
-      systemctl restart "$(php_remipkg_prefix "$norm")-php-fpm"
+    php_fpm_restart_for_new_pool "$(php_remipkg_prefix "$norm")-php-fpm"
   fi
   nginx_test_and_reload
   panel_log "Site $domain now uses PHP ${norm}"

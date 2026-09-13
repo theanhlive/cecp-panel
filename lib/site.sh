@@ -119,7 +119,7 @@ EOF
     chown "${site_user}:${site_user}" "$docroot/index.html"
   fi
 
-  php_fpm_reload
+  php_fpm_restart_for_new_pool php-fpm
   nginx_test_and_reload
 
   panel_log "Site added: http://$domain"
