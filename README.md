@@ -1,4 +1,4 @@
-# CECP Panel v1.5.0-beta
+# CECP Panel v1.5.1-beta
 
 Standalone VPS panel (LarVPS-style). **One install** = full stack + menu.
 

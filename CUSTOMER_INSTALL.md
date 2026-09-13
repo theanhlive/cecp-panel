@@ -17,7 +17,7 @@ cd scripts/cecp-panel && ./build-release.sh
 curl -fsSL https://isharevn.net/downloads/cecp-panel/install-cecp-panel.sh | sudo bash
 ```
 
-Script tự tải `dist/cecp-panel-1.5.0-beta.tar.gz` (hoặc `cecp-panel-latest.tar.gz`) — **không cần** tải `.tar.gz` thủ công.
+Script tự tải `dist/cecp-panel-1.5.1-beta.tar.gz` (hoặc `cecp-panel-latest.tar.gz`) — **không cần** tải `.tar.gz` thủ công.
 
 Mirror tùy chọn (GitHub raw):
 

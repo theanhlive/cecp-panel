@@ -34,7 +34,7 @@ source "$PANEL_ROOT/lib/modsec.sh"
 source "$PANEL_ROOT/lib/logview.sh"
 source "$PANEL_ROOT/lib/menu.sh"
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.5.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.5.1-beta}"
 
 usage() {
   cat <<EOF

@@ -12,7 +12,7 @@
 #   SSH_KEY=... ./deploy-safe.sh root@IP --with-nginx-zones   # install shared zones only if missing
 #
 # Env:
-#   CECP_PANEL_VERSION   default 1.4.0-beta
+#   CECP_PANEL_VERSION   default: version in lib/common.sh
 #   SSH_KEY              optional private key
 set -euo pipefail
 
@@ -29,7 +29,8 @@ for a in "$@"; do
 done
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="${CECP_PANEL_VERSION:-1.4.0-beta}"
+VERSION="${CECP_PANEL_VERSION:-$(sed -nE 's/^CECP_PANEL_VERSION="\$\{CECP_PANEL_VERSION:-([^}]+)\}"$/\1/p' "$ROOT/lib/common.sh")}"
+[[ -n "$VERSION" ]] || { echo "ERROR: cannot read version from lib/common.sh" >&2; exit 1; }
 SSH_KEY="${SSH_KEY:-}"
 STAMP="$(date -u +%Y%m%d_%H%M%S)"
 TARBALL="$ROOT/dist/cecp-panel-${VERSION}.tar.gz"
@@ -152,7 +153,7 @@ if os.path.isfile(p):
         data=json.load(open(p))
     except Exception:
         data={}
-data["version"]=os.environ.get("VERSION","1.4.0-beta")
+data["version"]=os.environ.get("VERSION","unknown")
 data["updated_at"]=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 data["standalone"]=True
 open(p,"w").write(json.dumps(data, indent=2)+"\n")

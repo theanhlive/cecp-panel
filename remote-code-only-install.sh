@@ -2,7 +2,7 @@
 # Runs ON the VPS after tarball is at /tmp/cecp-panel-deploy/cecp-panel.tar.gz
 # Code-only install: no apply-production, no optimize stack, no nginx reload.
 set -euo pipefail
-VERSION="${1:-1.5.0-beta}"
+VERSION="${1:-1.5.1-beta}"
 STAMP="${2:-$(date -u +%Y%m%d_%H%M%S)}"
 BK="/var/lib/cecp-panel/backups/panel-${STAMP}"
 TARBALL="/tmp/cecp-panel-deploy/cecp-panel.tar.gz"
