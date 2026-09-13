@@ -1,4 +1,4 @@
-# CECP Panel v1.6.0-beta
+# CECP Panel v1.7.0-beta
 
 Standalone VPS panel (LarVPS-style). **One install** = full stack + menu.
 
@@ -39,14 +39,16 @@ bash tests/integration/run.sh       # AlmaLinux 9 + systemd, cài panel và ch�
 
 | Menu | Commands |
 |------|----------|
-| Domains | `site add/remove/list/duplicate`, SFTP per site |
+| Domains | `site add/remove/list/duplicate`, SFTP per site, `protect-admin` (basic auth / IP allowlist) |
 | SSL | Let's Encrypt (webroot) issue/renew/status/fix, HTTPS + HTTP/2 template, `ssl hsts` |
 | DNS | Cloudflare A records (`/etc/cecp-panel/credentials.env`) |
-| Backup | restic → Google Drive, tiered retention |
+| Backup | restic → Google Drive / local / sftp, tiered retention, `verify`, `restore --live` with rollback |
 | Security | vhost hardening, Cloudflare real IP, fail2ban (+nginx deny), SSH harden/port/key-only/repair, MariaDB bind, Redis ACL, `apply-production`, `check`, `fix-perms` |
 | Performance | FastCGI cache (tracking-param-free key, per-site/URL purge), HTTP/2, Redis+WP, OPcache JIT, BBR, MariaDB tune, brotli/webp, bench, report |
 | Media | Per-site opt-in: on-upload resize/compress/WebP + daily cron batch (`media enable|disable|run`) |
-| System | auto swap, disk/log cleanup, weekly maintain cron |
+| System | auto swap, disk/log cleanup, logrotate, weekly maintain cron |
+| Monitor | services/sites/SSL/disk/backup every 5 min, auto-restart, alerts on change (`monitor enable`) |
+| Notify | Telegram, Discord, signed JSON webhook → n8n ([docs/WEBHOOK_N8N.md](docs/WEBHOOK_N8N.md)) |
 | Agent | heartbeat → CECP API (`docs/infrastructure/CECP_PANEL_AGENT_INTEGRATION.md`) |
 
 ## Quick start (lab)

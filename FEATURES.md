@@ -1,6 +1,15 @@
-# CECP Panel v1.6 — tính năng
+# CECP Panel v1.7 — tính năng
 
 **Ưu tiên:** Bảo mật → WordPress → Tốc độ → UX → Cloudflare edge → Advanced optional
+
+## v1.7 (độ tin cậy + bảo vệ khách) — chi tiết: [CHANGELOG.md](CHANGELOG.md)
+
+- Backup báo lỗi thật, trạng thái từng site, snapshot kèm cấu hình site; `backup verify DOMAIN|--all` (hằng tuần)
+- `backup restore DOMAIN SNAP --live [--dry-run] [--yes]`: restore thẳng vào site đang chạy, tự rollback nếu hỏng
+- `monitor enable|status|run`: giám sát 5 phút/lần, tự restart service, tự sửa socket PHP-FPM, chỉ báo khi đổi trạng thái
+- `notify webhook URL`: sự kiện JSON ký HMAC → n8n ([docs/WEBHOOK_N8N.md](docs/WEBHOOK_N8N.md)); `events.log`
+- Rate-limit `wp-login.php`; `site protect-admin DOMAIN on [--ip …]` (basic auth / allowlist IP)
+- Logrotate cho log panel; menu đầy đủ lệnh mới
 
 ## v1.6 (bảo mật + tốc độ) — chi tiết: [CHANGELOG.md](CHANGELOG.md)
 

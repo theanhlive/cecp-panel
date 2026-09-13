@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.7.0-beta — độ tin cậy + bảo vệ khách (đợt 1)
+
+### Backup (A1)
+- **Lỗi backup không còn bị nuốt**: mysqldump, tar, restic, prune đều được kiểm tra; lỗi → exit ≠ 0, ghi trạng thái, gửi sự kiện `backup_failed` (và `backup_recovered` khi chạy lại được). Trước đây restic lỗi vẫn báo "done".
+- `mysqldump --single-transaction --routines --triggers` (bản dump nhất quán, không khóa bảng).
+- Snapshot có thêm `config/config.tar.gz`: vhost, pool PHP, cron, SFTP, htpasswd, cert Let's Encrypt — để dựng lại trên VPS mới.
+- `backup verify DOMAIN|--all`: `restic check` + restore bản mới nhất vào thư mục tạm + import thử DB vào DB tạm. Cron chạy hằng tuần (CN 05:30).
+- `backup status` hiển thị trạng thái từng site (last_ok, verified, lỗi gần nhất).
+- `RESTIC_REPOSITORY` có thể là thư mục cục bộ hoặc `sftp:` (bản sao thứ hai / không dùng Google Drive).
+
+### Restore 1 lệnh (A2)
+- `backup restore DOMAIN SNAPSHOT|latest --live [--dry-run] [--yes]`: lưu bản hiện tại → tráo thư mục site → import lại DB → cập nhật thông tin DB/Redis trong `wp-config.php` → purge cache → kiểm tra HTTP; nếu site không lên thì **tự rollback** về bản trước. Không có `--yes` thì phải gõ lại tên domain để xác nhận.
+- Cú pháp cũ `backup restore DOMAIN SNAP [TARGET_DIR]` (chỉ giải nén) vẫn dùng được.
+
+### Giám sát + tự phục hồi (A3)
+- `monitor enable|disable|run|status`: cron 5 phút/lần kiểm tra service, trang chủ từng site (bỏ qua cache), SSL, dung lượng đĩa, độ tươi của backup.
+- Service bị dừng → tự khởi động lại và báo; systemd `Restart=on-failure` cho nginx/php-fpm/mariadb/redis/fail2ban.
+- Tự sửa socket PHP-FPM sai quyền (lỗi 502).
+- Chỉ báo khi trạng thái **thay đổi** (có báo "đã khôi phục sau X phút"); lỗi kéo dài thì nhắc lại mỗi 6 h / 24 h.
+
+### Webhook sự kiện → n8n (B5)
+- `notify webhook URL|off`: mọi sự kiện gửi JSON có chữ ký HMAC-SHA256 (`X-CECP-Signature`), thử lại 3 lần. Xem [docs/WEBHOOK_N8N.md](docs/WEBHOOK_N8N.md).
+- Mọi sự kiện được ghi vào `/var/log/cecp-panel/events.log` (JSON lines, cho CECP Core).
+
+### Bảo vệ đăng nhập WordPress (A7 + B2)
+- `wp-login.php` có rate-limit riêng (10 request/phút/IP, burst 10) → bot nhận 429 rồi bị fail2ban ban.
+- `site protect-admin DOMAIN on [--ip CIDR,...] [--no-auth] | off | status | reset-password`: basic auth và/hoặc allowlist IP cho `wp-login.php` + `/wp-admin/`; `admin-ajax.php`/`admin-post.php` vẫn công khai để front-end không hỏng.
+
+### Vận hành (A11)
+- Logrotate cho log của panel (`/etc/logrotate.d/cecp-panel`); dọn bản sao pre-restore > 7 ngày trong `system maintain`.
+- Menu tương tác có đủ các lệnh của 1.6/1.7.
+
+### Nâng cấp từ 1.6
+```bash
+cecp-panel security apply-production     # logrotate
+cecp-panel site rebuild-vhost --all      # rate-limit wp-login (template mới)
+cecp-panel monitor enable
+cecp-panel notify webhook https://n8n.example.com/webhook/...   # tùy chọn
+cecp-panel backup enable-cron            # thêm lịch verify hằng tuần
+cecp-panel backup verify --all
+```
+
 ## 1.6.0-beta — bảo mật + tốc độ
 
 ### Bảo mật
