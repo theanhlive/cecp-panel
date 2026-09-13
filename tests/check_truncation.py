@@ -115,7 +115,11 @@ def _skip_cmdsub(s, i):
     return i
 
 
+_EXPANSIONS = [0]
+
+
 def _expand_dollar(s, i, out):
+    _EXPANSIONS[0] += 1
     nxt = s[i + 1] if i + 1 < len(s) else ""
     if nxt == "(":
         out.append("X")
@@ -128,6 +132,7 @@ def _expand_dollar(s, i, out):
     if m:
         out.append("X")
         return i + m.end()
+    _EXPANSIONS[0] -= 1
     out.append("$")
     return i + 1
 
@@ -177,10 +182,12 @@ def _expand_heredoc(body):
 
 
 def python_snippets(text):
+    """Yield (line, code, interpolated) for inline python; interpolated = bash expanded vars into it."""
     for m in re.finditer(r"\bpython3? -c\s+", text):
         i = m.end()
         if i >= len(text):
             continue
+        _EXPANSIONS[0] = 0
         if text[i] == '"':
             code, _ = _read_dq(text, i)
         elif text[i] == "'":
@@ -189,8 +196,8 @@ def python_snippets(text):
         else:
             continue
         if code is not None:
-            yield text.count("\n", 0, m.start()) + 1, code
-    for m in re.finditer(r"\bpython3? -(?:\s[^\n]*)?<<(-?)\s*(['\"]?)(\w+)\2[^\n]*\n", text):
+            yield text.count("\n", 0, m.start()) + 1, code, _EXPANSIONS[0] > 0
+    for m in re.finditer(r"\bpython3?\b[^\n]*?<<(-?)\s*(['\"]?)(\w+)\2[^\n]*\n", text):
         strip_tabs, quoted, delim = m.group(1), m.group(2), m.group(3)
         lines = []
         for line in text[m.end():].split("\n"):
@@ -198,16 +205,24 @@ def python_snippets(text):
                 break
             lines.append(line.lstrip("\t") if strip_tabs else line)
         body = "\n".join(lines)
-        yield text.count("\n", 0, m.start()) + 1, (body if quoted else _expand_heredoc(body))
+        if quoted:
+            yield text.count("\n", 0, m.start()) + 1, body, False
+        else:
+            _EXPANSIONS[0] = 0
+            code = _expand_heredoc(body)
+            yield text.count("\n", 0, m.start()) + 1, code, _EXPANSIONS[0] > 0
 
 
 def check_python(files, problems):
     for f in files:
-        for line_no, code in python_snippets(read(f)):
+        for line_no, code, interpolated in python_snippets(read(f)):
             try:
                 compile(code, f"{rel(f)}:{line_no}", "exec")
             except SyntaxError as e:
                 problems.append(f"{rel(f)}:{line_no}: inline python does not compile: {e.msg}")
+            if interpolated:
+                problems.append(f"{rel(f)}:{line_no}: bash variables interpolated into python code "
+                                "(injection risk) — pass them via sys.argv")
 
 
 def main():
