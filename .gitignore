@@ -4,3 +4,5 @@ etc/credentials.env
 !*.env.example
 *.tmp
 tests/integration/.work/
+__pycache__/
+*.pyc

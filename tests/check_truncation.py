@@ -225,11 +225,24 @@ def check_python(files, problems):
                                 "(injection risk) — pass them via sys.argv")
 
 
+def check_heredoc_stdin(files, problems):
+    """`python3 - <<EOF` reads its script from stdin: sys.stdin inside it is the (consumed)
+    heredoc, never the data piped into the surrounding function (1.8 edge-cache bug)."""
+    for f in files:
+        text = read(f)
+        for m in re.finditer(r"\bpython3?\s+-(?:\s[^\n]*?)?<<(-?)\s*(['\"]?)(\w+)\2[^\n]*\n", text):
+            body = text[m.end():].split("\n" + m.group(3) + "\n", 1)[0]
+            if re.search(r"\bsys\.stdin\b|\binput\(", body):
+                problems.append(f"{rel(f)}:{text.count(chr(10), 0, m.start()) + 1}: python3 - <<heredoc reads "
+                                "sys.stdin (that is the script itself) — pass data via argv/env")
+
+
 def main():
     problems = []
     check_baseline(text_files(), problems)
     check_heuristic(shell_files(), problems)
     check_python(shell_files(), problems)
+    check_heredoc_stdin(shell_files(), problems)
     for p in sorted(set(problems)):
         print(p)
     if problems:

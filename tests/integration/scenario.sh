@@ -23,7 +23,7 @@ D2="second.test"; SU2="site_second_test"
 DOCROOT="/home/$SU/public_html"
 DROPIN="/etc/ssh/sshd_config.d/cecp-${SU}.conf"
 VERSION="$(sed -nE 's/^CECP_PANEL_VERSION="\$\{CECP_PANEL_VERSION:-([^}]+)\}"$/\1/p' /opt/cecp-panel/lib/common.sh)"
-for h in "$D" "$D2" a-b.test a.b.test; do
+for h in "$D" "$D2" a-b.test a.b.test "shop.$D"; do
   grep -q " $h\$" /etc/hosts || echo "127.0.0.1 $h" >>/etc/hosts
 done
 
@@ -135,6 +135,9 @@ runuser -u "$SU" -- bash -c "echo SECRET=1 >$DOCROOT/.env"
 check "dotfiles denied" test "$(status_of "http://$D/.env")" = 403
 
 echo "=== FastCGI cache ==="
+# An entry cached minutes ago (before optimize stack) may be expired: background_update would
+# then answer STALE/UPDATING. Start from an empty cache.
+cecp-panel optimize purge "$D" >/dev/null
 curl -s -o /dev/null "http://$D/"; curl -s -o /dev/null "http://$D/"
 check "second request is a cache HIT" expect_cache / HIT
 check "fbclid does not bust the cache" expect_cache '/?fbclid=IwAR0abc' HIT
@@ -413,6 +416,153 @@ rm -f /tmp/mirror/dist/SHA256SUMS
 check "missing SHA256SUMS is refused" bash -c "cecp-panel update panel 2>&1 | grep -q 'refusing an unverified update'"
 check "pinned --sha256 works" cecp-panel update panel "$VERSION" --sha256 "$GOOD"
 
+echo "=== Image negotiation (WebP / AVIF sidecars) ==="
+UP="$DOCROOT/wp-content/uploads"
+for f in neg.jpg:ORIG-JPEG neg.webp:SIDECAR-WEBP neg.avif:SIDECAR-AVIF plain.png:ORIG-PNG; do
+  runuser -u "$SU" -- bash -c "printf '%s' '${f#*:}' >$UP/${f%%:*}"
+done
+img_is() {  # img_is PATH ACCEPT CONTENT_TYPE BODY_MARK
+  local h
+  h="$(curl -s -D - -o /tmp/img.body -H "Accept: $2" "http://$D$1" | tr -d '\r')"
+  echo "$h"; cat /tmp/img.body; echo
+  grep -qi "^content-type: $3" <<<"$h" && grep -qi '^vary: .*accept' <<<"$h" && grep -qx "$4" /tmp/img.body
+}
+check "WebP sidecar served to browsers that accept WebP" img_is /wp-content/uploads/neg.jpg 'image/webp,*/*' image/webp SIDECAR-WEBP
+check "original served to browsers without WebP" img_is /wp-content/uploads/neg.jpg 'image/png,*/*' image/jpeg ORIG-JPEG
+check "AVIF not served while AVIF is off" img_is /wp-content/uploads/neg.jpg 'image/avif,image/webp,*/*' image/webp SIDECAR-WEBP
+check "image without a sidecar falls back to itself" img_is /wp-content/uploads/plain.png 'image/avif,image/webp,*/*' image/png ORIG-PNG
+check "missing image is 404" test "$(status_of -H 'Accept: image/webp' "http://$D/wp-content/uploads/nope.jpg")" = 404
+check "media enable rejects a non-numeric quality" bash -c "! cecp-panel media enable $D --quality abc"
+check "media enable --avif" cecp-panel media enable "$D" --avif --no-cron
+settle
+check "AVIF sidecar served to browsers that accept AVIF" img_is /wp-content/uploads/neg.jpg 'image/avif,image/webp,*/*' image/avif SIDECAR-AVIF
+check "WebP still served to WebP-only browsers" img_is /wp-content/uploads/neg.jpg 'image/webp,*/*' image/webp SIDECAR-WEBP
+
+echo "=== Page cache: TTL + auto-purge on content change ==="
+check "cache ttl 1h" bash -c "cecp-panel cache ttl $D 1h && grep -q 'fastcgi_cache_valid 200 301 302 1h;' /etc/nginx/conf.d/cecp-$SLUG.conf"
+check "cache ttl rejects bad values" bash -c "! cecp-panel cache ttl $D 5x && ! cecp-panel cache ttl $D 2d && ! cecp-panel cache ttl $D '1h;'"
+Q="/home/$SU/tmp/cecp-purge.queue"
+check "mu-plugins are valid PHP" bash -c "php -l /opt/cecp-panel/templates/mu-plugins/cecp-cache-purge.php && php -l /opt/cecp-panel/templates/mu-plugins/cecp-media-optimize.php"
+check "cache auto-purge on" cecp-panel cache auto-purge "$D" on
+check "mu-plugin installed root-owned (site cannot change it)" \
+  bash -c "[ \"\$(stat -c '%U %a' $DOCROOT/wp-content/mu-plugins/cecp-cache-purge.php)\" = 'root 644' ] && grep -qF '$Q' $DOCROOT/wp-content/mu-plugins/cecp-cache-purge.json"
+check "queue owned by the site user (600)" test "$(stat -c '%U %a' "$Q")" = "$SU 600"
+check "purge watcher active" systemctl is-active --quiet "cecp-purge@${SLUG}.path"
+check "cron fallback installed" grep -q 'cache purge-queue --all' /etc/cron.d/cecp-cache-purge
+check "cache status" bash -c "cecp-panel cache status $D | grep -q 'auto-purge:  True'"
+PID="$(wp_d post create --post_title='Alpha title' --post_status=publish --porcelain)"
+PURL="$(wp_d post list --post__in="$PID" --field=url --post_type=post)"
+PPATH="/${PURL#http*://*/}"
+UNI="$(wp_d post create --post_title='Unicode' --post_name='日本' --post_status=publish --porcelain)"
+UPATH="/%E6%97%A5%E6%9C%AC/"  # browsers send uppercase %xx; WordPress permalinks are lowercase
+warm() { curl -s -o /dev/null "http://${2:-$D}$1"; curl -s -o /dev/null "http://${2:-$D}$1"; }
+cache_of() { curl -s -o /dev/null -D - "http://${2:-$D}$1" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-cecp-cache"{print $2}'; }
+wait_miss() {  # wait_miss PATH [HOST] — the path unit purges asynchronously
+  for _ in $(seq 15); do
+    [ "$(cache_of "$1" "${2:-$D}")" != HIT ] && return 0
+    sleep 1
+  done
+  return 1
+}
+warm "$PPATH"; warm /; warm "$UPATH"
+check "precondition: post cached" expect_cache "$PPATH" HIT
+check "precondition: unicode post cached (browser spelling)" expect_cache "$UPATH" HIT
+wp_d post update "$PID" --post_title='Beta title' >/dev/null
+check "updating a post purges its page" wait_miss "$PPATH"
+check "the page shows the new title" bash -c "curl -s http://$D$PPATH | grep -q 'Beta title'"
+check "the home page is purged too" test "$(cache_of /)" = MISS
+wp_d post update "$UNI" --post_title='Unicode 2' >/dev/null
+check "percent-encoded (unicode) slug purged for the browser's spelling" wait_miss "$UPATH"
+check "purge logged" bash -c "grep -q 'cache: purged .* URL(s) of $D' /var/log/cecp-panel/panel.log"
+warm /; warm / "$D2"
+runuser -u "$SU" -- bash -c "printf '%s\n' 'http://$D2/' 'https://evil.test/x' 'file:///etc/passwd' 'http://$D/ spaced' >>$Q"
+sleep 3
+check "queue lines for other hosts / schemes are ignored (other site still cached)" test "$(cache_of / "$D2")" = HIT
+check "malformed lines purge nothing" test "$(cache_of /)" = HIT
+check "queue was consumed" test ! -s "$Q"
+runuser -u "$SU" -- bash -c "echo '*' >>$Q"
+check "'*' purges the whole site" wait_miss /
+check "... and only this site" test "$(cache_of / "$D2")" = HIT
+cp -a /etc/shadow /tmp/shadow.before
+runuser -u "$SU" -- bash -c "rm -f $Q && ln -s /etc/shadow $Q"
+check "symlinked queue is refused and its target untouched" \
+  bash -c "cecp-panel cache purge-queue $SLUG && cmp -s /etc/shadow /tmp/shadow.before"
+check "auto-purge on replaces a planted symlink with a real queue" \
+  bash -c "cecp-panel cache auto-purge $D on && [ ! -L $Q ] && [ \"\$(stat -c '%U %a %F' $Q)\" = '$SU 600 regular empty file' ]"
+check "unknown slug rejected" bash -c "! cecp-panel cache purge-queue 'no_such_site'"
+check "nginx config valid" nginx -t
+
+echo "=== Cloudflare HTML edge cache ==="
+python3 "$HERE/mock_cf.py" 8788 /tmp/mockcf2.log 0 & MOCK=$!
+printf 'CF_API_TOKEN=%s\nCF_DEFAULT_ZONE=%s\nCF_API_BASE=http://127.0.0.1:8788\n' "$TOKEN" "$D" \
+  | install -m 600 /dev/stdin /etc/cecp-panel/credentials.env
+sleep 1
+RS=http://127.0.0.1:8788/zones/zone123/rulesets/phases/http_request_cache_settings/entrypoint
+curl -s -X PUT -d '{"rules":[{"description":"manual: keep me","expression":"(http.host eq \"other.test\")","action":"set_cache_settings","action_parameters":{"cache":false}}]}' "$RS" >/dev/null
+rules_check() {  # rules_check PYTHON_EXPR  (r = our rule or None, rules = all)
+  curl -s "$RS" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+rules = (d.get("result") or {}).get("rules") or []
+r = next((x for x in rules if x.get("description") == "cecp-panel: " + sys.argv[1]), None)
+print(json.dumps(rules, indent=1))
+sys.exit(0 if eval(sys.argv[2]) else 1)
+' "$D" "$1"
+}
+check "cf edge-cache on --ttl 2h" cecp-panel cf edge-cache "$D" on --ttl 2h
+check "edge rule: host, TTL, admin/cookie bypass" \
+  rules_check "r and r['action_parameters']['edge_ttl']['default'] == 7200 and 'http.host eq \"$D\"' in r['expression'] and 'wordpress_logged_in' in r['expression'] and '/wp-admin' in r['expression'] and 'woocommerce_items_in_cart' in r['expression']"
+check "the zone's other cache rules are kept" rules_check "any(x['description'] == 'manual: keep me' and x['id'] == 'rule1' for x in rules)"
+check "re-running keeps a single rule for the site" \
+  bash -c "cecp-panel cf edge-cache $D on --ttl 1h >/dev/null && curl -s $RS | grep -o 'cecp-panel: $D' | wc -l | grep -qx 1"
+check "cf edge-cache status" bash -c "cecp-panel cf edge-cache $D status | grep -q 'on, edge TTL 3600s'"
+touch /tmp/mockcf.fail-rulesets
+check "unreadable ruleset: refuse to overwrite the zone's rules" bash -c "! cecp-panel cf edge-cache $D off"
+rm -f /tmp/mockcf.fail-rulesets
+check "... rules untouched" rules_check "r is not None and len(rules) == 2"
+: >/tmp/mockcf2.log
+wp_d post update "$PID" --post_title='Gamma title' >/dev/null
+check "content change purges the post URL at the edge" \
+  bash -c "for i in \$(seq 15); do grep -q 'purge_cache.*\"files\".*$PPATH' /tmp/mockcf2.log && exit 0; sleep 1; done; cat /tmp/mockcf2.log; exit 1"
+runuser -u "$SU" -- bash -c "echo '*' >>$Q"
+check "'*' purges the site's host at the edge (not the zone)" \
+  bash -c "for i in \$(seq 15); do grep -q 'purge_cache.*\"hosts\": \[\"$D\"\]' /tmp/mockcf2.log && exit 0; sleep 1; done; cat /tmp/mockcf2.log; exit 1"
+check "no zone-wide purge_everything" bash -c "! grep -q purge_everything /tmp/mockcf2.log"
+check "cf edge-cache off" cecp-panel cf edge-cache "$D" off
+check "... removes only our rule" rules_check "[x['description'] for x in rules] == ['manual: keep me']"
+check "edge purge stops once edge cache is off" \
+  bash -c ": >/tmp/mockcf2.log; echo '*' | runuser -u $SU -- tee -a $Q >/dev/null; sleep 3; ! grep -q purge_cache /tmp/mockcf2.log"
+
+echo "=== SSL: DNS-01 via Cloudflare, wildcard ==="
+chmod +x "$HERE/fake_certbot.sh"
+export CECP_CERTBOT="$HERE/fake_certbot.sh"
+rm -f /tmp/certbot.args
+check "ssl issue --wildcard" cecp-panel ssl issue "$D" --wildcard
+check "certbot used DNS-01 for DOMAIN and *.DOMAIN" \
+  bash -c "grep -q -- '--dns-cloudflare ' /tmp/certbot.args && grep -qF -- '-d $D -d *.$D' /tmp/certbot.args && grep -qF -- '--cert-name $D' /tmp/certbot.args"
+check "API token not on the certbot command line" bash -c "! grep -qF '$TOKEN' /tmp/certbot.args"
+check "Cloudflare credentials file is 600 root" test "$(stat -c '%a %U' /etc/letsencrypt/cecp-cloudflare.ini)" = "600 root"
+check "DNS-01 renewal kept (not converted to webroot), installer dropped" \
+  bash -c "grep -qx 'authenticator = dns-cloudflare' /etc/letsencrypt/renewal/$D.conf && ! grep -q '^installer' /etc/letsencrypt/renewal/$D.conf && ! grep -q webroot /etc/letsencrypt/renewal/$D.conf"
+settle
+check "site served over HTTPS with the new certificate" \
+  bash -c "[[ \"\$(curl -sk -o /dev/null -w '%{http_code}' --resolve $D:443:127.0.0.1 https://$D/)\" =~ ^(200|301|302)$ ]] && openssl s_client -connect 127.0.0.1:443 -servername $D </dev/null 2>/dev/null | openssl x509 -noout -ext subjectAltName | grep -qF 'DNS:$D'"
+meta_get() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]))' "/var/lib/cecp-panel/sites/$D.json" "$1"; }
+check "site meta records the wildcard" test "$(meta_get ssl_wildcard) $(meta_get ssl_method)" = "True dns"
+check "new subdomain site uses the parent wildcard" \
+  bash -c "cecp-panel site add shop.$D && grep -qE 'ssl_certificate +/etc/letsencrypt/live/$D/fullchain.pem;' /etc/nginx/conf.d/cecp-shop_${SLUG}.conf"
+settle
+check "subdomain served over HTTPS with *.$D" \
+  bash -c "openssl s_client -connect 127.0.0.1:443 -servername shop.$D </dev/null 2>/dev/null | openssl x509 -noout -ext subjectAltName | grep -qF '*.$D'"
+check "removing the wildcard falls back to HTTP for both sites, nginx valid" \
+  bash -c "cecp-panel ssl remove $D && nginx -t && ! grep -q 'listen 443' /etc/nginx/conf.d/cecp-shop_${SLUG}.conf && ! grep -q 'listen 443' /etc/nginx/conf.d/cecp-$SLUG.conf"
+settle
+check "site serves WordPress over HTTP after certificate removal" serves_wp
+check "site remove shop.$D" cecp-panel site remove "shop.$D"
+unset CECP_CERTBOT
+kill "$MOCK" 2>/dev/null
+rm -f /etc/cecp-panel/credentials.env
+
 echo "=== site remove ==="
 check "site remove $D2" cecp-panel site remove "$D2"
 check "site files removed with the site" test ! -e "/home/$SU2"
@@ -427,6 +577,7 @@ check "site artifacts are gone" bash -c "
   ! mysql -e 'USE db_$SLUG'"
 check "Redis ACL users removed" bash -c "! grep -q $UA /etc/redis/cecp-acl.conf"
 check "protect-admin htpasswd removed" test ! -e "/etc/nginx/cecp-auth/${SLUG}.htpasswd"
+check "purge watcher removed with the site" bash -c "! systemctl is-enabled --quiet cecp-purge@${SLUG}.path"
 check "sshd config valid after remove" sshd -t
 check "nginx config valid after remove" nginx -t
 
