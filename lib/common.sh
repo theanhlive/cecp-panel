@@ -4,6 +4,7 @@ set -euo pipefail
 
 CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.5.0-beta}"
 PANEL_ROOT="${PANEL_ROOT:-/opt/cecp-panel}"
+INSTALL_ROOT="${INSTALL_ROOT:-/opt/cecp-panel}"
 ETC_DIR="/etc/cecp-panel"
 VAR_LIB="/var/lib/cecp-panel"
 SITES_DIR="$VAR_LIB/sites"

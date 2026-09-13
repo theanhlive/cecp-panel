@@ -63,8 +63,14 @@ wp_install_system_cron() {
   site_user="$(wp_site_meta "$domain" "site_user")"
   docroot="$(wp_site_meta "$domain" "docroot")"
   slug="$(domain_slug "$domain")"
+  # Cron runs as the site user, which cannot create files in root-owned $LOG_DIR:
+  # pre-create its log, otherwise the redirect fails and wp-cron never runs.
+  local cron_log="$LOG_DIR/wp-cron/wp-cron-${slug}.log"
+  install -d -m 755 "$LOG_DIR/wp-cron"
+  [[ -f "$cron_log" ]] || install -m 640 /dev/null "$cron_log"
+  chown "${site_user}:${site_user}" "$cron_log"
   cat >/etc/cron.d/cecp-wp-${slug} <<EOF
-*/15 * * * * ${site_user} cd ${docroot} && /usr/local/bin/wp cron event run --due-now >>/var/log/cecp-panel/wp-cron-${slug}.log 2>&1
+*/15 * * * * ${site_user} cd ${docroot} && /usr/local/bin/wp cron event run --due-now >>${cron_log} 2>&1
 EOF
   chmod 644 /etc/cron.d/cecp-wp-${slug}
   wp_site_exec "$domain" config set DISABLE_WP_CRON true --raw

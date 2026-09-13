@@ -165,18 +165,25 @@ site_remove() {
   meta="$(site_meta_path "$domain")"
   [[ -f "$meta" ]] || panel_die "Site not found: $domain"
 
-  local site_user slug pool_name
-  site_user="$(python3 -c "import json; print(json.load(open('$meta'))['site_user']")"
+  local site_user slug db_name db_user
+  site_user="$(site_json_get "$domain" site_user)"
   slug="$(domain_slug "$domain")"
-  pool_name="$(python3 -c "import json; print(json.load(open('$meta'))['pool_name']")"
-  local db_name db_user
-  db_name="$(python3 -c "import json; print(json.load(open('$meta'))['db_name']")"
-  db_user="$(python3 -c "import json; print(json.load(open('$meta'))['db_user']")"
+  db_name="$(site_json_get "$domain" db_name)"
+  db_user="$(site_json_get "$domain" db_user)"
 
   ssl_remove_for_domain "$domain" 2>/dev/null || true
 
   rm -f "/etc/nginx/conf.d/cecp-${slug}.conf"
   rm -f "/etc/php-fpm.d/cecp-${slug}.conf"
+  # Remi pools: an orphan pool pointing at a deleted user stops that PHP version from starting.
+  local remi_pool svc
+  for remi_pool in /etc/opt/remi/php*/php-fpm.d/cecp-"${slug}".conf; do
+    [[ -f "$remi_pool" ]] || continue
+    rm -f "$remi_pool"
+    svc="$(echo "$remi_pool" | sed -E 's#^/etc/opt/remi/(php[0-9]+)/.*#\1#')-php-fpm"
+    systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
+  done
+  rm -f "/etc/cron.d/cecp-wp-${slug}" "/etc/ssh/sshd_config.d/cecp-${site_user}.conf"
   # shellcheck source=/dev/null
   source "$PANEL_ROOT/lib/mysql.sh"
   mysql_drop_site_db "$db_name" "$db_user"
