@@ -18,8 +18,8 @@ server {
 {{LISTEN_SSL}}
     server_name {{DOMAIN}};
 
-    ssl_certificate     /etc/letsencrypt/live/{{DOMAIN}}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/{{DOMAIN}}/privkey.pem;
+    ssl_certificate     {{CERT_DIR}}/fullchain.pem;
+    ssl_certificate_key {{CERT_DIR}}/privkey.pem;
     include /etc/nginx/snippets/cecp-ssl-params.conf;
     set $cecp_hsts "{{HSTS}}";
 

@@ -166,6 +166,173 @@ cf_set_minify() {
   echo "Minify at build time or with a WordPress optimisation plugin instead."
 }
 
+# ---------------------------------------------------------------------------
+# Edge HTML cache (Cache Rules). One rule per site, identified by its description, in the
+# zone's http_request_cache_settings entrypoint; every other rule in that ruleset is kept.
+# ---------------------------------------------------------------------------
+cf_edge_rule_desc() { echo "cecp-panel: $1"; }
+
+# Build the new entrypoint body from the current one (stdin): drop our rule for DOMAIN and,
+# if TTL > 0, append a fresh one. Prints the JSON body for PUT.
+cf_edge_rules_payload() {
+  # The heredoc is python's stdin (the script), so the current ruleset travels in the env.
+  local current
+  current="$(cat)"
+  CF_CURRENT_RULESET="$current" python3 - "$1" "$2" <<'PY'
+import json, os, sys
+domain, ttl = sys.argv[1], int(sys.argv[2])
+try:
+    cur = json.loads(os.environ.get("CF_CURRENT_RULESET") or "{}")
+except ValueError:
+    cur = {}
+rules = (cur.get("result") or {}).get("rules") or [] if cur.get("success") else []
+desc = f"cecp-panel: {domain}"
+keep = []
+for r in rules:
+    if r.get("description") == desc:
+        continue
+    keep.append({k: r[k] for k in ("id", "description", "expression", "action", "action_parameters", "enabled") if k in r})
+if ttl > 0:
+    d = json.dumps(domain)
+    expr = " and ".join([
+        f"(http.host eq {d}",
+        'not starts_with(http.request.uri.path, "/wp-admin")',
+        'not starts_with(http.request.uri.path, "/wp-json")',
+        'not http.request.uri.path in {"/wp-login.php" "/xmlrpc.php" "/wp-cron.php"}',
+        'not http.request.uri.path contains "/cart"',
+        'not http.request.uri.path contains "/checkout"',
+        'not http.request.uri.path contains "/my-account"',
+        'not http.request.uri.query contains "s="',
+        'not http.request.uri.query contains "preview"',
+        'not http.request.uri.query contains "wc-ajax"',
+        'not http.request.uri.query contains "add-to-cart"',
+        'not http.cookie contains "wordpress_logged_in"',
+        'not http.cookie contains "wp-postpass"',
+        'not http.cookie contains "woocommerce_items_in_cart"',
+        'not http.cookie contains "woocommerce_cart_hash"',
+        'not http.cookie contains "comment_author")',
+    ])
+    keep.append({
+        "description": desc, "enabled": True, "expression": expr, "action": "set_cache_settings",
+        "action_parameters": {"cache": True,
+                              "edge_ttl": {"mode": "override_origin", "default": ttl},
+                              "browser_ttl": {"mode": "respect_origin"}},
+    })
+print(json.dumps({"rules": keep}))
+PY
+}
+
+cf_ttl_seconds() {
+  local t="${1:-1h}" n unit
+  [[ "$t" =~ ^([0-9]{1,5})([smhd]?)$ ]] || panel_die "Invalid TTL '$t' (e.g. 30m, 1h, 1d)"
+  n="${BASH_REMATCH[1]}"
+  unit="${BASH_REMATCH[2]:-s}"
+  case "$unit" in
+    s) echo "$n" ;;
+    m) echo $(( n * 60 )) ;;
+    h) echo $(( n * 3600 )) ;;
+    d) echo $(( n * 86400 )) ;;
+  esac
+}
+
+# cecp-panel cf edge-cache DOMAIN on [--ttl 1h] | off | status
+cf_edge_cache() {
+  local domain="${1:-}" action="${2:-status}"
+  shift $(( $# < 2 ? $# : 2 ))
+  domain="${domain,,}"
+  require_root
+  validate_domain "$domain"
+  [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
+  local ttl=3600
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ttl) ttl="$(cf_ttl_seconds "${2:-}")"; shift 2 || true ;;
+      *) panel_die "Usage: cecp-panel cf edge-cache DOMAIN on [--ttl 1h] | off | status" ;;
+    esac
+  done
+  cf_load
+  local zone zid path current body resp
+  zone="$(cf_zone_for_domain "$domain")"
+  zid="$(dns_zone_id "$zone")"
+  [[ -n "$zid" ]] || panel_die "Cloudflare zone not found for $domain"
+  path="/zones/${zid}/rulesets/phases/http_request_cache_settings/entrypoint"
+  current="$(dns_cf_api GET "$path" || true)"
+  if [[ "$action" == "status" ]]; then
+    python3 -c '
+import json, sys
+desc = "cecp-panel: " + sys.argv[1]
+try:
+    rules = (json.loads(sys.stdin.read()).get("result") or {}).get("rules") or []
+except ValueError:
+    rules = []
+r = next((r for r in rules if r.get("description") == desc), None)
+print("edge cache: " + ("on, edge TTL %ss" % r["action_parameters"]["edge_ttl"]["default"] if r else "off"))
+' "$domain" <<<"$current"
+    return 0
+  fi
+  case "$action" in
+    on) (( ttl >= 60 && ttl <= 2592000 )) || panel_die "TTL must be between 60s and 30d" ;;
+    off) ttl=0 ;;
+    *) panel_die "Usage: cecp-panel cf edge-cache DOMAIN on [--ttl 1h] | off | status" ;;
+  esac
+  # The PUT replaces the whole ruleset: only build on "success" or "no entrypoint yet" (10003),
+  # never on an unreadable response — that would drop the zone's other cache rules.
+  python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if d.get("success") or any(e.get("code") == 10003 for e in d.get("errors") or []) else 1)
+' <<<"$current" || panel_die "Could not read the zone's cache rules: ${current:0:300} — the API token needs Zone → Cache Rules → Edit"
+  body="$(cf_edge_rules_payload "$domain" "$ttl" <<<"$current")"
+  resp="$(dns_cf_api PUT "$path" "$body")"
+  if ! python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.stdin.read()).get("success") else 1)' <<<"$resp" 2>/dev/null; then
+    panel_die "Cloudflare rejected the cache rule: $resp — the API token needs Zone → Cache Rules → Edit"
+  fi
+  if (( ttl > 0 )); then
+    site_json_set "$domain" cf_edge true cf_edge_ttl "$ttl"
+    panel_log "Cloudflare edge cache ON for $domain (HTML cached ${ttl}s at the edge; logged-in/cart/admin bypass)"
+    [[ "$(site_json_get_or "$domain" cache_autopurge false)" == "True" ]] \
+      || panel_log "Tip: cecp-panel cache auto-purge $domain on — purges the edge when content changes"
+  else
+    site_json_set "$domain" cf_edge false cf_edge_ttl ""
+    panel_log "Cloudflare edge cache OFF for $domain"
+  fi
+}
+
+# Purge a list of URLs (stdin, one per line) at the Cloudflare edge — 30 per API call.
+cf_purge_urls() {
+  local domain="$1" zone zid body resp
+  cf_load
+  zone="$(cf_zone_for_domain "$domain")"
+  zid="$(dns_zone_id "$zone")"
+  [[ -n "$zid" ]] || return 1
+  local rc=0
+  while IFS= read -r body; do
+    [[ -n "$body" ]] || continue
+    resp="$(dns_cf_api POST "/zones/${zid}/purge_cache" "$body")"
+    python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.stdin.read()).get("success") else 1)' <<<"$resp" 2>/dev/null || rc=1
+  done < <(python3 -c '
+import json, sys
+urls = [u.strip() for u in sys.stdin if u.strip()]
+for i in range(0, len(urls), 30):
+    print(json.dumps({"files": urls[i:i + 30]}))
+')
+  return "$rc"
+}
+
+# Purge everything cached at the edge for one hostname (not the whole zone).
+cf_purge_host() {
+  local domain="$1" zone zid resp
+  cf_load
+  zone="$(cf_zone_for_domain "$domain")"
+  zid="$(dns_zone_id "$zone")"
+  [[ -n "$zid" ]] || return 1
+  resp="$(dns_cf_api POST "/zones/${zid}/purge_cache" "$(python3 -c 'import json,sys; print(json.dumps({"hosts": [sys.argv[1]]}))' "$domain")")"
+  python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.stdin.read()).get("success") else 1)' <<<"$resp" 2>/dev/null
+}
+
 cf_recommend() {
   cat <<'EOF'
 === Cloudflare edge recommendations (WordPress) ===

@@ -11,11 +11,28 @@ site_ensure_tmp() {
   fi
 }
 
+# Let's Encrypt directory that serves DOMAIN: its own lineage, else a parent wildcard
+# (*.example.com covers shop.example.com — one label only, like the certificate itself).
+site_cert_dir() {
+  local domain="$1" parent="${1#*.}"
+  if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
+    echo "/etc/letsencrypt/live/${domain}"
+    return 0
+  fi
+  if [[ "$parent" != "$domain" && "$parent" == *.* && -f "/etc/letsencrypt/live/${parent}/fullchain.pem" ]] \
+     && openssl x509 -noout -ext subjectAltName -in "/etc/letsencrypt/live/${parent}/fullchain.pem" 2>/dev/null \
+        | grep -qF "DNS:*.${parent}"; then
+    echo "/etc/letsencrypt/live/${parent}"
+    return 0
+  fi
+  return 1
+}
+
 # Print the HTTP status of the site's home page, fetched locally and bypassing the page cache
 # (a cached HIT would hide a broken PHP/DB). Succeeds for 2xx/3xx.
 site_http_check() {
   local domain="$1" scheme="http" code
-  [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]] && scheme="https"
+  [[ "$(site_json_get_or "$domain" ssl false)" == "True" ]] && scheme="https"
   code="$(curl -sk -o /dev/null -w '%{http_code}' -m 15 \
     --resolve "${domain}:80:127.0.0.1" --resolve "${domain}:443:127.0.0.1" \
     -H 'Cookie: wordpress_logged_in_cecp_healthcheck=1' "${scheme}://${domain}/" 2>/dev/null || true)"
@@ -180,14 +197,22 @@ site_render_vhost() {
   docroot="$(site_json_get "$domain" docroot)"
   php_sock="$(site_json_get "$domain" php_sock)"
   out="/etc/nginx/conf.d/cecp-${slug}.conf"
+  local ttl avif cert_dir
+  ttl="$(site_json_get_or "$domain" cache_ttl 5m)"
+  [[ "$ttl" =~ ^[0-9]{1,4}[smhd]$ ]] || ttl=5m
+  if [[ "$(site_json_get_or "$domain" img_avif false)" == "True" ]]; then
+    avif='$cecp_avif_ext'
+  else
+    avif='".no-avif"'
+  fi
   ensure_nginx_global
   body="$(mktemp)"
   template_render "$PANEL_ROOT/templates/nginx-site-body.tpl" "$body" \
-    DOMAIN "$domain" DOCROOT "$docroot" PHP_SOCK "$php_sock" \
+    DOMAIN "$domain" DOCROOT "$docroot" PHP_SOCK "$php_sock" CACHE_TTL "$ttl" IMG_AVIF "$avif" \
     ADMIN_GUARD "$(site_admin_guard "$domain" "$slug")"
-  if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
+  if cert_dir="$(site_cert_dir "$domain")"; then
     template_render "$PANEL_ROOT/templates/nginx-vhost-ssl.conf.tpl" "$out" \
-      DOMAIN "$domain" DOCROOT "$docroot" LISTEN_SSL "$(nginx_listen_ssl_lines)" \
+      DOMAIN "$domain" DOCROOT "$docroot" LISTEN_SSL "$(nginx_listen_ssl_lines)" CERT_DIR "$cert_dir" \
       HSTS "$(site_hsts_value "$domain")" SITE_BODY "$(<"$body")" \
       ADMIN_GUARD_HTTP "$(site_admin_guard_http "$domain" "$slug")"
     site_set_ssl_flag "$domain" true
@@ -195,6 +220,7 @@ site_render_vhost() {
     template_render "$PANEL_ROOT/templates/nginx-vhost.conf.tpl" "$out" \
       DOMAIN "$domain" SITE_BODY "$(<"$body")" \
       ADMIN_GUARD_HTTP "$(site_admin_guard_http "$domain" "$slug")"
+    site_set_ssl_flag "$domain" false
   fi
   rm -f "$body"
   chmod 644 "$out"
@@ -428,6 +454,7 @@ site_remove() {
     svc="$(echo "$remi_pool" | sed -E 's#^/etc/opt/remi/(php[0-9]+)/.*#\1#')-php-fpm"
     systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
   done
+  systemctl disable --now "cecp-purge@${slug}.path" >/dev/null 2>&1 || true
   rm -f "/etc/cron.d/cecp-wp-${slug}" "${ADMIN_AUTH_DIR}/${slug}.htpasswd"
   if [[ -f "/etc/ssh/sshd_config.d/cecp-${site_user}.conf" ]]; then
     rm -f "/etc/ssh/sshd_config.d/cecp-${site_user}.conf"
@@ -474,6 +501,8 @@ site_duplicate() {
   panel_log "Copying files $src → $dst ..."
   rsync -a "$src_doc/" "$dst_doc/" 2>/dev/null || cp -a "$src_doc/." "$dst_doc/"
   chown -R "$(site_json_get "$dst" site_user):" "$dst_doc"
+  # The auto-purge config names the source site's queue; enable it on the copy separately.
+  rm -f "$dst_doc/wp-content/mu-plugins/cecp-cache-purge.php" "$dst_doc/wp-content/mu-plugins/cecp-cache-purge.json"
   panel_log "Copying database $(site_json_get "$src" db_name) → $(site_json_get "$dst" db_name) ..."
   src_cnf="$(mysql_client_cnf "$(site_json_get "$src" db_user)" "$(site_json_get "$src" db_pass)")"
   dst_cnf="$(mysql_client_cnf "$(site_json_get "$dst" db_user)" "$(site_json_get "$dst" db_pass)")"

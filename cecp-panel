@@ -27,6 +27,7 @@ source "$PANEL_ROOT/lib/php_mgr.sh"
 source "$PANEL_ROOT/lib/update.sh"
 source "$PANEL_ROOT/lib/wordpress.sh"
 source "$PANEL_ROOT/lib/optimize.sh"
+source "$PANEL_ROOT/lib/cache.sh"
 source "$PANEL_ROOT/lib/media.sh"
 source "$PANEL_ROOT/lib/notify.sh"
 source "$PANEL_ROOT/lib/monitor.sh"
@@ -35,7 +36,7 @@ source "$PANEL_ROOT/lib/modsec.sh"
 source "$PANEL_ROOT/lib/logview.sh"
 source "$PANEL_ROOT/lib/menu.sh"
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.7.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.8.0-beta}"
 
 usage() {
   cat <<EOF
@@ -48,8 +49,13 @@ CECP Panel v$CECP_PANEL_VERSION
     site protect-admin DOMAIN on [--ip CIDR,...] [--no-auth] [--user NAME] | off | status | reset-password
     site add DOMAIN [--wordpress|--wp] [--php 82] [--ssl] [--redis]
   cecp-panel ssl list|issue|fix|renew|status|remove|hsts DOMAIN on|off|subdomains
+    ssl issue DOMAIN [--dns] [--wildcard]      # DNS-01 via Cloudflare (no port 80 needed); wildcard = DOMAIN + *.DOMAIN
   cecp-panel dns list|add|point|ssl-mode
-  cecp-panel cf status|purge|purge-url|realip|brotli|cache-level|recommend [args]
+  cecp-panel cf status|purge|purge-url|realip|edge-cache|brotli|cache-level|recommend [args]
+    cf edge-cache DOMAIN on [--ttl 1h] | off | status   # cache HTML at Cloudflare (logged-in/cart bypassed)
+  cecp-panel cache status DOMAIN | purge [DOMAIN] | purge-url URL
+    cache auto-purge DOMAIN on|off              # WordPress: purge changed pages on save/publish/comment
+    cache ttl DOMAIN 5m|30m|1h|6h|1d            # origin page-cache lifetime
   cecp-panel backup setup|status|run|verify|list|prune|restore|enable-cron|...
     backup restore DOMAIN SNAPSHOT|latest [--live [--dry-run] [--yes]] [--target DIR] [--repo REPO]
     backup verify DOMAIN|--all
@@ -64,7 +70,7 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel wp harden|optimize|cron|status DOMAIN
   cecp-panel optimize site|nginx|redis|redis-wp|redis-acl|mariadb|opcache|kernel|purge|purge-url|stack|bench|report|webp|brotli
   cecp-panel media enable|disable|status|run|run-all|enable-cron|disable-cron
-    media enable DOMAIN [--max-width 1920] [--quality 80] [--no-upload] [--no-cron] [--no-webp]
+    media enable DOMAIN [--max-width 1920] [--quality 80] [--no-upload] [--no-cron] [--no-webp] [--avif]
     media run DOMAIN [--dry-run] [--limit N]   # only if enabled for that site
   cecp-panel notify setup|status|test|health|enable-cron|disable-cron|webhook URL|off
   cecp-panel monitor run|status|enable|disable
@@ -144,7 +150,7 @@ case "$cmd" in
     require_root
     case "$sub" in
       list) ssl_list ;;
-      issue) [[ -n "${1:-}" ]] && ssl_issue_for_domain "$1" || panel_die "Usage: cecp-panel ssl issue DOMAIN" ;;
+      issue) [[ -n "${1:-}" ]] && ssl_issue_for_domain "$@" || panel_die "Usage: cecp-panel ssl issue DOMAIN [--dns] [--wildcard]" ;;
       fix)
         if [[ "${1:-}" == "--all" ]]; then
           ssl_fix_all
@@ -185,11 +191,25 @@ case "$cmd" in
       purge) cf_purge "${1:-all}" ;;
       purge-url) cf_purge_url "${1:-}" ;;
       realip) cf_realip_update ;;
+      edge-cache) cf_edge_cache "$@" ;;
       brotli) cf_set_brotli "${1:-on}" "${2:-}" ;;
       cache-level) cf_set_cache_level "${1:-aggressive}" "${2:-}" ;;
       minify) cf_set_minify "${1:-}" ;;
       recommend|tips) cf_recommend ;;
-      *) panel_die "Usage: cecp-panel cf status|purge|purge-url|realip|brotli|cache-level|recommend" ;;
+      *) panel_die "Usage: cecp-panel cf status|purge|purge-url|realip|edge-cache|brotli|cache-level|recommend" ;;
+    esac
+    ;;
+  cache)
+    sub="${1:-}"; shift || true
+    require_root
+    case "$sub" in
+      status) [[ -n "${1:-}" ]] && cache_status "$1" || panel_die "Usage: cecp-panel cache status DOMAIN" ;;
+      auto-purge) cache_auto_purge "$@" ;;
+      ttl) cache_ttl "$@" ;;
+      purge) optimize_purge_cache "${1:-all}" ;;
+      purge-url) optimize_purge_url "${1:-}" ;;
+      purge-queue) cache_purge_queue "${1:-}" ;;
+      *) panel_die "Usage: cecp-panel cache status|auto-purge|ttl|purge|purge-url DOMAIN ..." ;;
     esac
     ;;
   backup)

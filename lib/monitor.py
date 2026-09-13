@@ -101,8 +101,8 @@ def check_services(site_list):
     return checks, extra
 
 
-def http_probe(domain):
-    scheme = "https" if os.path.exists(f"/etc/letsencrypt/live/{domain}/fullchain.pem") else "http"
+def http_probe(domain, ssl=False):
+    scheme = "https" if ssl else "http"
     cmd = ["curl", "-sk", "-o", "/dev/null", "-w", "%{http_code} %{time_starttransfer}", "-m", "15",
            "--resolve", f"{domain}:80:127.0.0.1", "--resolve", f"{domain}:443:127.0.0.1",
            "-H", "Cookie: wordpress_logged_in_cecp_healthcheck=1", f"{scheme}://{domain}/"]
@@ -117,10 +117,11 @@ def check_sites(site_list):
     checks = []
     for s in site_list:
         d = s["domain"]
-        code, ttfb = http_probe(d)
+        ssl = bool(s.get("ssl"))
+        code, ttfb = http_probe(d, ssl)
         if not code.startswith(("2", "3")):
             time.sleep(5)  # one retry: do not page for a single slow request or a reload blip
-            code, ttfb = http_probe(d)
+            code, ttfb = http_probe(d, ssl)
         ok = code.startswith(("2", "3"))
         checks.append(Check(f"site:{d}", ok, "critical", "site_down", "site_recovered",
                             f"Site DOWN: {d} (HTTP {code})", f"Site back UP: {d} (HTTP {code})",

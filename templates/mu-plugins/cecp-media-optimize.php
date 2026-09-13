@@ -147,23 +147,28 @@ final class Cecp_Media_Optimize {
         }
 
         if (!empty($cfg['webp']) && function_exists('imagewebp')) {
-            self::maybe_write_webp($path, $quality);
+            self::maybe_write_sidecar($path, $quality, 'webp');
+        }
+        // imageavif: PHP >= 8.1 with a GD built against libavif.
+        if (!empty($cfg['avif']) && function_exists('imageavif')) {
+            self::maybe_write_sidecar($path, max(30, $quality - 20), 'avif');
         }
 
         $marker = $path . '.cecp-opt';
         @file_put_contents($marker, gmdate('c') . " optimized\n");
     }
 
-    private static function maybe_write_webp($path, $quality) {
+    /** photo.jpg -> photo.webp / photo.avif: the names nginx negotiates on the Accept header. */
+    private static function maybe_write_sidecar($path, $quality, $format) {
         $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
         if (!in_array($ext, ['jpg', 'jpeg', 'png'], true)) {
             return;
         }
-        $webp = preg_replace('/\.(jpe?g|png)$/i', '.webp', $path);
-        if (!$webp || $webp === $path) {
+        $out = preg_replace('/\.(jpe?g|png)$/i', '.' . $format, $path);
+        if (!$out || $out === $path) {
             return;
         }
-        if (is_file($webp) && filemtime($webp) >= filemtime($path)) {
+        if (is_file($out) && filemtime($out) >= filemtime($path)) {
             return;
         }
 
@@ -180,7 +185,11 @@ final class Cecp_Media_Optimize {
         }
         @imagealphablending($img, true);
         @imagesavealpha($img, true);
-        @imagewebp($img, $webp, $quality);
+        if ($format === 'avif') {
+            @imageavif($img, $out, $quality);
+        } else {
+            @imagewebp($img, $out, $quality);
+        }
         imagedestroy($img);
     }
 }

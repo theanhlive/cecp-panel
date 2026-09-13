@@ -105,12 +105,17 @@ import hashlib, re, sys
 from urllib.parse import urlsplit
 u, root = urlsplit(sys.argv[1]), sys.argv[2]
 track = re.compile(r"^(?:(?:utm_[a-z_]+|fbclid|gclid|gbraid|wbraid|dclid|msclkid|ttclid|twclid|igshid|mc_cid|mc_eid|_ga|_gl)=[^&]*&?)+$")
+pct = re.compile(r"%[0-9a-fA-F]{2}")
 path = u.path or "/"
 uri = path if (u.query and track.match(u.query)) else path + ("?" + u.query if u.query else "")
 host = (u.hostname or "").lower()
-for method in ("GET", "HEAD"):
-    h = hashlib.md5(f"{u.scheme}{method}{host}{uri}".encode()).hexdigest()
-    print(f"{root}/{h[-1]}/{h[-3:-1]}/{h}")
+# The key is the raw request URI: purge both %xx spellings (WordPress lowercase, browsers uppercase).
+uris = dict.fromkeys([uri, pct.sub(lambda m: m.group(0).upper(), uri), pct.sub(lambda m: m.group(0).lower(), uri)])
+for scheme in ("http", "https"):  # the page may be cached under either scheme (proxy, redirects)
+    for method in ("GET", "HEAD"):
+        for x in uris:
+            h = hashlib.md5(f"{scheme}{method}{host}{x}".encode()).hexdigest()
+            print(f"{root}/{h[-1]}/{h[-3:-1]}/{h}")
 PY
 )
   panel_log "Purged origin cache for $url (${n} entries)"

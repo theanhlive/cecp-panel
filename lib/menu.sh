@@ -89,11 +89,14 @@ menu_ssl() {
     echo ""
     echo "== SSL (Let's Encrypt) =="
     echo " 1) List  2) Add  3) Remove  4) Renew  5) Status  6) HSTS on/off/subdomains"
+    echo " 7) Add via Cloudflare DNS (no port 80)  8) Wildcard DOMAIN + *.DOMAIN (Cloudflare DNS)"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
       1) ssl_list ;;
       2) read -r -p "Domain: " dom; [[ -n "$dom" ]] && ssl_issue_for_domain "$dom" ;;
+      7) read -r -p "Domain: " dom; [[ -n "$dom" ]] && ssl_issue_for_domain "$dom" --dns ;;
+      8) read -r -p "Domain: " dom; [[ -n "$dom" ]] && ssl_issue_for_domain "$dom" --wildcard ;;
       3) read -r -p "Domain: " dom; [[ -n "$dom" ]] && ssl_remove_for_domain "$dom" ;;
       4) ssl_renew_all ;;
       5) ssl_status ;;
@@ -220,6 +223,9 @@ menu_perf() {
     echo "15) Purge one URL (origin cache)"
     echo "16) Cache report (hit ratio, p50/p95)"
     echo "17) Redis: per-site ACL for all sites + rotate shared password"
+    echo "18) Page cache: status of one site"
+    echo "19) Page cache: auto-purge on content change (on/off)"
+    echo "20) Page cache: TTL (5m / 1h / 1d ...)"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -252,6 +258,17 @@ menu_perf() {
       15) read -r -p "URL: " u; [[ -n "$u" ]] && optimize_purge_url "$u" ;;
       16) read -r -p "Domain: " d; [[ -n "$d" ]] && optimize_report "$d" 5000 ;;
       17) optimize_redis_acl --all ;;
+      18) read -r -p "Domain: " d; [[ -n "$d" ]] && cache_status "$d" ;;
+      19)
+        read -r -p "Domain: " d
+        read -r -p "on / off: " m
+        [[ -n "$d" && -n "$m" ]] && cache_auto_purge "$d" "$m"
+        ;;
+      20)
+        read -r -p "Domain: " d
+        read -r -p "TTL (e.g. 5m, 1h, 1d): " t
+        [[ -n "$d" && -n "$t" ]] && cache_ttl "$d" "$t"
+        ;;
       0) break ;;
     esac
   done
@@ -445,6 +462,7 @@ menu_cf() {
     echo " 4) Cache level aggressive"
     echo " 5) Recommendations"
     echo " 6) Refresh Cloudflare real-IP ranges"
+    echo " 7) HTML edge cache for a site (on/off/status)"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -454,6 +472,16 @@ menu_cf() {
       4) cf_set_cache_level aggressive ;;
       5) cf_recommend ;;
       6) cf_realip_update ;;
+      7)
+        read -r -p "Domain: " d
+        read -r -p "on / off / status: " m
+        if [[ "$m" == "on" ]]; then
+          read -r -p "Edge TTL [1h]: " t
+          [[ -n "$d" ]] && cf_edge_cache "$d" on --ttl "${t:-1h}"
+        elif [[ -n "$d" && -n "$m" ]]; then
+          cf_edge_cache "$d" "$m"
+        fi
+        ;;
       0) break ;;
     esac
   done

@@ -129,6 +129,7 @@ payload = {
     "max_height": int(cfg.get("max_height", 1920)),
     "quality": int(cfg.get("quality", 80)),
     "webp": bool(cfg.get("webp", True)),
+    "avif": bool(cfg.get("avif", False)),
     "skip_under_kb": int(cfg.get("skip_under_kb", 200)),
 }
 with open(out, "w", encoding="utf-8") as f:
@@ -166,6 +167,7 @@ media_enable() {
   local on_upload=true
   local cron=true
   local webp=true
+  local avif=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -183,9 +185,14 @@ media_enable() {
       --no-cron) cron=false; shift ;;
       --no-webp) webp=false; shift ;;
       --webp) webp=true; shift ;;
-      *) panel_die "Unknown flag: $1 (media enable DOMAIN [--max-width N] [--quality N] [--no-upload] [--no-cron] [--no-webp])" ;;
+      --avif) avif=true; shift ;;
+      --no-avif) avif=false; shift ;;
+      *) panel_die "Unknown flag: $1 (media enable DOMAIN [--max-width N] [--quality N] [--no-upload] [--no-cron] [--no-webp] [--avif])" ;;
     esac
   done
+  [[ "$max_w" =~ ^[0-9]{2,5}$ && "$max_h" =~ ^[0-9]{2,5}$ ]] || panel_die "--max-width/--max-height must be numbers"
+  [[ "$quality" =~ ^[0-9]{2}$ ]] || panel_die "--quality must be 10-99"
+  [[ "$skip_kb" =~ ^[0-9]{1,6}$ && "$batch" =~ ^[0-9]{1,5}$ ]] || panel_die "--skip-under-kb/--batch must be numbers"
 
   media_ensure_tools
 
@@ -204,14 +211,16 @@ print(json.dumps({
   "skip_under_kb": int(sys.argv[7]),
   "batch_limit": int(sys.argv[8]),
   "enabled_at": sys.argv[9],
+  "avif": sys.argv[10] == "true",
   "last_run_at": None,
   "last_run_stats": {},
 }))
-' "$on_upload" "$cron" "$webp" "$max_w" "$max_h" "$quality" "$skip_kb" "$batch" "$enabled_at")"
+' "$on_upload" "$cron" "$webp" "$max_w" "$max_h" "$quality" "$skip_kb" "$batch" "$enabled_at" "$avif")"
 
   media_cfg_set "$domain" "$json" >/dev/null
   media_install_mu_plugin "$domain"
   media_write_mu_config "$domain"
+  media_set_avif_serving "$domain" "$avif"
 
   if [[ "$cron" == "true" ]]; then
     media_enable_cron
@@ -221,6 +230,21 @@ print(json.dumps({
   panel_log "  on_upload=$on_upload cron=$cron webp=$webp max=${max_w}x${max_h} quality=$quality"
   panel_log "  Run backlog now: cecp-panel media run $domain"
   media_status "$domain"
+}
+
+# nginx serves photo.avif / photo.webp for photo.jpg when the browser accepts it (Vary: Accept).
+# WebP is always negotiated; AVIF only when enabled here, because Cloudflare ignores Vary on
+# non-Enterprise plans and could hand a cached AVIF to a browser without AVIF support.
+media_set_avif_serving() {
+  local domain="$1" want="$2" cur
+  cur="$(site_json_get_or "$domain" img_avif false)"
+  [[ "${cur,,}" != "$want" ]] || return 0
+  site_json_set "$domain" img_avif "$want"
+  site_render_vhost "$domain"
+  nginx_test_and_reload || panel_die "nginx rejected the vhost for $domain (config rolled back)"
+  if [[ "$want" == "true" ]]; then
+    panel_log "AVIF serving ON for $domain. Behind Cloudflare, prefer WebP only (media enable $domain --no-avif) unless Polish/Vary-for-images is on."
+  fi
 }
 
 media_disable() {
@@ -302,7 +326,7 @@ PY
 }
 
 media_run_python() {
-  # Args: DOCROOT MAX_W MAX_H QUALITY SKIP_KB BATCH WEBP DRY_RUN
+  # Args: DOCROOT MAX_W MAX_H QUALITY SKIP_KB BATCH WEBP DRY_RUN [AVIF]
   python3 - "$@" <<'PY'
 import os, sys, time, json
 from pathlib import Path
@@ -315,6 +339,7 @@ skip_kb = int(sys.argv[5])
 batch = int(sys.argv[6])
 webp = sys.argv[7].lower() == "true"
 dry = sys.argv[8].lower() == "true"
+avif = len(sys.argv) > 9 and sys.argv[9].lower() == "true"
 
 uploads = docroot / "wp-content" / "uploads"
 if not uploads.is_dir():
@@ -370,6 +395,7 @@ stats = {
     "bytes_before": 0,
     "bytes_after": 0,
     "webp_written": 0,
+    "avif_written": 0,
     "dry_run": dry,
     "engine": "pillow" if use_pil else ("imagemagick" if im_bin else "none"),
 }
@@ -377,6 +403,48 @@ stats = {
 if stats["engine"] == "none":
     print(json.dumps({**stats, "ok": False, "error": "No Pillow or ImageMagick available"}))
     sys.exit(0)
+
+pil_avif = False
+if use_pil and avif:
+    try:
+        from PIL import features
+        pil_avif = bool(features.check("avif"))
+    except Exception:
+        pil_avif = False
+im_avif = False
+if avif and im_bin and not pil_avif:
+    try:
+        out = subprocess.run([im_bin, "-list", "format"], capture_output=True, text=True, timeout=20).stdout
+        im_avif = any(l.split()[0].rstrip("*").upper() == "AVIF" and "rw" in l for l in out.splitlines() if l.split())
+    except Exception:
+        im_avif = False
+if avif and not (pil_avif or im_avif):
+    stats["avif_note"] = "no AVIF encoder (Pillow>=11.2 or ImageMagick with libheif); only WebP written"
+
+
+def write_avif(path: Path):
+    """photo.jpg -> photo.avif (same name the nginx negotiation looks for). Best effort."""
+    if not avif:
+        return False
+    out = path.with_suffix(".avif")
+    try:
+        if pil_avif:
+            with Image.open(path) as im:
+                im = ImageOps.exif_transpose(im)
+                if im.mode not in ("RGB", "RGBA"):
+                    im = im.convert("RGBA" if "A" in im.mode else "RGB")
+                im.save(out, "AVIF", quality=max(30, quality - 20))
+        elif im_avif:
+            subprocess.run([im_bin, str(path), "-quality", str(max(30, quality - 20)), str(out)],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        else:
+            return False
+    except Exception:
+        return False
+    if out.is_file() and out.stat().st_size >= path.stat().st_size:
+        out.unlink()  # AVIF that is not smaller only costs bandwidth-negotiation complexity
+        return False
+    return out.is_file()
 
 def optimize_pil(path: Path):
     before = path.stat().st_size
@@ -418,6 +486,8 @@ def optimize_pil(path: Path):
                 webp_ok = True
             except Exception:
                 webp_ok = False
+        if write_avif(path):
+            stats["avif_written"] += 1
         marker = Path(str(path) + ".cecp-opt")
         marker.write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n", encoding="utf-8")
         return "ok", before, after, webp_ok
@@ -458,6 +528,8 @@ def optimize_im(path: Path):
             webp_ok = webp_path.is_file()
         except Exception:
             webp_ok = False
+    if write_avif(path):
+        stats["avif_written"] += 1
     Path(str(path) + ".cecp-opt").write_text(
         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n", encoding="utf-8"
     )
@@ -516,7 +588,8 @@ media_run() {
     panel_die "Media optimize is OFF for $domain (run: cecp-panel media enable $domain)"
   fi
 
-  local docroot max_w max_h quality skip_kb batch webp
+  local docroot max_w max_h quality skip_kb batch webp avif
+  avif="$(media_cfg_get "$domain" "avif")"
   docroot="$(media_docroot "$domain")"
   max_w="$(media_cfg_get "$domain" "max_width")"
   max_h="$(media_cfg_get "$domain" "max_height")"
@@ -544,7 +617,7 @@ media_run() {
 
   panel_log "Media run $domain dry=$dry batch=$batch max=${max_w}x${max_h} q=$quality webp=$webp"
   local out
-  out="$(media_run_python "$docroot" "$max_w" "$max_h" "$quality" "$skip_kb" "$batch" "$webp" "$dry")"
+  out="$(media_run_python "$docroot" "$max_w" "$max_h" "$quality" "$skip_kb" "$batch" "$webp" "$dry" "${avif:-false}")"
   echo "$out" | python3 -m json.tool 2>/dev/null || echo "$out"
 
   if [[ "$dry" != "true" ]]; then

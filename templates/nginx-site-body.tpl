@@ -33,7 +33,24 @@
         try_files $uri $uri/ /index.php?$args;
     }
 
-    location ~* \.(?:jpg|jpeg|png|gif|ico|css|js|mjs|woff2?|ttf|otf|eot|svg|webp|avif|mp4|webm|pdf)$ {
+    # JPEG/PNG: prefer the AVIF/WebP sidecar the browser accepts (Vary: Accept for caches).
+    set $cecp_img_avif {{IMG_AVIF}};
+    location ~* ^(?<cecp_img>.+)\.(?:jpe?g|png)$ {
+        expires 30d;
+        access_log off;
+        types {
+            image/avif avif;
+            image/webp webp;
+            image/jpeg jpg jpeg;
+            image/png png;
+        }
+        add_header Vary Accept;
+        add_header Cache-Control "public, max-age=2592000";
+        include /etc/nginx/snippets/cecp-headers.conf;
+        try_files $cecp_img$cecp_img_avif $cecp_img$cecp_webp_ext $uri =404;
+    }
+
+    location ~* \.(?:gif|ico|css|js|mjs|woff2?|ttf|otf|eot|svg|webp|avif|mp4|webm|pdf)$ {
         expires 30d;
         access_log off;
         add_header Cache-Control "public, max-age=2592000";
@@ -69,7 +86,7 @@
         fastcgi_cache CECP_WP;
         # open_file_cache would keep serving a purged (deleted) cache file from its cached fd.
         open_file_cache off;
-        fastcgi_cache_valid 200 301 302 5m;
+        fastcgi_cache_valid 200 301 302 {{CACHE_TTL}};
         fastcgi_cache_valid 404 1m;
         add_header X-CECP-Cache $upstream_cache_status;
         include /etc/nginx/snippets/cecp-headers.conf;

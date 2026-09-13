@@ -20,6 +20,7 @@ ssl_install_deploy_hook() {
 
 # Certs issued by older panels used certbot's nginx installer, which edits vhosts on renewal
 # and would fight the panel-managed HTTPS template. Switch renewal to webroot, no installer.
+# DNS-01 lineages (wildcards) keep their authenticator: only the installer line is dropped.
 ssl_renewal_use_webroot() {
   local domain="${1,,}" conf docroot
   ssl_install_deploy_hook
@@ -27,9 +28,14 @@ ssl_renewal_use_webroot() {
   [[ -f "$conf" ]] || return 0
   docroot="$(site_json_get "$domain" docroot)"
   python3 - "$conf" "$domain" "$docroot" <<'PY'
-import sys
+import re, sys
 conf, domain, docroot = sys.argv[1:4]
 lines = open(conf, encoding="utf-8").read().splitlines()
+auth = next((l.split("=", 1)[1].strip() for l in lines if re.match(r"\s*authenticator\s*=", l)), "")
+if auth.startswith("dns-"):
+    out = [l for l in lines if not re.match(r"\s*installer\s*=", l)]
+    open(conf, "w", encoding="utf-8").write("\n".join(out) + "\n")
+    sys.exit(0)
 out, in_params, in_map = [], False, False
 for line in lines:
     s = line.strip()
@@ -55,7 +61,7 @@ PY
 ssl_reattach_nginx() {
   local domain="${1,,}"
   validate_domain "$domain"
-  [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]] || return 0
+  site_cert_dir "$domain" >/dev/null || return 0
   panel_log "Attaching Let's Encrypt certificate to nginx for $domain ..."
   ssl_install_deploy_hook
   ssl_renewal_use_webroot "$domain"
@@ -63,23 +69,97 @@ ssl_reattach_nginx() {
   nginx_test_and_reload || panel_die "nginx rejected the HTTPS vhost for $domain (config rolled back)"
 }
 
+# CECP_CERTBOT lets the integration test substitute a fake certbot (no Let's Encrypt in Docker).
+CERTBOT_BIN="${CECP_CERTBOT:-certbot}"
+CF_DNS_INI="/etc/letsencrypt/cecp-cloudflare.ini"
+
+# cecp-panel ssl issue DOMAIN [--dns] [--wildcard]
+#   default  : HTTP-01 webroot (the domain must reach this VPS over plain HTTP)
+#   --dns    : DNS-01 through the Cloudflare API — works while the record is proxied
+#   --wildcard: DOMAIN + *.DOMAIN (implies --dns); subdomain sites then reuse this cert
 ssl_issue_for_domain() {
   local domain="${1,,}"
+  shift || true
+  local dns=0 wildcard=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dns) dns=1; shift ;;
+      --wildcard) dns=1; wildcard=1; shift ;;
+      *) panel_die "Usage: cecp-panel ssl issue DOMAIN [--dns] [--wildcard]" ;;
+    esac
+  done
   require_root
   validate_domain "$domain"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain (run: cecp-panel site add $domain)"
-  if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
+  if (( dns )); then
+    ssl_issue_dns "$domain" "$wildcard"
+    return
+  fi
+  local cert_dir
+  if cert_dir="$(site_cert_dir "$domain")"; then
     ssl_reattach_nginx "$domain"
-    panel_log "SSL OK (existing cert): https://$domain"
+    panel_log "SSL OK (existing cert ${cert_dir##*/}): https://$domain"
     return 0
   fi
   panel_log "Issuing Let's Encrypt for $domain (webroot) ..."
   # certonly: certbot must not edit the panel-managed vhost; we render HTTPS ourselves.
-  certbot certonly --webroot -w "$(site_json_get "$domain" docroot)" -d "$domain" \
+  "$CERTBOT_BIN" certonly --webroot -w "$(site_json_get "$domain" docroot)" -d "$domain" \
     --non-interactive --agree-tos --register-unsafely-without-email \
-    || panel_die "certbot failed for $domain (DNS must point to this VPS; use DNS-only if Cloudflare proxied blocks HTTP-01)"
+    || panel_die "certbot failed for $domain (DNS must point to this VPS; behind a proxied Cloudflare record use: ssl issue $domain --dns)"
   ssl_reattach_nginx "$domain"
   panel_log "SSL OK: https://$domain (HTTP/2 + HSTS)"
+}
+
+# Re-render sites one label below DOMAIN that have no certificate of their own, so they follow
+# the *.DOMAIN certificate (issued → HTTPS, removed → back to HTTP). Caller reloads nginx.
+ssl_rerender_subsites() {
+  local domain="$1" f sub
+  shopt -s nullglob
+  for f in "$SITES_DIR"/*."${domain}".json; do
+    sub="$(basename "$f" .json)"
+    [[ "${sub%."$domain"}" != *.* && ! -f "/etc/letsencrypt/live/${sub}/fullchain.pem" ]] || continue
+    site_render_vhost "$sub"
+    panel_log "  $sub: vhost re-rendered for the *.$domain certificate change"
+  done
+  shopt -u nullglob
+}
+
+ssl_issue_dns() {
+  local domain="$1" wildcard="$2"
+  dns_load_credentials
+  if [[ -z "${CECP_CERTBOT:-}" ]] && ! certbot plugins 2>/dev/null | grep -q dns-cloudflare; then
+    panel_log "Installing certbot Cloudflare DNS plugin ..."
+    dnf -y install python3-certbot-dns-cloudflare >/dev/null 2>&1 \
+      || apt-get install -y python3-certbot-dns-cloudflare >/dev/null 2>&1 \
+      || panel_die "Could not install python3-certbot-dns-cloudflare"
+  fi
+  [[ -d /etc/letsencrypt ]] || install -d -m 755 /etc/letsencrypt
+  (umask 077; printf 'dns_cloudflare_api_token = %s\n' "$CF_API_TOKEN" >"$CF_DNS_INI")
+  chmod 600 "$CF_DNS_INI"
+  local -a names=(-d "$domain")
+  local label="$domain"
+  if (( wildcard )); then
+    names+=(-d "*.${domain}")
+    label="$domain + *.$domain"
+  fi
+  panel_log "Issuing Let's Encrypt for $label via Cloudflare DNS-01 ..."
+  "$CERTBOT_BIN" certonly --dns-cloudflare --dns-cloudflare-credentials "$CF_DNS_INI" \
+    --dns-cloudflare-propagation-seconds 30 --cert-name "$domain" "${names[@]}" \
+    --non-interactive --agree-tos --register-unsafely-without-email \
+    || panel_die "certbot DNS-01 failed for $domain (token needs Zone → DNS → Edit on the zone)"
+  site_json_set "$domain" ssl_method dns ssl_wildcard "$([[ "$wildcard" == 1 ]] && echo true || echo false)"
+  ssl_reattach_nginx "$domain"
+  if (( wildcard )); then
+    ssl_rerender_subsites "$domain"
+    nginx_test_and_reload || panel_die "nginx rejected a vhost after the wildcard certificate (config rolled back)"
+  fi
+  local mode
+  mode="$(ssl_cf_get_ssl_mode "$(cf_zone_for_domain "$domain")" 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("value",""))' 2>/dev/null || true)"
+  if [[ "$mode" == "flexible" || "$mode" == "off" ]]; then
+    panel_log "WARN: Cloudflare SSL mode is '$mode' — with HTTPS at the origin this causes a redirect loop. Run: cecp-panel dns ssl-mode strict"
+  fi
+  panel_log "SSL OK: $label (DNS-01, renews automatically)"
 }
 
 # cecp-panel ssl hsts DOMAIN on|off|subdomains
@@ -140,8 +220,12 @@ ssl_remove_for_domain() {
     panel_log "No certificate for $domain — nothing to remove"
     return 0
   fi
-  certbot delete --cert-name "$domain" --non-interactive 2>/dev/null || \
+  "$CERTBOT_BIN" delete --cert-name "$domain" --non-interactive 2>/dev/null || \
     panel_die "Could not delete cert for $domain"
+  # The HTTPS vhost would now point at deleted files and fail the next nginx reload.
+  [[ -f "$(site_meta_path "$domain")" ]] && site_render_vhost "$domain"
+  ssl_rerender_subsites "$domain"
+  nginx_test_and_reload || panel_log "WARN: nginx rejected the config after removing the certificate of $domain"
   panel_log "Removed cert: $domain"
 }
 
