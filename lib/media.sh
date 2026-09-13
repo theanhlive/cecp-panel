@@ -15,6 +15,7 @@ media_domain_lc() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 media_require_site() {
   local domain
   domain="$(media_domain_lc "$1")"
+  validate_domain "$domain"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
   echo "$domain"
 }

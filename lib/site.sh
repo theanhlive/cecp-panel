@@ -1,6 +1,100 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Per-site temp/session dir: a shared /tmp in open_basedir lets one site read another's
+# sessions and upload temp files.
+site_ensure_tmp() {
+  local u="$1"
+  install -d -m 700 -o "$u" -g "$u" "/home/${u}/tmp"
+  if command -v getenforce &>/dev/null && [[ "$(getenforce)" != "Disabled" ]]; then
+    chcon -R -t httpd_sys_rw_content_t "/home/${u}/tmp" 2>/dev/null || true
+  fi
+}
+
+# HSTS header value from site meta: "on" (default, 180 days), "subdomains", or "off".
+site_hsts_value() {
+  case "$(site_json_get_or "$1" hsts on)" in
+    off) echo "" ;;
+    subdomains) echo "max-age=15552000; includeSubDomains" ;;
+    *) echo "max-age=15552000" ;;
+  esac
+}
+
+# Render the site's nginx vhost: HTTPS variant (HTTP/2, HSTS, 80→301) when a Let's Encrypt
+# certificate exists, plain HTTP otherwise. Caller reloads nginx (nginx_test_and_reload).
+site_render_vhost() {
+  local domain="${1,,}"
+  validate_domain "$domain"
+  [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
+  local slug docroot php_sock body out
+  slug="$(domain_slug "$domain")"
+  docroot="$(site_json_get "$domain" docroot)"
+  php_sock="$(site_json_get "$domain" php_sock)"
+  out="/etc/nginx/conf.d/cecp-${slug}.conf"
+  ensure_nginx_global
+  body="$(mktemp)"
+  template_render "$PANEL_ROOT/templates/nginx-site-body.tpl" "$body" \
+    DOMAIN "$domain" DOCROOT "$docroot" PHP_SOCK "$php_sock"
+  if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
+    template_render "$PANEL_ROOT/templates/nginx-vhost-ssl.conf.tpl" "$out" \
+      DOMAIN "$domain" DOCROOT "$docroot" LISTEN_SSL "$(nginx_listen_ssl_lines)" \
+      HSTS "$(site_hsts_value "$domain")" SITE_BODY "$(<"$body")"
+    site_set_ssl_flag "$domain" true
+  else
+    template_render "$PANEL_ROOT/templates/nginx-vhost.conf.tpl" "$out" \
+      DOMAIN "$domain" SITE_BODY "$(<"$body")"
+  fi
+  rm -f "$body"
+  chmod 644 "$out"
+}
+
+# Render the site's PHP-FPM pool into the directory of its PHP version (default or Remi).
+site_render_pool() {
+  local domain="${1,,}"
+  local slug site_user docroot php_sock pool_name php_ver fpm_dir
+  slug="$(domain_slug "$domain")"
+  site_user="$(site_json_get "$domain" site_user)"
+  docroot="$(site_json_get "$domain" docroot)"
+  php_sock="$(site_json_get "$domain" php_sock)"
+  pool_name="$(site_json_get "$domain" pool_name)"
+  php_ver="$(php_version_normalize "$(site_json_get_or "$domain" php_version 80)")"
+  fpm_dir="$(php_fpm_d_dir "$php_ver")"
+  site_ensure_tmp "$site_user"
+  rm -f "/etc/php-fpm.d/cecp-${slug}.conf" /etc/opt/remi/php*/php-fpm.d/cecp-"${slug}".conf
+  mkdir -p "$fpm_dir"
+  template_render "$PANEL_ROOT/templates/php-fpm-pool.conf.tpl" "${fpm_dir}/cecp-${slug}.conf" \
+    DOMAIN "$domain" POOL_NAME "$pool_name" SITE_USER "$site_user" DOCROOT "$docroot" \
+    SITE_HOME "/home/${site_user}" PHP_SOCK "$php_sock" PHP_VERSION "$php_ver" \
+    PM_MAX_CHILDREN "$(php_pool_max_children)"
+}
+
+# Re-apply current templates (vhost + pool) to an existing site, with nginx rollback on error.
+site_rebuild_vhost() {
+  local domain="${1,,}"
+  require_root
+  validate_domain "$domain"
+  [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
+  if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
+    ssl_renewal_use_webroot "$domain"
+  fi
+  site_render_pool "$domain"
+  site_render_vhost "$domain"
+  php_fpm_reload_all
+  nginx_test_and_reload || panel_die "nginx rejected the rebuilt vhost for $domain (config rolled back)"
+  panel_log "Rebuilt vhost + pool: $domain"
+}
+
+site_rebuild_vhost_all() {
+  require_root
+  local f domain
+  shopt -s nullglob
+  for f in "$SITES_DIR"/*.json; do
+    domain="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["domain"])' "$f")"
+    site_rebuild_vhost "$domain"
+  done
+  shopt -u nullglob
+}
+
 site_list_json() {
   shopt -s nullglob
   local f
@@ -28,15 +122,24 @@ site_add() {
   local domain="${1,,}"
   local install_wp="${2:-n}"
   require_root
-  [[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || panel_die "Invalid domain: $domain"
+  validate_domain "$domain"
 
   local meta
   meta="$(site_meta_path "$domain")"
   [[ ! -f "$meta" ]] || panel_die "Site already exists: $domain"
 
-  local slug site_user docroot pool_name sock_dir php_sock
+  local slug site_user docroot pool_name sock_dir php_sock other
   slug="$(domain_slug "$domain")"
   site_user="$(site_user_for_domain "$domain")"
+  # domain_slug maps "." and "-" to "_" and truncates, so two domains can share a slug —
+  # and with it the unix user, PHP pool and database. Refuse rather than merge sites.
+  for other in "$SITES_DIR"/*.json; do
+    [[ -f "$other" ]] || continue
+    if [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["site_user"])' "$other")" == "$site_user" ]]; then
+      panel_die "$domain maps to system user $site_user, already used by $(basename "$other" .json)"
+    fi
+  done
+  id "$site_user" &>/dev/null && panel_die "System user $site_user already exists (leftover of a removed site?) — refusing to reuse it"
   docroot="/home/${site_user}/public_html"
   pool_name="$slug"
   sock_dir="$(detect_php_fpm_sock_dir)"
@@ -48,9 +151,7 @@ site_add() {
   db_pass="$(rand_alnum 20)"
 
   panel_log "Creating UNIX user $site_user ..."
-  if ! id "$site_user" &>/dev/null; then
-    useradd -r -m -d "/home/${site_user}" -s /sbin/nologin "$site_user"
-  fi
+  useradd -r -m -d "/home/${site_user}" -s /sbin/nologin "$site_user"
   mkdir -p "$docroot"
   # SFTP chroot: home root-owned, only public_html writable by site user
   chown root:root "/home/${site_user}"
@@ -62,27 +163,12 @@ site_add() {
     setsebool -P httpd_read_user_content 1 2>/dev/null || true
     chcon -R -t httpd_sys_content_t "$docroot" 2>/dev/null || true
   fi
-
-  panel_log "Nginx vhost ..."
-  # Guarantee shared zones (cecp_general/cecp_conn/CECP_WP) exist before the vhost
-  # that references them is loaded — otherwise `nginx -t` fails with [emerg].
-  ensure_nginx_global
-  template_render "$PANEL_ROOT/templates/nginx-vhost.conf.tpl" \
-    "/etc/nginx/conf.d/cecp-${slug}.conf" \
-    DOMAIN "$domain" DOCROOT "$docroot" PHP_SOCK "$php_sock"
+  site_ensure_tmp "$site_user"
   selinux_fixup_path "$docroot"
-
-  panel_log "PHP-FPM pool ..."
-  template_render "$PANEL_ROOT/templates/php-fpm-pool.conf.tpl" \
-    "/etc/php-fpm.d/cecp-${slug}.conf" \
-    DOMAIN "$domain" POOL_NAME "$pool_name" SITE_USER "$site_user" \
-    DOCROOT "$docroot" PHP_SOCK "$php_sock"
   mkdir -p "$sock_dir"
   chown nginx:nginx "$sock_dir" 2>/dev/null || true
 
   panel_log "MariaDB database $db_name ..."
-  # shellcheck source=/dev/null
-  source "$PANEL_ROOT/lib/mysql.sh"
   mysql_create_site_db "$domain" "$db_name" "$db_user" "$db_pass"
 
   local installed_at
@@ -100,15 +186,18 @@ site_add() {
   "db_pass": "$db_pass",
   "wordpress": $( [[ "$install_wp" =~ ^[yY] ]] && echo true || echo false ),
   "ssl": false,
+  "hsts": "on",
   "installed_at": "$installed_at"
 }
 EOF
 )"
 
+  panel_log "PHP-FPM pool + nginx vhost ..."
+  site_render_pool "$domain"
+  site_render_vhost "$domain"
+
   if [[ "$install_wp" =~ ^[yY] ]]; then
     site_install_wordpress "$domain" "$docroot" "$site_user" "$db_name" "$db_user" "$db_pass"
-    # shellcheck source=/dev/null
-    source "$PANEL_ROOT/lib/wordpress.sh"
     wp_harden_site "$domain"
     wp_install_system_cron "$domain"
   else
@@ -119,8 +208,8 @@ EOF
     chown "${site_user}:${site_user}" "$docroot/index.html"
   fi
 
-  php_fpm_reload
-  nginx_test_and_reload
+  php_fpm_restart_for_new_pool php-fpm
+  nginx_test_and_reload || panel_die "nginx rejected the new vhost for $domain (config rolled back)"
 
   panel_log "Site added: http://$domain"
   panel_log "DB: $db_name | user: $db_user | pass: (in $(site_meta_path "$domain"))"
@@ -134,33 +223,37 @@ EOF
 
 site_install_wordpress() {
   local domain="$1" docroot="$2" site_user="$3" db_name="$4" db_user="$5" db_pass="$6"
-  # shellcheck source=/dev/null
-  source "$PANEL_ROOT/lib/wordpress.sh"
   wp_ensure_cli
   panel_log "Installing WordPress for $domain ..."
   local wp_run=(sudo -u "$site_user" php -d memory_limit=512M "$WP_CLI_BIN")
   "${wp_run[@]}" core download --path="$docroot" --quiet
+  # Passwords via --prompt (stdin), not argv: site users can read argv of other processes.
   "${wp_run[@]}" config create \
     --path="$docroot" \
-    --dbname="$db_name" --dbuser="$db_user" --dbpass="$db_pass" \
-    --dbhost=localhost --dbprefix=wp_ --skip-check
-  local admin_pass
-  admin_pass="$(rand_alnum 16)"
+    --dbname="$db_name" --dbuser="$db_user" --prompt=dbpass \
+    --dbhost=localhost --dbprefix=wp_ --skip-check <<<"$db_pass"
+  local admin_user admin_pass
+  # Not "admin": the first name every wp-login brute-force list tries.
+  admin_user="admin_$(rand_alnum 6 | tr '[:upper:]' '[:lower:]')"
+  admin_pass="$(rand_alnum 20)"
   "${wp_run[@]}" core install \
     --path="$docroot" \
     --url="http://${domain}" \
     --title="${domain}" \
-    --admin_user=admin \
-    --admin_password="$admin_pass" \
+    --admin_user="$admin_user" \
+    --prompt=admin_password \
     --admin_email="admin@${domain}" \
-    --skip-email
+    --skip-email <<<"$admin_pass"
   chown -R "${site_user}:${site_user}" "$docroot"
-  panel_log "WordPress admin user: admin | pass: $admin_pass (save now)"
+  site_json_set "$domain" wp_admin_user "$admin_user" wp_admin_pass "$admin_pass"
+  panel_log "WordPress admin user: $admin_user (password stored in $(site_meta_path "$domain"))"
+  panel_secret "WordPress admin password: $admin_pass (save now)"
 }
 
 site_remove() {
   local domain="${1,,}"
   require_root
+  validate_domain "$domain"
   local meta
   meta="$(site_meta_path "$domain")"
   [[ -f "$meta" ]] || panel_die "Site not found: $domain"
@@ -195,7 +288,18 @@ site_remove() {
   if id "$site_user" &>/dev/null; then
     userdel -r "$site_user" 2>/dev/null || userdel "$site_user" 2>/dev/null || true
   fi
+  # userdel -r skips the root-owned SFTP chroot home, leaving the site files (and the
+  # wp-config.php DB credentials) behind; remove it explicitly.
+  if [[ "$site_user" =~ ^site_[a-z0-9_]+$ && -d "/home/${site_user}" ]]; then
+    rm -rf --one-file-system "/home/${site_user:?}"
+  fi
+  local redis_user
+  redis_user="$(site_json_get_or "$domain" redis_user "")"
   rm -f "$meta"
+  if [[ -n "$redis_user" && -f /etc/cecp-panel/redis.env ]]; then
+    printf 'ACL DELUSER %s\n' "$redis_user" | redis_admin >/dev/null 2>&1 || true
+    redis_acl_write_conf
+  fi
 
   php_fpm_reload
   nginx_test_and_reload
@@ -206,24 +310,24 @@ site_duplicate() {
   local src="${1,,}" dst="${2,,}"
   require_root
   [[ -n "$src" && -n "$dst" ]] || panel_die "Usage: cecp-panel site duplicate SRC_DOMAIN NEW_DOMAIN"
+  validate_domain "$src"
+  validate_domain "$dst"
   [[ -f "$(site_meta_path "$src")" ]] || panel_die "Source not found: $src"
   [[ ! -f "$(site_meta_path "$dst")" ]] || panel_die "Target exists: $dst"
   local src_doc
-  src_doc="$(python3 -c "import json; print(json.load(open('$(site_meta_path "$src")'))['docroot'])")"
+  src_doc="$(site_json_get "$src" docroot)"
   site_add "$dst" n
-  local dst_doc db_name db_user db_pass src_db src_user src_pass
-  dst_doc="$(python3 -c "import json; print(json.load(open('$(site_meta_path "$dst")'))['docroot'])")"
-  db_name="$(python3 -c "import json; print(json.load(open('$(site_meta_path "$dst")'))['db_name'])")"
-  db_user="$(python3 -c "import json; print(json.load(open('$(site_meta_path "$dst")'))['db_user'])")"
-  db_pass="$(python3 -c "import json; print(json.load(open('$(site_meta_path "$dst")'))['db_pass'])")"
-  src_db="$(python3 -c "import json; print(json.load(open('$(site_meta_path "$src")'))['db_name'])")"
-  src_user="$(python3 -c "import json; print(json.load(open('$(site_meta_path "$src")'))['db_user'])")"
-  src_pass="$(python3 -c "import json; print(json.load(open('$(site_meta_path "$src")'))['db_pass'])")"
+  local dst_doc src_cnf dst_cnf
+  dst_doc="$(site_json_get "$dst" docroot)"
   panel_log "Copying files $src → $dst ..."
   rsync -a "$src_doc/" "$dst_doc/" 2>/dev/null || cp -a "$src_doc/." "$dst_doc/"
-  chown -R "$(python3 -c "import json; print(json.load(open('$(site_meta_path "$dst")'))['site_user'])"):" "$dst_doc"
-  panel_log "Copying database $src_db → $db_name ..."
-  mysqldump -u"$src_user" -p"$src_pass" "$src_db" | mysql -u"$db_user" -p"$db_pass" "$db_name"
+  chown -R "$(site_json_get "$dst" site_user):" "$dst_doc"
+  panel_log "Copying database $(site_json_get "$src" db_name) → $(site_json_get "$dst" db_name) ..."
+  src_cnf="$(mysql_client_cnf "$(site_json_get "$src" db_user)" "$(site_json_get "$src" db_pass)")"
+  dst_cnf="$(mysql_client_cnf "$(site_json_get "$dst" db_user)" "$(site_json_get "$dst" db_pass)")"
+  mysqldump --defaults-extra-file="$src_cnf" "$(site_json_get "$src" db_name)" \
+    | mysql --defaults-extra-file="$dst_cnf" "$(site_json_get "$dst" db_name)"
+  rm -f "$src_cnf" "$dst_cnf"
   selinux_fixup_path "$dst_doc"
   if [[ -n "${3:-}" && -f "${3:-}" ]]; then
     site_wordpress_clone_fixup "$src" "$dst" "$3"
@@ -248,25 +352,25 @@ site_wordpress_clone_fixup() {
       IFS=$'\t' read -r old new <<<"$line"
       [[ -n "$old" && -n "$new" && "$old" != "$new" ]] || continue
       wp_site_exec "$dst" search-replace "$old" "$new" --all-tables 2>/dev/null || true
-    done < <(python3 -c "
-import json
-for p in json.load(open('$repl_file')):
-    o=(p.get('from') or p.get('old') or '').strip()
-    n=(p.get('to') or p.get('new') or '').strip()
-    if o and n and o!=n:
-        print(o+'\t'+n)
-")
+    done < <(python3 - "$repl_file" <<'PY'
+import json, sys
+for p in json.load(open(sys.argv[1])):
+    o = (p.get("from") or p.get("old") or "").strip()
+    n = (p.get("to") or p.get("new") or "").strip()
+    if o and n and o != n and "\t" not in o + n and "\n" not in o + n:
+        print(o + "\t" + n)
+PY
+)
   fi
 }
 
 site_sftp_info() {
   local domain="${1,,}"
-  local meta
-  meta="$(site_meta_path "$domain")"
-  [[ -f "$meta" ]] || panel_die "Site not found: $domain"
+  validate_domain "$domain"
+  [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
   local site_user docroot
-  site_user="$(python3 -c "import json; print(json.load(open('$meta'))['site_user'])")"
-  docroot="$(python3 -c "import json; print(json.load(open('$meta'))['docroot'])")"
+  site_user="$(site_json_get "$domain" site_user)"
+  docroot="$(site_json_get "$domain" docroot)"
   site_sftp_enable "$site_user"
   local ip
   ip="$(curl -4 -s --max-time 3 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
@@ -293,16 +397,20 @@ site_sftp_enable() {
 site_sftp_password() {
   local domain="${1,,}" pass="${2:-}"
   require_root
-  local meta site_user
-  meta="$(site_meta_path "$domain")"
-  [[ -f "$meta" ]] || panel_die "Site not found: $domain"
-  site_user="$(python3 -c "import json; print(json.load(open('$meta'))['site_user'])")"
+  validate_domain "$domain"
+  [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
+  local site_user
+  site_user="$(site_json_get "$domain" site_user)"
   if [[ -z "$pass" ]]; then
-    pass="$(rand_alnum 16)"
+    pass="$(rand_alnum 20)"
   fi
+  # chpasswd reads "user:password" lines: a ":" or newline in the password could set
+  # the password of another account (e.g. root).
+  [[ "$pass" =~ ^[A-Za-z0-9!@#%^_+=.,-]{12,128}$ ]] \
+    || panel_die "Password must be 12-128 chars of [A-Za-z0-9!@#%^_+=.,-]"
   site_sftp_enable "$site_user"
-  echo "${site_user}:${pass}" | chpasswd
+  printf '%s:%s\n' "$site_user" "$pass" | chpasswd
   usermod -s /usr/sbin/nologin "$site_user" 2>/dev/null || true
   panel_log "SFTP password set for $site_user (domain $domain)"
-  panel_log "Password: $pass"
+  panel_secret "SFTP password: $pass"
 }

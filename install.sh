@@ -10,7 +10,7 @@
 #   ssh -i ~/.ssh/KEY root@VPS_IP 'bash -s' < scripts/cecp-panel/install.sh
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.5.1-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.6.0-beta}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/cecp-panel}"
 ETC_DIR="/etc/cecp-panel"
 VAR_LIB="/var/lib/cecp-panel"
@@ -67,8 +67,14 @@ install_packages_rhel() {
     php php-fpm php-mysqlnd php-cli php-gd php-xml php-mbstring php-json php-opcache \
     certbot python3-certbot-nginx restic rclone "${extra[@]}"
   if ! command -v wp &>/dev/null; then
-    curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
-    chmod +x /usr/local/bin/wp
+    local wpbase="https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar" wptmp
+    wptmp="$(mktemp -d)"
+    curl -fsSL "$wpbase/wp-cli.phar" -o "$wptmp/wp-cli.phar"
+    curl -fsSL "$wpbase/wp-cli.phar.sha512" -o "$wptmp/wp-cli.phar.sha512"
+    [[ "$(sha512sum "$wptmp/wp-cli.phar" | cut -d' ' -f1)" == "$(tr -dc '0-9a-f' <"$wptmp/wp-cli.phar.sha512")" ]] \
+      || die "wp-cli.phar checksum mismatch"
+    install -m 755 "$wptmp/wp-cli.phar" /usr/local/bin/wp
+    rm -rf "$wptmp"
   fi
   systemctl enable --now nginx mariadb fail2ban firewalld 2>/dev/null || true
 }
@@ -155,10 +161,22 @@ fetch_panel_bundle_if_needed() {
     die "Use customer installer: curl -fsSL <URL>/install-cecp-panel.sh | sudo bash
 Or: CECP_PANEL_RAW_BASE=https://.../scripts/cecp-panel bash install-cecp-panel.sh"
   fi
-  log "Downloading panel bundle from CECP_PANEL_BUNDLE_URL ..."
-  local tmp
+  log "Downloading panel bundle $url ..."
+  local tmp expected actual
   tmp="$(mktemp -d)"
-  curl -fsSL "$url" | tar xz -C "$tmp"
+  curl -fsSL "$url" -o "$tmp/bundle.tar.gz"
+  # Refuse an unverified bundle: it is installed and run as root.
+  if [[ -n "${CECP_PANEL_BUNDLE_SHA256:-}" ]]; then
+    expected="$CECP_PANEL_BUNDLE_SHA256"
+  elif [[ -n "${CECP_PANEL_RAW_BASE:-}" ]]; then
+    curl -fsSL "${CECP_PANEL_RAW_BASE%/}/dist/SHA256SUMS" -o "$tmp/SHA256SUMS" || die "Mirror has no dist/SHA256SUMS"
+    expected="$(awk -v f="$(basename "$url")" '{n=$2; sub(/^\*/, "", n); if (n == f) print $1}' "$tmp/SHA256SUMS" | head -1)"
+  else
+    die "Set CECP_PANEL_BUNDLE_SHA256 when using CECP_PANEL_BUNDLE_URL"
+  fi
+  actual="$(sha256sum "$tmp/bundle.tar.gz" | cut -d' ' -f1)"
+  [[ -n "$expected" && "$expected" == "$actual" ]] || die "Bundle checksum mismatch (expected ${expected:-none}, got $actual)"
+  tar xzf "$tmp/bundle.tar.gz" -C "$tmp"
   SCRIPT_DIR="$tmp/cecp-panel"
   [[ -f "$SCRIPT_DIR/cecp-panel" ]] || die "Bundle missing cecp-panel/ directory"
 }

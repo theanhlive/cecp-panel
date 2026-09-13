@@ -5,10 +5,11 @@ NOTIFY_ENV="${ETC_DIR}/notify.env"
 
 notify_load() {
   [[ -f "$NOTIFY_ENV" ]] || return 1
-  # shellcheck source=/dev/null
-  source "$NOTIFY_ENV"
+  secure_source "$NOTIFY_ENV"
   return 0
 }
+
+notify_is_set() { [[ -n "${1:-}" ]] && echo "set" || echo "missing"; }
 
 notify_status() {
   echo "=== Notify config ($NOTIFY_ENV) ==="
@@ -17,11 +18,10 @@ notify_status() {
     echo "  Setup: cecp-panel notify setup"
     return 0
   fi
-  # shellcheck source=/dev/null
-  source "$NOTIFY_ENV"
-  echo "  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:+set}${TELEGRAM_BOT_TOKEN:-missing}"
+  secure_source "$NOTIFY_ENV"
+  echo "  TELEGRAM_BOT_TOKEN: $(notify_is_set "${TELEGRAM_BOT_TOKEN:-}")"
   echo "  TELEGRAM_CHAT_ID:   ${TELEGRAM_CHAT_ID:-missing}"
-  echo "  DISCORD_WEBHOOK:    ${DISCORD_WEBHOOK:+set}${DISCORD_WEBHOOK:-missing}"
+  echo "  DISCORD_WEBHOOK:    $(notify_is_set "${DISCORD_WEBHOOK:-}")"
   echo "  SSL_WARN_DAYS:      ${SSL_WARN_DAYS:-14}"
   echo "  DISK_WARN_PCT:      ${DISK_WARN_PCT:-85}"
   echo "  Cron: /etc/cron.d/cecp-notify-health"
@@ -50,9 +50,19 @@ EOF
     read -r -p "Telegram bot token (empty skip): " t
     read -r -p "Telegram chat id (empty skip): " c
     read -r -p "Discord webhook URL (empty skip): " d
-    [[ -n "$t" ]] && sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${t}|" "$NOTIFY_ENV"
-    [[ -n "$c" ]] && sed -i "s|^TELEGRAM_CHAT_ID=.*|TELEGRAM_CHAT_ID=${c}|" "$NOTIFY_ENV"
-    [[ -n "$d" ]] && sed -i "s|^DISCORD_WEBHOOK=.*|DISCORD_WEBHOOK=${d}|" "$NOTIFY_ENV"
+    if [[ -n "$t" ]]; then
+      [[ "$t" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || panel_die "Telegram token format: 123456:ABC..."
+      env_set "$NOTIFY_ENV" TELEGRAM_BOT_TOKEN "$t"
+    fi
+    if [[ -n "$c" ]]; then
+      [[ "$c" =~ ^-?[0-9]+$ ]] || panel_die "Telegram chat id must be numeric"
+      env_set "$NOTIFY_ENV" TELEGRAM_CHAT_ID "$c"
+    fi
+    if [[ -n "$d" ]]; then
+      [[ "$d" =~ ^https://(discord\.com|discordapp\.com)/api/webhooks/[0-9]+/[A-Za-z0-9_-]+$ ]] \
+        || panel_die "Discord webhook must be https://discord.com/api/webhooks/ID/TOKEN"
+      env_set "$NOTIFY_ENV" DISCORD_WEBHOOK "$d"
+    fi
   fi
   chmod 600 "$NOTIFY_ENV"
   notify_status
@@ -66,20 +76,25 @@ notify_send() {
   host="$(hostname -f 2>/dev/null || hostname)"
   local full="[CECP ${host}] ${msg}"
 
-  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
-    curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      -d "chat_id=${TELEGRAM_CHAT_ID}" \
+  # Secrets (bot token, webhook URL) go through a curl config fd / the environment,
+  # never argv: site users can read other processes' argv via /proc.
+  if [[ "${TELEGRAM_BOT_TOKEN:-}" =~ ^[0-9]+:[A-Za-z0-9_-]+$ && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+    curl -sS -m 10 -X POST \
+      -K <(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TELEGRAM_BOT_TOKEN") \
+      --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
       --data-urlencode "text=${full}" >/dev/null 2>&1 || true
   fi
   if [[ -n "${DISCORD_WEBHOOK:-}" ]]; then
-    python3 -c "
-import json,urllib.request
-url='${DISCORD_WEBHOOK}'
-data=json.dumps({'content':'''${full}'''}).encode()
-req=urllib.request.Request(url, data=data, headers={'Content-Type':'application/json'})
-try: urllib.request.urlopen(req, timeout=10)
-except Exception: pass
-" 2>/dev/null || true
+    CECP_WEBHOOK="$DISCORD_WEBHOOK" CECP_TEXT="$full" python3 -c '
+import json, os, urllib.request
+req = urllib.request.Request(os.environ["CECP_WEBHOOK"],
+                             data=json.dumps({"content": os.environ["CECP_TEXT"]}).encode(),
+                             headers={"Content-Type": "application/json"})
+try:
+    urllib.request.urlopen(req, timeout=10)
+except Exception:
+    pass
+' 2>/dev/null || true
   fi
 }
 

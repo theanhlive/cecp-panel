@@ -4,7 +4,9 @@ set -euo pipefail
 
 php_version_normalize() {
   local v="${1//./}"
-  echo "${v:0:2}"
+  v="${v:0:2}"
+  [[ "$v" =~ ^(74|8[0-4])$ ]] || panel_die "Unsupported PHP version: '${1:-}' (use 74, 80-84)"
+  echo "$v"
 }
 
 php_remipkg_prefix() {
@@ -37,7 +39,7 @@ php_list_versions() {
   echo "Installed for panel:"
   shopt -s nullglob
   for f in "$SITES_DIR"/*.json; do
-    python3 -c "import json; d=json.load(open('$f')); print(f\"  {d['domain']:35} php {d.get('php_version','80')}\")"
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("  %-35s php %s" % (d["domain"], d.get("php_version", "80")))' "$f"
   done
   shopt -u nullglob
   echo ""
@@ -46,7 +48,8 @@ php_list_versions() {
 }
 
 php_install_version() {
-  local ver="$1"
+  local ver
+  ver="$(php_version_normalize "${1:-}")"
   require_root
   php_ensure_remi
   local pfx
@@ -84,47 +87,25 @@ php_fpm_sock_for_version() {
 php_set_site_version() {
   local domain="${1,,}" ver="$2"
   require_root
+  validate_domain "$domain"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
   local norm
   norm="$(php_version_normalize "$ver")"
   if [[ "$norm" != "80" ]]; then
     php_install_version "$norm"
   fi
-  local meta slug pool_name site_user docroot php_sock
-  meta="$(site_meta_path "$domain")"
-  slug="$(domain_slug "$domain")"
-  pool_name="$(python3 -c "import json; print(json.load(open('$meta'))['pool_name'])")"
-  site_user="$(python3 -c "import json; print(json.load(open('$meta'))['site_user'])")"
-  docroot="$(python3 -c "import json; print(json.load(open('$meta'))['docroot'])")"
-  php_sock="$(php_fpm_sock_for_version "$norm" "$pool_name")"
-  local fpm_dir
-  fpm_dir="$(php_fpm_d_dir "$norm")"
-  mkdir -p "$fpm_dir"
-  rm -f /etc/php-fpm.d/cecp-${slug}.conf 2>/dev/null || true
-  rm -f /etc/opt/remi/php*/php-fpm.d/cecp-${slug}.conf 2>/dev/null || true
-  template_render "$PANEL_ROOT/templates/php-fpm-pool.conf.tpl" \
-    "${fpm_dir}/cecp-${slug}.conf" \
-    DOMAIN "$domain" POOL_NAME "$pool_name" SITE_USER "$site_user" \
-    DOCROOT "$docroot" PHP_SOCK "$php_sock"
-  sed -i "s|^\\[${pool_name}\\]|\\[${pool_name}\\]\\n; PHP ${norm}|" "${fpm_dir}/cecp-${slug}.conf"
-  local ngx="/etc/nginx/conf.d/cecp-${slug}.conf"
-  [[ -f "$ngx" ]] && sed -i "s|unix:.*\\.sock|unix:${php_sock}|" "$ngx"
-  python3 <<PY
-import json
-p="$meta"
-d=json.load(open(p))
-d["php_version"]="$norm"
-d["php_sock"]="$php_sock"
-json.dump(d, open(p,"w"), indent=2)
-open(p,"a").write("\n")
-PY
-  chmod 600 "$meta"
+  local php_sock
+  php_sock="$(php_fpm_sock_for_version "$norm" "$(site_json_get "$domain" pool_name)")"
+  site_json_set "$domain" php_version "$norm" php_sock "$php_sock"
+  site_render_pool "$domain"
+  site_render_vhost "$domain"
+  # The pool left one FPM service (reload is fine for removals) and joined another (restart).
+  php_fpm_reload_all
   if [[ "$norm" == "80" ]]; then
-    php_fpm_reload
+    php_fpm_restart_for_new_pool php-fpm
   else
-    systemctl reload "$(php_remipkg_prefix "$norm")-php-fpm" 2>/dev/null || \
-      systemctl restart "$(php_remipkg_prefix "$norm")-php-fpm"
+    php_fpm_restart_for_new_pool "$(php_remipkg_prefix "$norm")-php-fpm"
   fi
-  nginx_test_and_reload
+  nginx_test_and_reload || panel_die "nginx rejected the vhost for $domain (config rolled back)"
   panel_log "Site $domain now uses PHP ${norm}"
 }

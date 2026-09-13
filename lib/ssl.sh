@@ -10,32 +10,92 @@ ssl_list() {
   fi
 }
 
+# Reload nginx after every renewal (certbot runs hooks in this dir automatically).
+ssl_install_deploy_hook() {
+  local hook=/etc/letsencrypt/renewal-hooks/deploy/cecp-reload-nginx.sh
+  mkdir -p "$(dirname "$hook")"
+  printf '#!/bin/sh\nnginx -t -q && systemctl reload nginx\n' >"$hook"
+  chmod 755 "$hook"
+}
+
+# Certs issued by older panels used certbot's nginx installer, which edits vhosts on renewal
+# and would fight the panel-managed HTTPS template. Switch renewal to webroot, no installer.
+ssl_renewal_use_webroot() {
+  local domain="${1,,}" conf docroot
+  ssl_install_deploy_hook
+  conf="/etc/letsencrypt/renewal/${domain}.conf"
+  [[ -f "$conf" ]] || return 0
+  docroot="$(site_json_get "$domain" docroot)"
+  python3 - "$conf" "$domain" "$docroot" <<'PY'
+import sys
+conf, domain, docroot = sys.argv[1:4]
+lines = open(conf, encoding="utf-8").read().splitlines()
+out, in_params, in_map = [], False, False
+for line in lines:
+    s = line.strip()
+    if s.startswith("[") and not s.startswith("[["):
+        in_params, in_map = (s == "[renewalparams]"), False
+    elif s.startswith("[["):
+        in_map = (s == "[[webroot_map]]")
+        if in_map:
+            continue
+    if in_map:
+        continue
+    if in_params and s.split("=")[0].strip() in ("authenticator", "installer", "webroot_path"):
+        continue
+    out.append(line)
+    if s == "[renewalparams]":
+        out += ["authenticator = webroot", f"webroot_path = {docroot},"]
+out += ["[[webroot_map]]", f"{domain} = {docroot}"]
+open(conf, "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+}
+
+# Point nginx at an existing Let's Encrypt cert using the panel HTTPS template.
 ssl_reattach_nginx() {
-  local domain="$1"
+  local domain="${1,,}"
+  validate_domain "$domain"
   [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]] || return 0
-  panel_log "Re-attaching Let's Encrypt to nginx for $domain ..."
-  certbot install --cert-name "$domain" --nginx --non-interactive 2>/dev/null || \
-    certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email \
-      --redirect || panel_die "certbot could not configure nginx SSL for $domain"
-  site_set_ssl_flag "$domain" true
-  nginx_test_and_reload
+  panel_log "Attaching Let's Encrypt certificate to nginx for $domain ..."
+  ssl_install_deploy_hook
+  ssl_renewal_use_webroot "$domain"
+  site_render_vhost "$domain"
+  nginx_test_and_reload || panel_die "nginx rejected the HTTPS vhost for $domain (config rolled back)"
 }
 
 ssl_issue_for_domain() {
-  local domain="$1"
+  local domain="${1,,}"
   require_root
+  validate_domain "$domain"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain (run: cecp-panel site add $domain)"
   if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
     ssl_reattach_nginx "$domain"
     panel_log "SSL OK (existing cert): https://$domain"
     return 0
   fi
-  panel_log "Issuing Let's Encrypt for $domain ..."
-  certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email \
-    --redirect || panel_die "certbot failed for $domain (DNS must point to this VPS; use DNS-only if Cloudflare proxied blocks HTTP-01)"
-  site_set_ssl_flag "$domain" true
-  nginx_test_and_reload
-  panel_log "SSL OK: https://$domain"
+  panel_log "Issuing Let's Encrypt for $domain (webroot) ..."
+  # certonly: certbot must not edit the panel-managed vhost; we render HTTPS ourselves.
+  certbot certonly --webroot -w "$(site_json_get "$domain" docroot)" -d "$domain" \
+    --non-interactive --agree-tos --register-unsafely-without-email \
+    || panel_die "certbot failed for $domain (DNS must point to this VPS; use DNS-only if Cloudflare proxied blocks HTTP-01)"
+  ssl_reattach_nginx "$domain"
+  panel_log "SSL OK: https://$domain (HTTP/2 + HSTS)"
+}
+
+# cecp-panel ssl hsts DOMAIN on|off|subdomains
+ssl_set_hsts() {
+  local domain="${1,,}" mode="${2:-}"
+  require_root
+  validate_domain "$domain"
+  [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
+  case "$mode" in
+    on|off|subdomains) ;;
+    *) panel_die "Usage: cecp-panel ssl hsts DOMAIN on|off|subdomains" ;;
+  esac
+  site_json_set "$domain" hsts "$mode"
+  site_render_vhost "$domain"
+  nginx_test_and_reload || panel_die "nginx rejected the vhost for $domain (config rolled back)"
+  panel_log "HSTS for $domain: $mode"
 }
 
 ssl_status() {
@@ -73,8 +133,9 @@ ssl_renew_all() {
 }
 
 ssl_remove_for_domain() {
-  local domain="$1"
+  local domain="${1,,}"
   require_root
+  validate_domain "$domain"
   if [[ ! -d "/etc/letsencrypt/live/${domain}" ]]; then
     panel_log "No certificate for $domain — nothing to remove"
     return 0
@@ -92,19 +153,20 @@ ssl_cf_detect_zone() {
   local domain="$1"
   local zone candidate ns
   # Extract root domain (e.g. sub.example.com -> example.com)
-  zone="$(python3 -c "
-parts='${domain}'.split('.')
-if len(parts) > 2 and parts[-2] in ('com','net','org','vn','info','io','co','me'):
-    print('.'.join(parts[-3:]))
+  zone="$(python3 -c '
+import sys
+parts = sys.argv[1].split(".")
+if len(parts) > 2 and parts[-2] in ("com", "net", "org", "vn", "info", "io", "co", "me"):
+    print(".".join(parts[-3:]))
 elif len(parts) > 2:
-    print('.'.join(parts[-2:]))
+    print(".".join(parts[-2:]))
 else:
-    print('.'.join(parts))
-" 2>/dev/null || echo "$domain")"
+    print(".".join(parts))
+' "$domain" 2>/dev/null || echo "$domain")"
 
   # First: try CF API if credentials exist
   if [[ -f "$ETC_DIR/credentials.env" ]]; then
-    source "$ETC_DIR/credentials.env" 2>/dev/null || true
+    secure_source "$ETC_DIR/credentials.env"
     if [[ -n "${CF_API_TOKEN:-}" ]]; then
       candidate="$(dns_zone_id "$zone" 2>/dev/null || true)"
       if [[ -n "$candidate" ]]; then
@@ -124,7 +186,7 @@ else:
 
 ssl_cf_has_credentials() {
   [[ -f "$ETC_DIR/credentials.env" ]] || return 1
-  source "$ETC_DIR/credentials.env" 2>/dev/null || true
+  secure_source "$ETC_DIR/credentials.env"
   [[ -n "${CF_API_TOKEN:-}" ]]
 }
 
@@ -210,7 +272,7 @@ ssl_cf_set_proxy() {
   local zid
   zid="$(dns_zone_id "$zone" 2>/dev/null)" || return 1
   local body
-  body="$(python3 -c "import json; print(json.dumps({'proxied':$proxied}))")"
+  body="$(python3 -c 'import json,sys; print(json.dumps({"proxied": sys.argv[1].lower() in ("true", "1")}))' "$proxied")"
   dns_cf_api PATCH "/zones/${zid}/dns_records/${rec_id}" "$body" 2>/dev/null | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
@@ -220,9 +282,10 @@ print(d['result']['name'], 'proxied ->', d['result'].get('proxied'))
 }
 
 ssl_fix_for_domain() {
-  local domain="$1"
+  local domain="${1,,}"
   local auto_mode="${2:-no}"
   require_root
+  validate_domain "$domain"
   [[ -n "$domain" ]] || panel_die "Usage: cecp-panel ssl fix DOMAIN [--auto]"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain (run: cecp-panel site add $domain)"
 
@@ -440,7 +503,7 @@ ssl_fix_all() {
   local f domain count=0
   for f in "$SITES_DIR"/*.json; do
     [[ -f "$f" ]] || continue
-    domain="$(python3 -c "import json; print(json.load(open('$f'))['domain'])" 2>/dev/null)" || continue
+    domain="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["domain"])' "$f" 2>/dev/null)" || continue
     [[ -n "$domain" ]] || continue
     count=$((count + 1))
     echo ""

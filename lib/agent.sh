@@ -24,7 +24,14 @@ set -euo pipefail
 ETC_DIR="/etc/cecp-panel"
 VAR_LIB="/var/lib/cecp-panel"
 OUT="$VAR_LIB/agent/heartbeat.json"
-[[ -f "$ETC_DIR/agent.env" ]] && source "$ETC_DIR/agent.env"
+ENV_FILE="$ETC_DIR/agent.env"
+if [[ -f "$ENV_FILE" ]]; then
+  # Root-owned and not group/world-writable only: this file is sourced as root.
+  [[ "$(stat -c %u "$ENV_FILE")" == "0" ]] && (( (8#$(stat -c %a "$ENV_FILE") & 8#022) == 0 )) \
+    || { echo "refusing insecure $ENV_FILE" >&2; exit 1; }
+  # shellcheck source=/dev/null
+  source "$ENV_FILE"
+fi
 mkdir -p "$(dirname "$OUT")"
 export OUT CECP_API_URL CECP_VPS_ID CECP_AGENT_TOKEN
 python3 - <<'PY'
@@ -87,8 +94,9 @@ api="${CECP_API_URL:-}"
 tok="${CECP_AGENT_TOKEN:-}"
 vid="${CECP_VPS_ID:-}"
 if [[ -n "$api" && -n "$tok" && -n "$vid" ]]; then
+  # Token via a config fd, not argv (site users can read other processes' argv).
   curl -fsS -m 10 -X POST "${api%/}/infra/agent/heartbeat" \
-    -H "Authorization: Bearer ${tok}" \
+    -K <(printf 'header = "Authorization: Bearer %s"\n' "$tok") \
     -H "Content-Type: application/json" \
     -d @"$OUT" >/dev/null 2>>/var/log/cecp-panel/agent.log || true
 fi

@@ -4,33 +4,22 @@ set -euo pipefail
 
 onboard_write_cf() {
   local token="$1" zone="${2:-theanhlive.com}"
+  [[ "$token" =~ ^[A-Za-z0-9_-]{20,}$ ]] || panel_die "Cloudflare API token has an unexpected format"
+  zone="${zone,,}"
+  validate_domain "$zone"
   mkdir -p "$ETC_DIR"
-  if [[ -f "$ETC_DIR/credentials.env" ]]; then
-    grep -v '^CF_API_TOKEN=' "$ETC_DIR/credentials.env" 2>/dev/null | grep -v '^CF_DEFAULT_ZONE=' >"$ETC_DIR/credentials.env.tmp" || true
-    mv "$ETC_DIR/credentials.env.tmp" "$ETC_DIR/credentials.env"
-  else
-    cp "$PANEL_ROOT/templates/credentials.env.example" "$ETC_DIR/credentials.env" 2>/dev/null || touch "$ETC_DIR/credentials.env"
-  fi
-  {
-    echo "CF_API_TOKEN=$token"
-    echo "CF_DEFAULT_ZONE=$zone"
-  } >>"$ETC_DIR/credentials.env"
-  chmod 600 "$ETC_DIR/credentials.env"
+  [[ -f "$ETC_DIR/credentials.env" ]] || install -m 600 "$PANEL_ROOT/templates/credentials.env.example" "$ETC_DIR/credentials.env"
+  env_set "$ETC_DIR/credentials.env" CF_API_TOKEN "$token"
+  env_set "$ETC_DIR/credentials.env" CF_DEFAULT_ZONE "$zone"
 }
 
 onboard_write_backup() {
   local sa_path="$1" team_id="$2"
-  if [[ ! -f "$BACKUP_ENV" ]]; then
-    cp "$PANEL_ROOT/templates/backup.env.example" "$BACKUP_ENV"
-  fi
-  local tmp="$BACKUP_ENV.new"
-  grep -v '^GDRIVE_SERVICE_ACCOUNT_FILE=' "$BACKUP_ENV" 2>/dev/null | grep -v '^GDRIVE_TEAM_DRIVE_ID=' >"$tmp" || cp "$BACKUP_ENV" "$tmp"
-  {
-    echo "GDRIVE_SERVICE_ACCOUNT_FILE=$sa_path"
-    echo "GDRIVE_TEAM_DRIVE_ID=$team_id"
-  } >>"$tmp"
-  mv "$tmp" "$BACKUP_ENV"
-  chmod 600 "$BACKUP_ENV"
+  [[ "$team_id" =~ ^[A-Za-z0-9_-]+$ ]] || panel_die "Shared Drive ID has an unexpected format"
+  [[ -f "$sa_path" ]] || panel_die "Service account file not found: $sa_path"
+  [[ -f "$BACKUP_ENV" ]] || install -m 600 "$PANEL_ROOT/templates/backup.env.example" "$BACKUP_ENV"
+  env_set "$BACKUP_ENV" GDRIVE_SERVICE_ACCOUNT_FILE "$sa_path"
+  env_set "$BACKUP_ENV" GDRIVE_TEAM_DRIVE_ID "$team_id"
   if [[ "$sa_path" != /etc/cecp-panel/* ]]; then
     install -m 600 "$sa_path" /etc/cecp-panel/gdrive-service-account.json
     onboard_write_backup "/etc/cecp-panel/gdrive-service-account.json" "$team_id"

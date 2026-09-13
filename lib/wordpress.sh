@@ -10,8 +10,16 @@ wp_ensure_cli() {
     return 0
   fi
   require_root
-  curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o "$WP_CLI_BIN"
-  chmod +x "$WP_CLI_BIN"
+  local base="https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar" tmp
+  tmp="$(mktemp -d)"
+  curl -fsSL "$base/wp-cli.phar" -o "$tmp/wp-cli.phar"
+  curl -fsSL "$base/wp-cli.phar.sha512" -o "$tmp/wp-cli.phar.sha512"
+  if [[ "$(sha512sum "$tmp/wp-cli.phar" | cut -d' ' -f1)" != "$(tr -dc '0-9a-f' <"$tmp/wp-cli.phar.sha512")" ]]; then
+    rm -rf "$tmp"
+    panel_die "wp-cli.phar checksum mismatch — not installed"
+  fi
+  install -m 755 "$tmp/wp-cli.phar" "$WP_CLI_BIN"
+  rm -rf "$tmp"
 }
 
 wp_site_meta() {
@@ -28,6 +36,7 @@ wp_site_exec() {
   local domain
   domain="$(wp_domain_lc "$1")"
   shift
+  validate_domain "$domain"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
   [[ "$(wp_site_is_wordpress "$domain")" == "True" ]] || panel_die "Not a WordPress site: $domain"
   local docroot site_user
@@ -56,6 +65,7 @@ wp_install_system_cron() {
   local domain
   domain="$(wp_domain_lc "$1")"
   require_root
+  validate_domain "$domain"
   if [[ "$(wp_site_is_wordpress "$domain")" != "True" ]]; then
     panel_die "Not a WordPress site: $domain"
   fi

@@ -2,12 +2,15 @@
 set -euo pipefail
 
 ensure_nginx_global() {
-  # Idempotent: guarantees the shared nginx zones (cecp_general, cecp_conn, CECP_WP)
-  # and the fastcgi cache dir exist BEFORE any site vhost references them.
+  # Idempotent: installs the shared http-context config (zones, cache key, log format), the
+  # header/TLS snippets and the Cloudflare real-IP list BEFORE any vhost references them.
   require_root
   local src="$PANEL_ROOT/templates/nginx-global-cecp.conf"
-  local target="/etc/nginx/conf.d/cecp-global.conf"
-  mkdir -p /var/cache/nginx/cecp
+  # "00-": conf.d is read alphabetically and log_format must be defined before a vhost uses it
+  # (cecp-a*.conf would otherwise load before cecp-global.conf).
+  local target="/etc/nginx/conf.d/00-cecp-global.conf"
+  rm -f /etc/nginx/conf.d/cecp-global.conf
+  mkdir -p /var/cache/nginx/cecp /etc/nginx/snippets
   chown nginx:nginx /var/cache/nginx/cecp 2>/dev/null || chown www-data:www-data /var/cache/nginx/cecp 2>/dev/null || true
   local rendered
   rendered="$(<"$src")"
@@ -18,14 +21,18 @@ ensure_nginx_global() {
   if [[ ! -f "$target" ]] || [[ "$(<"$target")" != "$rendered" ]]; then
     printf '%s\n' "$rendered" >"$target"
     chmod 644 "$target"
-    panel_log "Installed/updated shared nginx zones -> $target"
+    panel_log "Installed/updated shared nginx config -> $target"
+  fi
+  install -m 644 "$PANEL_ROOT/templates/nginx-snippet-headers.conf" /etc/nginx/snippets/cecp-headers.conf
+  install -m 644 "$PANEL_ROOT/templates/nginx-snippet-ssl.conf" /etc/nginx/snippets/cecp-ssl-params.conf
+  if [[ ! -f /etc/nginx/conf.d/cecp-cloudflare-realip.conf ]]; then
+    cf_realip_render "$PANEL_ROOT/templates/cloudflare-ips.txt"
   fi
 }
 
 optimize_nginx_global() {
   require_root
   ensure_nginx_global
-  # worker auto snippet (http context via conf.d is wrong for worker_processes — main context)
   # http-context tuning via conf.d. Never repeat directives the distro nginx.conf already sets
   # (keepalive_timeout, sendfile, gzip on Ubuntu) — nginx -t rejects duplicates.
   cat >/etc/nginx/conf.d/cecp-perf.conf <<'EOF'
@@ -42,55 +49,17 @@ EOF
     fi
   fi
   nginx_test_and_reload
-  panel_log "Nginx global optimize: gzip, rate limit, fastcgi cache zone, keepalive"
+  panel_log "Nginx global optimize: gzip, rate limit, fastcgi cache, real IP, open_file_cache"
 }
 
 optimize_site() {
   local domain="${1,,}"
   require_root
+  validate_domain "$domain"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
-  local slug
-  slug="$(domain_slug "$domain")"
-  local docroot php_sock site_user pool_name
-  docroot="$(site_json_get "$domain" "docroot")"
-  php_sock="$(site_json_get "$domain" "php_sock")"
-  site_user="$(site_json_get "$domain" "site_user")"
-  pool_name="$(site_json_get "$domain" "pool_name")"
-  ensure_nginx_global
-  template_render "$PANEL_ROOT/templates/nginx-vhost.conf.tpl" \
-    "/etc/nginx/conf.d/cecp-${slug}.conf" \
-    DOMAIN "$domain" DOCROOT "$docroot" PHP_SOCK "$php_sock"
-  template_render "$PANEL_ROOT/templates/php-fpm-pool.conf.tpl" \
-    "/etc/php-fpm.d/cecp-${slug}.conf" \
-    DOMAIN "$domain" POOL_NAME "$pool_name" SITE_USER "$site_user" \
-    DOCROOT "$docroot" PHP_SOCK "$php_sock"
-  # Remi multi-PHP: re-place pool if site uses non-default version
-  local php_ver
-  php_ver="$(python3 -c "import json; print(json.load(open('$(site_meta_path "$domain")')).get('php_version','80'))" 2>/dev/null || echo 80)"
-  if [[ "$php_ver" != "80" && -f "$PANEL_ROOT/lib/php_mgr.sh" ]]; then
-    # shellcheck source=/dev/null
-    source "$PANEL_ROOT/lib/php_mgr.sh"
-    local fpm_dir
-    fpm_dir="$(php_fpm_d_dir "$php_ver")"
-    if [[ -d "$fpm_dir" ]]; then
-      template_render "$PANEL_ROOT/templates/php-fpm-pool.conf.tpl" \
-        "${fpm_dir}/cecp-${slug}.conf" \
-        DOMAIN "$domain" POOL_NAME "$pool_name" SITE_USER "$site_user" \
-        DOCROOT "$docroot" PHP_SOCK "$php_sock"
-      rm -f "/etc/php-fpm.d/cecp-${slug}.conf" 2>/dev/null || true
-    fi
-  fi
-  nginx_test_and_reload
-  # shellcheck source=/dev/null
-  source "$PANEL_ROOT/lib/ssl.sh"
-  ssl_reattach_nginx "$domain" 2>/dev/null || true
-  php_fpm_reload
-  if [[ -f "$PANEL_ROOT/lib/wordpress.sh" ]]; then
-    # shellcheck source=/dev/null
-    source "$PANEL_ROOT/lib/wordpress.sh"
-    if [[ "$(wp_site_is_wordpress "$domain" 2>/dev/null)" == "True" ]]; then
-      wp_optimize_site "$domain"
-    fi
+  site_rebuild_vhost "$domain"
+  if [[ "$(wp_site_is_wordpress "$domain" 2>/dev/null)" == "True" ]]; then
+    wp_optimize_site "$domain"
   fi
   panel_log "Optimized site: $domain (nginx cache + php-fpm ondemand)"
 }
@@ -98,26 +67,53 @@ optimize_site() {
 # ---------------------------------------------------------------------------
 # FastCGI cache purge
 # ---------------------------------------------------------------------------
+CECP_CACHE_DIR="/var/cache/nginx/cecp"
+
 optimize_purge_cache() {
   require_root
   local target="${1:-all}"
   if [[ "$target" == "all" || "$target" == "--all" ]]; then
-    rm -rf /var/cache/nginx/cecp/*
-    mkdir -p /var/cache/nginx/cecp
-    chown nginx:nginx /var/cache/nginx/cecp 2>/dev/null || chown www-data:www-data /var/cache/nginx/cecp 2>/dev/null || true
+    find "$CECP_CACHE_DIR" -mindepth 1 -delete 2>/dev/null || true
     panel_log "Purged FastCGI cache (all sites)"
     return 0
   fi
   local domain="${target,,}"
+  validate_domain "$domain"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
-  # Key uses host — purge by grepping levels is hard; safe approach: full zone purge
-  # or delete files that hash for this host (nginx levels=1:2). Full purge is OK for small VPS.
-  panel_log "Purging FastCGI cache for host=$domain (zone CECP_WP shared — clearing matching keys via find)..."
-  # Shared zone: safest correct purge is full zone; document that
-  rm -rf /var/cache/nginx/cecp/*
-  mkdir -p /var/cache/nginx/cecp
-  chown nginx:nginx /var/cache/nginx/cecp 2>/dev/null || chown www-data:www-data /var/cache/nginx/cecp 2>/dev/null || true
-  panel_log "FastCGI cache cleared (shared zone CECP_WP)"
+  # Every cache file carries a "KEY: <scheme><method><host><uri>" header line.
+  local f n=0
+  while IFS= read -r -d '' f; do
+    rm -f "$f" && n=$((n + 1))
+  done < <(grep -rlaZF \
+             -e "KEY: httpsGET${domain}/" -e "KEY: httpGET${domain}/" \
+             -e "KEY: httpsHEAD${domain}/" -e "KEY: httpHEAD${domain}/" \
+             "$CECP_CACHE_DIR" 2>/dev/null || true)
+  panel_log "Purged FastCGI cache for $domain (${n} entries)"
+}
+
+# Purge one URL from the origin cache: md5 of the cache key → levels=1:2 file path.
+optimize_purge_url() {
+  require_root
+  local url="${1:-}"
+  validate_url "$url"
+  local f n=0
+  while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
+    rm -f "$f" && n=$((n + 1))
+  done < <(python3 - "$url" "$CECP_CACHE_DIR" <<'PY'
+import hashlib, re, sys
+from urllib.parse import urlsplit
+u, root = urlsplit(sys.argv[1]), sys.argv[2]
+track = re.compile(r"^(?:(?:utm_[a-z_]+|fbclid|gclid|gbraid|wbraid|dclid|msclkid|ttclid|twclid|igshid|mc_cid|mc_eid|_ga|_gl)=[^&]*&?)+$")
+path = u.path or "/"
+uri = path if (u.query and track.match(u.query)) else path + ("?" + u.query if u.query else "")
+host = (u.hostname or "").lower()
+for method in ("GET", "HEAD"):
+    h = hashlib.md5(f"{u.scheme}{method}{host}{uri}".encode()).hexdigest()
+    print(f"{root}/{h[-1]}/{h[-3:-1]}/{h}")
+PY
+)
+  panel_log "Purged origin cache for $url (${n} entries)"
 }
 
 # ---------------------------------------------------------------------------
@@ -156,8 +152,7 @@ optimize_install_redis() {
   mem="$(optimize_redis_mem_mb)"
   mkdir -p /etc/cecp-panel
   if [[ -f /etc/cecp-panel/redis.env ]]; then
-    # shellcheck source=/dev/null
-    source /etc/cecp-panel/redis.env
+    secure_source /etc/cecp-panel/redis.env
     pass="${REDIS_PASSWORD:-}"
   fi
   if [[ -z "${pass:-}" ]]; then
@@ -191,9 +186,16 @@ save ""
 appendonly no
 EOF
 )"
+  if redis_supports_acl; then
+    cecp_redis_snippet+=$'\n'"include ${REDIS_ACL_CONF}"
+  fi
 
   if [[ -n "$conf_d" ]]; then
     echo "$cecp_redis_snippet" >"$conf_d"
+    # Contains requirepass: readable by root and the redis group only.
+    chown root:redis "$conf_d" 2>/dev/null || true
+    chmod 640 "$conf_d"
+    redis_acl_write_conf
     if ! grep -qF "cecp.conf" "$conf" 2>/dev/null; then
       echo "include $conf_d" >>"$conf"
     fi
@@ -224,29 +226,139 @@ EOF
   panel_log "WP object cache: cecp-panel optimize redis-wp DOMAIN"
 }
 
+REDIS_ACL_CONF="/etc/redis/cecp-acl.conf"
+
+redis_supports_acl() {
+  local v
+  v="$(redis-server --version 2>/dev/null | grep -oE 'v=[0-9]+' | cut -d= -f2)"
+  [[ -n "$v" ]] && (( v >= 6 ))
+}
+
+# Admin redis-cli: commands on stdin and the password in REDISCLI_AUTH, so no secret in argv.
+redis_admin() {
+  secure_source /etc/cecp-panel/redis.env
+  REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli -h "${REDIS_HOST:-127.0.0.1}" -p "${REDIS_PORT:-6379}"
+}
+
+# Persist per-site ACL users (from site meta) so they survive a Redis restart.
+redis_acl_write_conf() {
+  local tmp
+  tmp="$(mktemp)"
+  python3 - "$SITES_DIR" >"$tmp" <<'PY'
+import glob, json, re, sys
+for p in sorted(glob.glob(sys.argv[1] + "/*.json")):
+    d = json.load(open(p))
+    u, pw = d.get("redis_user", ""), d.get("redis_pass", "")
+    if re.fullmatch(r"cecp_[a-z0-9_]+", u) and re.fullmatch(r"[A-Za-z0-9]+", pw):
+        print(f"user {u} on >{pw} ~{u}_* +@all -@admin -@dangerous +info +ping +select")
+PY
+  install -m 640 -o root -g redis "$tmp" "$REDIS_ACL_CONF" 2>/dev/null || install -m 640 "$tmp" "$REDIS_ACL_CONF"
+  rm -f "$tmp"
+}
+
+# Each site gets a Redis ACL user limited to its own key prefix. Before, all sites shared one
+# password, so any site's PHP could read (or flush) every other site's object cache.
+redis_site_acl() {
+  local domain="$1" slug user pass
+  slug="$(domain_slug "$domain")"
+  user="cecp_${slug}"
+  pass="$(site_json_get_or "$domain" redis_pass "")"
+  if [[ -z "$pass" ]]; then
+    pass="$(rand_alnum 32)"
+    site_json_set "$domain" redis_user "$user" redis_pass "$pass"
+  fi
+  printf 'ACL SETUSER %s reset on >%s ~%s_* +@all -@admin -@dangerous +info +ping +select\n' \
+    "$user" "$pass" "$user" | redis_admin >/dev/null
+  redis_acl_write_conf
+}
+
+# Write the Redis constants straight into wp-config.php (as root, keeping ownership): passing
+# the password to `wp config set` would expose it in the process list.
+redis_wp_config_write() {
+  local docroot="$1" user="$2" pass="$3" prefix="$4" host="$5" port="$6"
+  python3 - "$docroot/wp-config.php" "$user" "$pass" "$prefix" "$host" "$port" <<'PY'
+import re, sys
+path, user, pw, prefix, host, port = sys.argv[1:7]
+src = open(path, encoding="utf-8").read()
+src = re.sub(r"^\s*define\(\s*['\"]WP_REDIS_(HOST|PORT|PASSWORD|PREFIX|SELECTIVE_FLUSH)['\"].*\n", "", src, flags=re.M)
+auth = f"['{user}', '{pw}']" if user else f"'{pw}'"
+block = (
+    "/* CECP Panel: Redis object cache (managed) */\n"
+    f"define( 'WP_REDIS_HOST', '{host}' );\n"
+    f"define( 'WP_REDIS_PORT', {int(port)} );\n"
+    f"define( 'WP_REDIS_PASSWORD', {auth} );\n"
+    f"define( 'WP_REDIS_PREFIX', '{prefix}' );\n"
+    "define( 'WP_REDIS_SELECTIVE_FLUSH', true );\n"
+)
+src = src.replace("/* CECP Panel: Redis object cache (managed) */\n", "")
+marker = "/* That's all, stop editing!"
+src = src.replace(marker, block + marker, 1) if marker in src else src.replace("<?php", "<?php\n" + block, 1)
+open(path, "w", encoding="utf-8").write(src)
+PY
+}
+
 optimize_redis_wp() {
   local domain="${1,,}"
   require_root
+  validate_domain "$domain"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
   [[ -f /etc/cecp-panel/redis.env ]] || optimize_install_redis
-  # shellcheck source=/dev/null
-  source /etc/cecp-panel/redis.env
-  # shellcheck source=/dev/null
-  source "$PANEL_ROOT/lib/wordpress.sh"
+  secure_source /etc/cecp-panel/redis.env
   [[ "$(wp_site_is_wordpress "$domain" 2>/dev/null)" == "True" ]] \
     || panel_die "redis-wp requires WordPress: $domain"
   wp_ensure_cli
   panel_log "Configuring Redis object cache for $domain ..."
   wp_site_exec "$domain" plugin install redis-cache --activate 2>/dev/null \
     || wp_site_exec "$domain" plugin activate redis-cache 2>/dev/null || true
-  wp_site_exec "$domain" config set WP_REDIS_HOST "${REDIS_HOST:-127.0.0.1}"
-  wp_site_exec "$domain" config set WP_REDIS_PORT "${REDIS_PORT:-6379}" --raw
-  wp_site_exec "$domain" config set WP_REDIS_PASSWORD "${REDIS_PASSWORD}"
-  wp_site_exec "$domain" config set WP_REDIS_PREFIX "cecp_$(domain_slug "$domain")_"
+  local slug user="" pass="$REDIS_PASSWORD"
+  slug="$(domain_slug "$domain")"
+  if redis_supports_acl; then
+    redis_site_acl "$domain"
+    user="cecp_${slug}"
+    pass="$(site_json_get "$domain" redis_pass)"
+  else
+    panel_log "WARN: Redis < 6 has no ACLs — $domain shares the server-wide Redis password"
+  fi
+  redis_wp_config_write "$(site_json_get "$domain" docroot)" "$user" "$pass" \
+    "cecp_${slug}_" "${REDIS_HOST:-127.0.0.1}" "${REDIS_PORT:-6379}"
+  site_json_set "$domain" redis true
   wp_site_exec "$domain" redis enable 2>/dev/null \
     || wp_site_exec "$domain" redis update-dropin 2>/dev/null || true
   wp_site_exec "$domain" cache flush 2>/dev/null || true
-  panel_log "Redis object cache enabled for $domain (plugin redis-cache)"
+  panel_log "Redis object cache enabled for $domain (ACL user: ${user:-default})"
+}
+
+# cecp-panel optimize redis-acl DOMAIN|--all
+# --all moves every site already using Redis to its own ACL user, then rotates the shared
+# password so copies of it left in old wp-config.php files stop working.
+optimize_redis_acl() {
+  local target="${1:-}"
+  require_root
+  redis_supports_acl || panel_die "Redis >= 6 required for per-site ACLs"
+  [[ -f /etc/cecp-panel/redis.env ]] || panel_die "Redis not installed by the panel (cecp-panel optimize redis)"
+  if [[ "$target" != "--all" ]]; then
+    optimize_redis_wp "$target"
+    return 0
+  fi
+  local f domain docroot
+  shopt -s nullglob
+  for f in "$SITES_DIR"/*.json; do
+    domain="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["domain"])' "$f")"
+    docroot="$(site_json_get "$domain" docroot)"
+    if [[ "$(site_json_get_or "$domain" redis false)" == "True" ]] || grep -q "WP_REDIS_" "$docroot/wp-config.php" 2>/dev/null; then
+      optimize_redis_wp "$domain"
+    fi
+  done
+  shopt -u nullglob
+  local newpass
+  newpass="$(rand_alnum 32)"
+  printf 'CONFIG SET requirepass %s\n' "$newpass" | redis_admin >/dev/null
+  env_set /etc/cecp-panel/redis.env REDIS_PASSWORD "$newpass"
+  local conf
+  for conf in /etc/redis/cecp.conf /etc/redis/redis.conf /etc/redis.conf; do
+    [[ -f "$conf" ]] && sed -i -E "s/^\s*requirepass\s.*/requirepass ${newpass}/" "$conf"
+  done
+  panel_log "Redis: per-site ACL users applied; shared default password rotated"
 }
 
 # ---------------------------------------------------------------------------
@@ -325,6 +437,11 @@ optimize_mariadb_tune() {
   (( ram_mb >= 2048 )) && max_conn=80
   (( ram_mb >= 4096 )) && max_conn=150
   (( ram_mb >= 8192 )) && max_conn=200
+  # ~12 WordPress tables per site plus plugins; 400 caused constant table re-opens on multi-site hosts.
+  local table_cache sites
+  sites="$(find "$SITES_DIR" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)"
+  table_cache=$(( sites * 100 ))
+  (( table_cache < 2000 )) && table_cache=2000
 
   local f
   if [[ -d /etc/my.cnf.d ]]; then
@@ -345,7 +462,8 @@ innodb_flush_log_at_trx_commit = 2
 max_connections = ${max_conn}
 tmp_table_size = 64M
 max_heap_table_size = 64M
-table_open_cache = 400
+table_open_cache = ${table_cache}
+table_definition_cache = 1400
 query_cache_type = 0
 skip_name_resolve = 1
 EOF
@@ -373,10 +491,18 @@ vm.swappiness = 10
 vm.dirty_ratio = 15
 vm.dirty_background_ratio = 5
 EOF
+  # BBR is a module: load it now and at boot, otherwise sysctl rejects "bbr" (early at boot too).
+  mkdir -p /etc/modules-load.d
+  printf 'tcp_bbr\n' >/etc/modules-load.d/cecp-bbr.conf
+  modprobe tcp_bbr 2>/dev/null || true
   sysctl --system >/dev/null 2>&1 || sysctl -p "$f" >/dev/null 2>&1 || true
   local cc
   cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
-  panel_log "Kernel tuning applied ($f). tcp_congestion_control=$cc (expect bbr if kernel supports)"
+  if [[ "$cc" == "bbr" ]]; then
+    panel_log "Kernel tuning applied ($f). tcp_congestion_control=bbr"
+  else
+    panel_log "WARN: tcp_congestion_control=$cc — kernel lacks BBR or sysctl is read-only (container)"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -385,9 +511,8 @@ EOF
 optimize_webp() {
   local domain="${1,,}"
   require_root
+  validate_domain "$domain"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
-  # shellcheck source=/dev/null
-  source "$PANEL_ROOT/lib/wordpress.sh"
   [[ "$(wp_site_is_wordpress "$domain" 2>/dev/null)" == "True" ]] \
     || panel_die "WebP enable requires WordPress: $domain"
   wp_ensure_cli
@@ -440,6 +565,7 @@ optimize_bench() {
     domain="${domain#https://}"
     domain="${domain#http://}"
     domain="${domain%%/*}"
+    validate_domain "$domain"
     if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
       url="https://${domain}/"
     else
@@ -453,6 +579,40 @@ optimize_bench() {
   else
     panel_die "curl required"
   fi
+}
+
+# cecp-panel optimize report DOMAIN [LINES] — cache hit ratio and latency from the `cecp` log format.
+optimize_report() {
+  local domain="${1,,}" n="${2:-5000}"
+  validate_domain "$domain"
+  validate_int_range "$n" 1 1000000 "line count"
+  local log="/var/log/nginx/${domain}-access.log"
+  [[ -f "$log" ]] || panel_die "No access log: $log"
+  tail -n "$n" "$log" | python3 -c '
+import re, sys
+rows = []
+for line in sys.stdin:
+    m = re.search(r" rt=([0-9.]+) cs=(\S+)$", line.rstrip())
+    if m:
+        rows.append((float(m.group(1)), m.group(2)))
+if not rows:
+    sys.exit("No requests in the cecp log format yet (run: cecp-panel site rebuild-vhost DOMAIN)")
+def pct(vals, p):
+    vals = sorted(vals)
+    return vals[min(len(vals) - 1, int(round(p / 100 * (len(vals) - 1))))] * 1000
+dyn = [r for r in rows if r[1] != "-"]
+print(f"=== {sys.argv[1]}: last {len(rows)} logged requests ({len(dyn)} dynamic) ===")
+counts = {}
+for _, s in dyn:
+    counts[s] = counts.get(s, 0) + 1
+for s, c in sorted(counts.items(), key=lambda kv: -kv[1]):
+    print(f"  {s:12} {c:7}  {100 * c / len(dyn):5.1f}%")
+hits = [t for t, s in dyn if s in ("HIT", "STALE", "UPDATING", "REVALIDATED")]
+miss = [t for t, s in dyn if s not in ("HIT", "STALE", "UPDATING", "REVALIDATED")]
+for name, vals in (("all", [t for t, _ in rows]), ("cached", hits), ("uncached", miss)):
+    if vals:
+        print(f"  {name:9} p50={pct(vals, 50):7.1f} ms  p95={pct(vals, 95):7.1f} ms")
+' "$domain"
 }
 
 # ---------------------------------------------------------------------------

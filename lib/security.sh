@@ -67,13 +67,16 @@ security_apply_ssh_key_only() {
   sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' "$cfg"
   sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' "$cfg" 2>/dev/null || true
   sed -i 's/^#\?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' "$cfg" 2>/dev/null || true
-  if ! sshd_apply_dropin /etc/ssh/sshd_config.d/99-cecp-keyonly.conf "PasswordAuthentication no
+  # sshd keeps the FIRST value it reads and drop-ins load alphabetically, so a "99-" file loses
+  # to e.g. 50-cloud-init.conf (PasswordAuthentication yes). "00-" makes the setting effective.
+  if ! sshd_apply_dropin /etc/ssh/sshd_config.d/00-cecp-keyonly.conf "PasswordAuthentication no
 PubkeyAuthentication yes
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no"; then
     cp -a "$bak" "$cfg"
     panel_die "SSH key-only NOT applied (sshd config test failed; restored $cfg)"
   fi
+  rm -f /etc/ssh/sshd_config.d/99-cecp-keyonly.conf
   panel_log "SSH: PasswordAuthentication=no (ensure your SSH key works before disconnecting!)"
 }
 
@@ -109,13 +112,15 @@ security_ssh_harden() {
   # Non-destructive defaults: prohibit password root, keep password auth unless key-only applied
   require_root
   security_audit_log "security ssh-harden"
-  sshd_apply_dropin /etc/ssh/sshd_config.d/99-cecp-harden.conf "PermitRootLogin prohibit-password
+  # "00-" so these win over distro drop-ins (first value wins, e.g. 50-redhat.conf X11Forwarding yes).
+  sshd_apply_dropin /etc/ssh/sshd_config.d/00-cecp-harden.conf "PermitRootLogin prohibit-password
 PubkeyAuthentication yes
 X11Forwarding no
 MaxAuthTries 4
 ClientAliveInterval 300
 ClientAliveCountMax 2
 LoginGraceTime 30" || panel_die "SSH harden NOT applied (sshd config test failed)"
+  rm -f /etc/ssh/sshd_config.d/99-cecp-harden.conf
   panel_log "SSH harden applied (PermitRootLogin=prohibit-password). Use ssh-key-only after key verified."
 }
 
@@ -186,16 +191,50 @@ security_php_hide_version() {
 # ---------------------------------------------------------------------------
 # Fail2Ban jails
 # ---------------------------------------------------------------------------
+# [DEFAULT] for all jails: incremental bans, and never ban Cloudflare edges (without real-IP
+# every proxied visitor appears to come from them, so one ban would take sites offline).
+security_fail2ban_defaults() {
+  local ignore="127.0.0.1/8 ::1"
+  if [[ -f "$CF_IPS_FILE" ]]; then
+    ignore+=" $(grep -vE '^\s*(#|$)' "$CF_IPS_FILE" | tr '\n' ' ')"
+  fi
+  mkdir -p /etc/fail2ban/jail.d
+  cat >/etc/fail2ban/jail.d/cecp-00-defaults.conf <<EOF
+[DEFAULT]
+ignoreip = ${ignore}
+bantime = 1h
+bantime.increment = true
+bantime.maxtime = 1w
+findtime = 10m
+EOF
+}
+
 security_fail2ban_full() {
   require_root
   security_audit_log "security fail2ban-full"
-  mkdir -p /etc/fail2ban/jail.d /etc/fail2ban/filter.d
+  mkdir -p /etc/fail2ban/jail.d /etc/fail2ban/filter.d /etc/fail2ban/action.d
 
   # Prefer systemd backend when available (Alma/RHEL); else file-based
   local ssh_backend="auto"
   if systemctl is-system-running &>/dev/null; then
     ssh_backend="systemd"
   fi
+
+  [[ -f "$CF_IPS_FILE" ]] || cf_realip_render "$PANEL_ROOT/templates/cloudflare-ips.txt"
+  security_fail2ban_defaults
+
+  # Firewall bans cannot stop traffic arriving through Cloudflare's proxy; an nginx-level
+  # deny (evaluated on the real client IP) can.
+  cat >/etc/fail2ban/action.d/cecp-nginx-deny.conf <<'EOF'
+[Definition]
+actionstart = touch /etc/nginx/conf.d/cecp-f2b-deny.conf
+actionstop =
+actioncheck =
+actionban = grep -qxF 'deny <ip>;' /etc/nginx/conf.d/cecp-f2b-deny.conf || echo 'deny <ip>;' >> /etc/nginx/conf.d/cecp-f2b-deny.conf
+            nginx -t -q && systemctl reload nginx
+actionunban = sed -i '/^deny <ip>;$/d' /etc/nginx/conf.d/cecp-f2b-deny.conf
+              nginx -t -q && systemctl reload nginx
+EOF
 
   cat >/etc/fail2ban/jail.d/cecp-sshd.conf <<EOF
 [sshd]
@@ -204,8 +243,6 @@ port = ssh
 filter = sshd
 backend = ${ssh_backend}
 maxretry = 5
-findtime = 600
-bantime = 3600
 EOF
 
   cat >/etc/fail2ban/jail.d/cecp-nginx.conf <<'EOF'
@@ -213,19 +250,19 @@ EOF
 enabled = true
 filter = nginx-limit-req
 action = %(action_)s
+         cecp-nginx-deny
 logpath = /var/log/nginx/*error.log
 maxretry = 20
 findtime = 60
-bantime = 3600
 
 [nginx-http-auth]
 enabled = true
 filter = nginx-http-auth
 port = http,https
+action = %(action_)s
+         cecp-nginx-deny
 logpath = /var/log/nginx/*error.log
 maxretry = 5
-findtime = 600
-bantime = 3600
 EOF
 
   # botsearch only if stock filter exists (avoid fail2ban crash on missing filter)
@@ -236,10 +273,23 @@ EOF
 enabled = true
 filter = nginx-botsearch
 port = http,https
+action = %(action_)s
+         cecp-nginx-deny
 logpath = /var/log/nginx/*access.log
 maxretry = 2
-findtime = 600
-bantime = 86400
+bantime = 1d
+EOF
+  fi
+
+  # Repeat offenders across all jails: long ban. Only when fail2ban logs to a file.
+  if [[ -f /var/log/fail2ban.log ]]; then
+    cat >/etc/fail2ban/jail.d/cecp-recidive.conf <<'EOF'
+[recidive]
+enabled = true
+logpath = /var/log/fail2ban.log
+findtime = 1d
+maxretry = 5
+bantime = 1w
 EOF
   fi
 
@@ -255,17 +305,19 @@ EOF
 enabled = true
 filter = cecp-wordpress
 port = http,https
+action = %(action_)s
+         cecp-nginx-deny
 logpath = /var/log/nginx/*access.log
 maxretry = 15
 findtime = 300
-bantime = 7200
+bantime = 2h
 EOF
 
   systemctl enable --now fail2ban 2>/dev/null || true
   if ! systemctl reload fail2ban 2>/dev/null; then
     systemctl restart fail2ban 2>/dev/null || panel_log "WARN: fail2ban restart failed — check jail filters"
   fi
-  panel_log "fail2ban jails: sshd, nginx-limit-req, nginx-http-auth, cecp-wordpress (+ botsearch if available)"
+  panel_log "fail2ban: sshd, nginx-limit-req, nginx-http-auth, cecp-wordpress (+botsearch, recidive); incremental bans; Cloudflare never banned"
 }
 
 # Keep old name as alias
@@ -320,20 +372,25 @@ security_firewall_baseline() {
 # ---------------------------------------------------------------------------
 security_https_snippet_install() {
   require_root
-  mkdir -p /etc/nginx/snippets
-  cat >/etc/nginx/snippets/cecp-ssl-params.conf <<'EOF'
-# CECP — include inside server { listen 443 ssl; ... }
-ssl_session_cache shared:CECPSSL:10m;
-ssl_session_timeout 1d;
-ssl_session_tickets off;
-ssl_protocols TLSv1.2 TLSv1.3;
-ssl_prefer_server_ciphers off;
-add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-add_header X-Frame-Options "SAMEORIGIN" always;
-add_header X-Content-Type-Options "nosniff" always;
-add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-EOF
-  panel_log "Installed /etc/nginx/snippets/cecp-ssl-params.conf (use after SSL; certbot may already set headers)"
+  ensure_nginx_global
+  panel_log "Installed nginx snippets cecp-headers.conf + cecp-ssl-params.conf (used by panel HTTPS vhosts)"
+}
+
+# Logs must not be world-readable (they used to contain passwords); scrub secrets that
+# older versions wrote. LOG_DIR stays traversable (711) for per-site wp-cron logs.
+security_fix_permissions() {
+  require_root
+  chmod 700 "$ETC_DIR" 2>/dev/null || true
+  install -d -m 711 "$LOG_DIR"
+  find "$LOG_DIR" -maxdepth 1 -type f -exec chmod 640 {} + 2>/dev/null || true
+  chmod 600 "$SITES_DIR"/*.json 2>/dev/null || true
+  if [[ -f "$LOG_DIR/panel.log" ]]; then
+    sed -i -E \
+      -e 's/(pass: )[A-Za-z0-9!@#%^_+=.,-]+( \(save now\))/\1[REDACTED]\2/' \
+      -e 's/(Password: )[A-Za-z0-9!@#%^_+=.,-]+/\1[REDACTED]/' \
+      "$LOG_DIR/panel.log"
+  fi
+  panel_log "Permissions: $ETC_DIR 700, $LOG_DIR 711, logs 640, site meta 600; old secrets redacted"
 }
 
 # ---------------------------------------------------------------------------
@@ -348,11 +405,13 @@ security_apply_production() {
   source "$PANEL_ROOT/lib/mysql.sh"
 
   panel_log "Applying production security profile..."
+  security_fix_permissions
   security_firewall_baseline
   security_nginx_hide_version
   security_php_hide_version
   security_https_snippet_install
   optimize_nginx_global
+  cf_realip_update
   security_fail2ban_full
   security_ssh_harden
   security_mariadb_bind_local
@@ -364,32 +423,91 @@ security_apply_production() {
   nginx_test_and_reload || true
   php_fpm_reload || true
   panel_log "Production profile applied:"
-  panel_log "  - firewall baseline, server_tokens off, expose_php=Off"
-  panel_log "  - fail2ban full jails, SSH harden (key root only)"
+  panel_log "  - permissions + log redaction, firewall baseline, server_tokens off, expose_php=Off"
+  panel_log "  - Cloudflare real IP, fail2ban (incremental, nginx deny), SSH harden (key root only)"
   panel_log "  - MariaDB bind localhost + baseline secure"
-  panel_log "  - nginx gzip/rate-limit/fastcgi zones"
-  panel_log "Recommended next: cecp-panel security ssh-key-only (after SSH key verified)"
-  panel_log "Optional: cecp-panel security ssh-port 2222"
+  panel_log "Next: cecp-panel site rebuild-vhost --all   # apply new vhost/pool templates"
+  panel_log "Recommended: cecp-panel security ssh-key-only (after SSH key verified)"
 }
 
 security_self_check() {
+  local pass=0 warn=0 fail=0
+  _ck() {
+    case "$1" in
+      PASS) pass=$((pass + 1)) ;;
+      WARN) warn=$((warn + 1)) ;;
+      FAIL) fail=$((fail + 1)) ;;
+    esac
+    printf '  [%s] %s\n' "$1" "$2"
+  }
   echo "=== CECP Security self-check ==="
-  security_ssh_show
-  echo ""
-  security_firewall_status
-  echo ""
-  security_fail2ban_status
-  echo ""
-  echo "--- nginx tokens ---"
-  nginx -T 2>/dev/null | grep -i server_tokens | head -5 || echo "  (run as root for full dump)"
-  echo ""
-  echo "--- MariaDB bind ---"
-  if command -v mysql &>/dev/null; then
-    mysql -Nse "SHOW VARIABLES LIKE 'bind_address';" 2>/dev/null || true
+
+  echo "--- SSH ---"
+  if sshd -t 2>/dev/null; then _ck PASS "sshd -t: config valid"; else _ck FAIL "sshd -t: config INVALID (restart would lock SSH out)"; fi
+  local eff
+  eff="$(sshd -T 2>/dev/null || true)"
+  if grep -qx 'passwordauthentication no' <<<"$eff"; then _ck PASS "effective PasswordAuthentication no"
+  else _ck WARN "effective PasswordAuthentication yes (run security ssh-key-only once your key works)"; fi
+  if grep -qE '^permitrootlogin (no|prohibit-password|without-password)$' <<<"$eff"; then _ck PASS "root password login disabled"
+  else _ck WARN "root can log in with a password (run security ssh-harden)"; fi
+  if grep -lE '^Match User *$' /etc/ssh/sshd_config.d/cecp-*.conf >/dev/null 2>&1; then
+    _ck FAIL "damaged SFTP drop-in (empty Match User) — run: cecp-panel security ssh-repair"
   fi
+
+  echo "--- nginx ---"
+  if nginx -t 2>/dev/null; then _ck PASS "nginx -t: config valid"; else _ck FAIL "nginx -t: config INVALID"; fi
+  if [[ -f "$CF_REALIP_CONF" ]]; then _ck PASS "Cloudflare real-IP configured"
+  else _ck WARN "Cloudflare real-IP missing (rate limit / fail2ban see Cloudflare IPs) — run: cecp-panel cf realip"; fi
+  local f dom vhost deny_line php_line
+  shopt -s nullglob
+  for f in "$SITES_DIR"/*.json; do
+    dom="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["domain"])' "$f")"
+    vhost="/etc/nginx/conf.d/cecp-$(domain_slug "$dom").conf"
+    [[ -f "$vhost" ]] || { _ck FAIL "$dom: vhost missing"; continue; }
+    deny_line="$(grep -nF '(?:uploads|files)' "$vhost" | grep -v ':\s*#' | head -1 | cut -d: -f1)"
+    php_line="$(grep -nE '^\s*location ~ \\\.php\$' "$vhost" | head -1 | cut -d: -f1)"
+    if [[ -n "$deny_line" && -n "$php_line" && "$deny_line" -lt "$php_line" ]]; then
+      _ck PASS "$dom: PHP execution in uploads blocked"
+    else
+      _ck FAIL "$dom: uploaded .php files can execute — run: cecp-panel site rebuild-vhost $dom"
+    fi
+    if grep -q 'cecp-headers.conf' "$vhost"; then _ck PASS "$dom: security headers on every response"
+    else _ck WARN "$dom: old vhost (headers dropped on PHP/static) — run: cecp-panel site rebuild-vhost $dom"; fi
+    local sock
+    sock="$(site_json_get_or "$dom" php_sock "")"
+    if [[ -S "$sock" && "$(stat -c %U "$sock")" != "nginx" ]] && id nginx &>/dev/null; then
+      _ck FAIL "$dom: PHP-FPM socket owned by $(stat -c %U:%G "$sock") — nginx gets 502 (run: systemctl restart php-fpm)"
+    fi
+  done
+  shopt -u nullglob
+
+  echo "--- files / secrets ---"
+  [[ "$(stat -c %a "$ETC_DIR" 2>/dev/null)" == "700" ]] && _ck PASS "$ETC_DIR is 700" || _ck FAIL "$ETC_DIR not 700"
+  if [[ -f "$LOG_DIR/panel.log" ]] && (( (8#$(stat -c %a "$LOG_DIR/panel.log") & 8#004) != 0 )); then
+    _ck FAIL "panel.log is world-readable — run: cecp-panel security apply-production"
+  else
+    _ck PASS "panel.log not world-readable"
+  fi
+  if grep -qE 'pass: [A-Za-z0-9]{8,} \(save now\)|Password: [A-Za-z0-9]{8,}' "$LOG_DIR/panel.log" 2>/dev/null; then
+    _ck FAIL "panel.log contains plaintext passwords — run: cecp-panel security apply-production"
+  fi
+
+  echo "--- services ---"
+  systemctl is-active --quiet fail2ban 2>/dev/null && _ck PASS "fail2ban active" || _ck WARN "fail2ban not active"
+  [[ -f /etc/fail2ban/jail.d/cecp-00-defaults.conf ]] && _ck PASS "fail2ban never bans Cloudflare" \
+    || _ck WARN "fail2ban defaults missing — run: cecp-panel security fail2ban-full"
+  if [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == "bbr" ]]; then _ck PASS "TCP BBR active"
+  else _ck WARN "TCP BBR not active (cecp-panel optimize kernel)"; fi
+  if command -v mysql &>/dev/null; then
+    local bind
+    bind="$(mysql -Nse "SELECT @@bind_address" 2>/dev/null || true)"
+    [[ "$bind" == "127.0.0.1" || "$bind" == "localhost" ]] && _ck PASS "MariaDB bound to localhost" \
+      || _ck WARN "MariaDB bind_address='${bind:-?}' (security mariadb-bind)"
+  fi
+
   echo ""
-  echo "Audit log: $LOG_DIR/audit.log"
-  [[ -f "$LOG_DIR/audit.log" ]] && tail -5 "$LOG_DIR/audit.log" || echo "  (empty)"
+  echo "RESULT: ${pass} pass, ${warn} warn, ${fail} fail"
+  [[ "$fail" == "0" ]]
 }
 
 security_unattended_updates() {

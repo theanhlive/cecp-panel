@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.5.1-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.6.0-beta}"
 # Public mirror — one-command install for end users
 CECP_PANEL_RAW_BASE="${CECP_PANEL_RAW_BASE:-https://isharevn.net/downloads/cecp-panel}"
 
@@ -21,9 +21,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --raw-base) CECP_PANEL_RAW_BASE="$2"; shift 2 ;;
     --version) CECP_PANEL_VERSION="$2"; shift 2 ;;
+    --sha256) PIN_SHA256="$2"; shift 2 ;;
     --no-onboard) NO_ONBOARD=1; shift ;;
     -h|--help)
-      echo "Usage: install-cecp-panel.sh [--raw-base URL] [--version VER] [--no-onboard]"
+      echo "Usage: install-cecp-panel.sh [--raw-base URL] [--version VER] [--sha256 HASH] [--no-onboard]"
       exit 0
       ;;
     *) die "Unknown arg: $1" ;;
@@ -46,15 +47,27 @@ run_local_install() {
 download_and_install() {
   local base="${CECP_PANEL_RAW_BASE%/}"
   [[ -n "$base" ]] || die "Set CECP_PANEL_RAW_BASE or pass --raw-base (GitHub raw path to scripts/cecp-panel)"
-  local url="${base}/dist/cecp-panel-${CECP_PANEL_VERSION}.tar.gz"
-  local tmp
+  local name="cecp-panel-${CECP_PANEL_VERSION}.tar.gz"
+  local tmp expected actual
   tmp="$(mktemp -d)"
-  log "Downloading $url ..."
-  if ! curl -fsSL "$url" -o "$tmp/bundle.tar.gz"; then
-    url="${base}/dist/cecp-panel-latest.tar.gz"
-    log "Retry: $url ..."
-    curl -fsSL "$url" -o "$tmp/bundle.tar.gz"
+  log "Downloading ${base}/dist/${name} ..."
+  if ! curl -fsSL "${base}/dist/${name}" -o "$tmp/bundle.tar.gz"; then
+    name="cecp-panel-latest.tar.gz"
+    log "Retry: ${base}/dist/${name} ..."
+    curl -fsSL "${base}/dist/${name}" -o "$tmp/bundle.tar.gz"
   fi
+  # Everything below runs as root: refuse a bundle that does not match the published checksum.
+  if [[ -n "${PIN_SHA256:-}" ]]; then
+    expected="$PIN_SHA256"
+  else
+    curl -fsSL "${base}/dist/SHA256SUMS" -o "$tmp/SHA256SUMS" \
+      || die "Mirror has no dist/SHA256SUMS — refusing an unverified install (or pass --sha256 HASH)"
+    expected="$(awk -v f="$name" '{n=$2; sub(/^\*/, "", n); if (n == f) print $1}' "$tmp/SHA256SUMS" | head -1)"
+  fi
+  actual="$(sha256sum "$tmp/bundle.tar.gz" | cut -d' ' -f1)"
+  [[ -n "$expected" && "$expected" == "$actual" ]] \
+    || die "Checksum mismatch for $name (expected ${expected:-none}, got $actual)"
+  log "Checksum OK ($actual)"
   tar xzf "$tmp/bundle.tar.gz" -C "$tmp"
   run_local_install "$tmp/cecp-panel"
   rm -rf "$tmp"

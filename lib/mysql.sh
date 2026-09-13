@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Temporary [client] option file (mode 600) so DB passwords never appear in argv (ps, /proc).
+# Caller removes it; pass it as the FIRST option: --defaults-extra-file=FILE.
+mysql_client_cnf() {
+  local f
+  f="$(mktemp)"
+  chmod 600 "$f"
+  printf '[client]\nuser=%s\npassword="%s"\n' "$1" "$2" >"$f"
+  echo "$f"
+}
+
 mysql_ensure_running() {
   systemctl start mariadb 2>/dev/null || systemctl start mysql 2>/dev/null || true
 }
@@ -35,10 +45,15 @@ EOF
 mysql_create_site_db() {
   local db_name="$2" db_user="$3" db_pass="$4"
   mysql_ensure_running
-  mysql -e "CREATE DATABASE IF NOT EXISTS \`${db_name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-  mysql -e "CREATE USER IF NOT EXISTS '${db_user}'@'localhost' IDENTIFIED BY '${db_pass}';"
-  mysql -e "GRANT ALL PRIVILEGES ON \`${db_name}\`.* TO '${db_user}'@'localhost';"
-  mysql -e "FLUSH PRIVILEGES;"
+  [[ "$db_name" =~ ^[a-z0-9_]+$ && "$db_user" =~ ^[a-z0-9_]+$ && "$db_pass" =~ ^[A-Za-z0-9]+$ ]] \
+    || panel_die "mysql_create_site_db: unexpected db name/user/password characters"
+  # SQL via stdin, not `mysql -e`: keeps the password out of the process list.
+  mysql <<SQL
+CREATE DATABASE IF NOT EXISTS \`${db_name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '${db_user}'@'localhost' IDENTIFIED BY '${db_pass}';
+GRANT ALL PRIVILEGES ON \`${db_name}\`.* TO '${db_user}'@'localhost';
+FLUSH PRIVILEGES;
+SQL
 }
 
 mysql_drop_site_db() {

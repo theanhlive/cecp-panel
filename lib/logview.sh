@@ -3,8 +3,10 @@ set -euo pipefail
 
 log_view() {
   local kind="${1:-panel}"
-  local domain="${2:-}"
+  local domain="${2,,}"
   local lines="${3:-80}"
+  [[ -z "$domain" ]] || validate_domain "$domain"
+  validate_int_range "$lines" 1 100000 "line count"
   case "$kind" in
     panel)
       echo "=== $LOG_DIR/panel.log (last $lines) ==="

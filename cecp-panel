@@ -34,7 +34,7 @@ source "$PANEL_ROOT/lib/modsec.sh"
 source "$PANEL_ROOT/lib/logview.sh"
 source "$PANEL_ROOT/lib/menu.sh"
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.5.1-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.6.0-beta}"
 
 usage() {
   cat <<EOF
@@ -43,14 +43,14 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel                         Interactive menu
   cecp-panel status                  Rich health status
 
-  cecp-panel site list|add|remove|duplicate|sftp-info|sftp-password
+  cecp-panel site list|add|remove|duplicate|sftp-info|sftp-password|rebuild-vhost
     site add DOMAIN [--wordpress|--wp] [--php 82] [--ssl] [--redis]
-  cecp-panel ssl list|issue|fix|renew|status|remove
+  cecp-panel ssl list|issue|fix|renew|status|remove|hsts DOMAIN on|off|subdomains
   cecp-panel dns list|add|point|ssl-mode
-  cecp-panel cf status|purge|purge-url|brotli|cache-level|minify|recommend [args]
+  cecp-panel cf status|purge|purge-url|realip|brotli|cache-level|recommend [args]
   cecp-panel backup setup|status|run|list|prune|restore|enable-cron|...
   cecp-panel security fail2ban|fail2ban-full|firewall|ssh|ssh-key-only|ssh-harden|ssh-repair
-  cecp-panel security ssh-port|mariadb-bind|apply-production|check|unattended
+  cecp-panel security ssh-port|mariadb-bind|apply-production|check|unattended|fix-perms
   cecp-panel system info|ensure-swap|swap|disk-clean|maintain|tune
   cecp-panel mysql secure
   cecp-panel agent install|status
@@ -58,7 +58,7 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel php list|install VER|set DOMAIN VER
   cecp-panel update check|mirror|panel|component|os
   cecp-panel wp harden|optimize|cron|status DOMAIN
-  cecp-panel optimize site|nginx|redis|redis-wp|mariadb|opcache|kernel|purge|stack|bench|webp|brotli
+  cecp-panel optimize site|nginx|redis|redis-wp|redis-acl|mariadb|opcache|kernel|purge|purge-url|stack|bench|report|webp|brotli
   cecp-panel media enable|disable|status|run|run-all|enable-cron|disable-cron
     media enable DOMAIN [--max-width 1920] [--quality 80] [--no-upload] [--no-cron] [--no-webp]
     media run DOMAIN [--dry-run] [--limit N]   # only if enabled for that site
@@ -124,7 +124,13 @@ case "$cmd" in
         ;;
       sftp-info) [[ -n "${1:-}" ]] && site_sftp_info "$1" || panel_die "Usage: cecp-panel site sftp-info DOMAIN" ;;
       sftp-password) [[ -n "${1:-}" ]] && site_sftp_password "$1" "${2:-}" || panel_die "Usage: cecp-panel site sftp-password DOMAIN [PASS]" ;;
-      *) panel_die "Usage: cecp-panel site list|add|remove|duplicate|sftp-info|sftp-password" ;;
+      rebuild-vhost)
+        if [[ "${1:-}" == "--all" ]]; then site_rebuild_vhost_all
+        elif [[ -n "${1:-}" ]]; then site_rebuild_vhost "$1"
+        else panel_die "Usage: cecp-panel site rebuild-vhost DOMAIN|--all"
+        fi
+        ;;
+      *) panel_die "Usage: cecp-panel site list|add|remove|duplicate|sftp-info|sftp-password|rebuild-vhost" ;;
     esac
     ;;
   ssl)
@@ -147,7 +153,8 @@ case "$cmd" in
       renew) ssl_renew_all ;;
       status) ssl_status ;;
       remove) [[ -n "${1:-}" ]] && ssl_remove_for_domain "$1" || panel_die "Usage: cecp-panel ssl remove DOMAIN" ;;
-      *) panel_die "Usage: cecp-panel ssl list|issue|fix|renew|status|remove" ;;
+      hsts) ssl_set_hsts "${1:-}" "${2:-}" ;;
+      *) panel_die "Usage: cecp-panel ssl list|issue|fix|renew|status|remove|hsts" ;;
     esac
     ;;
   dns)
@@ -171,11 +178,12 @@ case "$cmd" in
       status) cf_status "${1:-}" ;;
       purge) cf_purge "${1:-all}" ;;
       purge-url) cf_purge_url "${1:-}" ;;
+      realip) cf_realip_update ;;
       brotli) cf_set_brotli "${1:-on}" "${2:-}" ;;
       cache-level) cf_set_cache_level "${1:-aggressive}" "${2:-}" ;;
       minify) cf_set_minify "${1:-}" ;;
       recommend|tips) cf_recommend ;;
-      *) panel_die "Usage: cecp-panel cf status|purge|purge-url|brotli|cache-level|minify|recommend" ;;
+      *) panel_die "Usage: cecp-panel cf status|purge|purge-url|realip|brotli|cache-level|recommend" ;;
     esac
     ;;
   backup)
@@ -228,6 +236,7 @@ case "$cmd" in
       apply-production) require_root; security_apply_production ;;
       check|self-check) security_self_check ;;
       unattended|auto-update) require_root; security_unattended_updates ;;
+      fix-perms) require_root; security_fix_permissions ;;
       *) panel_die "Usage: cecp-panel security ...|unattended" ;;
     esac
     ;;
@@ -281,15 +290,18 @@ case "$cmd" in
       nginx) optimize_nginx_global ;;
       redis) optimize_install_redis ;;
       redis-wp) [[ -n "${1:-}" ]] && optimize_redis_wp "$1" || panel_die "Usage: cecp-panel optimize redis-wp DOMAIN" ;;
+      redis-acl) [[ -n "${1:-}" ]] && optimize_redis_acl "$1" || panel_die "Usage: cecp-panel optimize redis-acl DOMAIN|--all" ;;
       mariadb) optimize_mariadb_tune ;;
       opcache|jit) optimize_opcache_jit ;;
       kernel|bbr) optimize_kernel_bbr ;;
       purge) optimize_purge_cache "${1:-all}" ;;
+      purge-url) optimize_purge_url "${1:-}" ;;
+      report) [[ -n "${1:-}" ]] && optimize_report "$1" "${2:-5000}" || panel_die "Usage: cecp-panel optimize report DOMAIN [LINES]" ;;
       stack) optimize_stack ;;
       bench) optimize_bench "${1:-}" ;;
       webp) [[ -n "${1:-}" ]] && optimize_webp "$1" || panel_die "Usage: cecp-panel optimize webp DOMAIN" ;;
       brotli) optimize_brotli ;;
-      *) panel_die "Usage: cecp-panel optimize site|nginx|redis|redis-wp|mariadb|opcache|kernel|purge|stack|bench|webp|brotli" ;;
+      *) panel_die "Usage: cecp-panel optimize site|nginx|redis|redis-wp|redis-acl|mariadb|opcache|kernel|purge|purge-url|stack|bench|report|webp|brotli" ;;
     esac
     ;;
   media)
@@ -358,7 +370,7 @@ case "$cmd" in
     case "$sub" in
       check) update_check ;;
       mirror) require_root; update_mirror_set "${1:-}" ;;
-      panel) require_root; update_panel "${1:-}" ;;
+      panel) require_root; update_panel "$@" ;;
       component) require_root; update_component "${1:-all}" ;;
       os) require_root; update_component os ;;
       *) panel_die "Usage: cecp-panel update check|mirror|panel|component|os" ;;

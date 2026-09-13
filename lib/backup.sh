@@ -10,8 +10,7 @@ BACKUP_LOG="$LOG_DIR/backup.log"
 
 backup_load_config() {
   [[ -f "$BACKUP_ENV" ]] || panel_die "Missing $BACKUP_ENV — run: cecp-panel backup setup"
-  # shellcheck source=/dev/null
-  source "$BACKUP_ENV"
+  secure_source "$BACKUP_ENV"
   : "${RCLONE_REMOTE:=gdrive_cecp}"
   : "${GDRIVE_FOLDER:=CECP-VPS-Backups}"
   : "${RESTIC_REPOSITORY:=}"
@@ -37,8 +36,7 @@ backup_ensure_tools() {
 }
 
 backup_auth_mode() {
-  # shellcheck source=/dev/null
-  [[ -f "$BACKUP_ENV" ]] && source "$BACKUP_ENV"
+  [[ -f "$BACKUP_ENV" ]] && secure_source "$BACKUP_ENV"
   echo "${BACKUP_AUTH_MODE:-oauth}"
 }
 
@@ -48,12 +46,11 @@ backup_has_oauth_token() {
 
 backup_write_rclone_oauth() {
   require_root
-  # shellcheck source=/dev/null
-  source "$BACKUP_ENV"
+  secure_source "$BACKUP_ENV"
   local token_file="${GDRIVE_OAUTH_TOKEN_FILE:-$ETC_DIR/gdrive-oauth-token.json}"
   [[ -f "$token_file" ]] || panel_die "Missing OAuth token. From Mac CECP: connect Drive, or: cecp-panel backup oauth-import TOKEN_JSON"
   local token_line
-  token_line="$(python3 -c "import json; print(json.dumps(json.load(open('$token_file')), separators=(',', ':')))")"
+  token_line="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), separators=(",", ":")))' "$token_file")"
   cat >"$RCLONE_CONF" <<EOF
 [$RCLONE_REMOTE]
 type = drive
@@ -66,8 +63,7 @@ EOF
 
 backup_write_rclone_service_account() {
   require_root
-  # shellcheck source=/dev/null
-  source "$BACKUP_ENV"
+  secure_source "$BACKUP_ENV"
   [[ -f "${GDRIVE_SERVICE_ACCOUNT_FILE:-}" ]] || panel_die "Set GDRIVE_SERVICE_ACCOUNT_FILE in $BACKUP_ENV"
   [[ -n "${GDRIVE_TEAM_DRIVE_ID:-}" ]] || panel_die "Set GDRIVE_TEAM_DRIVE_ID (Shared Drive ID) in $BACKUP_ENV"
   cat >"$RCLONE_CONF" <<EOF
@@ -105,17 +101,21 @@ backup_oauth_import() {
     panel_log "Paste token JSON from: rclone authorize drive (on Mac), then Ctrl-D:"
     raw="$(cat)"
   fi
-  printf '%s' "$raw" >"$ETC_DIR/.oauth-import-tmp.json"
-  python3 -c "import json; json.load(open('$ETC_DIR/.oauth-import-tmp.json'))" || panel_die "Invalid JSON token"
-  python3 -c "import json; json.dump(json.load(open('$ETC_DIR/.oauth-import-tmp.json')), open('$ETC_DIR/gdrive-oauth-token.json','w'), separators=(',', ':'))"
+  (umask 077; printf '%s' "$raw" >"$ETC_DIR/.oauth-import-tmp.json")
+  python3 - "$ETC_DIR/.oauth-import-tmp.json" "$ETC_DIR/gdrive-oauth-token.json" <<'PY' || { rm -f "$ETC_DIR/.oauth-import-tmp.json"; panel_die "Invalid JSON token"; }
+import json, os, sys
+src, dst = sys.argv[1], sys.argv[2]
+data = json.load(open(src))
+fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(data, f, separators=(",", ":"))
+PY
   rm -f "$ETC_DIR/.oauth-import-tmp.json"
   chmod 600 "$ETC_DIR/gdrive-oauth-token.json"
   if [[ ! -f "$BACKUP_ENV" ]]; then
-    cp "$PANEL_ROOT/templates/backup.env.example" "$BACKUP_ENV"
+    install -m 600 "$PANEL_ROOT/templates/backup.env.example" "$BACKUP_ENV"
   fi
-  if ! grep -q '^BACKUP_AUTH_MODE=oauth' "$BACKUP_ENV" 2>/dev/null; then
-    echo "BACKUP_AUTH_MODE=oauth" >>"$BACKUP_ENV"
-  fi
+  env_set "$BACKUP_ENV" BACKUP_AUTH_MODE oauth
   backup_write_rclone_oauth
   panel_log "OAuth token imported. Run: cecp-panel backup setup"
 }
@@ -182,33 +182,31 @@ backup_setup() {
 
 backup_stage_site() {
   local domain="$1"
-  local meta="$2"
-  local docroot db_name db_user db_pass stage
-  docroot="$(python3 -c "import json; print(json.load(open('$meta'))['docroot'])")"
-  db_name="$(python3 -c "import json; print(json.load(open('$meta'))['db_name'])")"
-  db_user="$(python3 -c "import json; print(json.load(open('$meta'))['db_user'])")"
-  db_pass="$(python3 -c "import json; print(json.load(open('$meta'))['db_pass'])")"
+  local docroot db_name stage cnf
+  docroot="$(site_json_get "$domain" docroot)"
+  db_name="$(site_json_get "$domain" db_name)"
 
   stage="$BACKUP_STAGING/$(domain_slug "$domain")-$(date +%Y%m%d_%H%M%S)"
-  mkdir -p "$stage/files"
+  (umask 077; mkdir -p "$stage/files")
   cp "$(site_meta_path "$domain")" "$stage/site.json"
-  mysqldump -u"$db_user" -p"$db_pass" "$db_name" >"$stage/database.sql"
+  cnf="$(mysql_client_cnf "$(site_json_get "$domain" db_user)" "$(site_json_get "$domain" db_pass)")"
+  mysqldump --defaults-extra-file="$cnf" "$db_name" >"$stage/database.sql"
+  rm -f "$cnf"
   tar -C "$(dirname "$docroot")" -czf "$stage/files/public_html.tar.gz" "$(basename "$docroot")"
   echo "$stage"
 }
 
 backup_run_one() {
-  local domain="$1"
+  local domain="${1,,}"
   local skip_retention="${2:-0}"
-  local meta
-  meta="$(site_meta_path "$domain")"
-  [[ -f "$meta" ]] || panel_die "Unknown site: $domain"
+  validate_domain "$domain"
+  [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Unknown site: $domain"
   backup_load_config
   backup_ensure_tools
   export RESTIC_PASSWORD_FILE="$RESTIC_PASS_FILE"
 
   local stage
-  stage="$(backup_stage_site "$domain" "$meta")"
+  stage="$(backup_stage_site "$domain")"
   panel_log "Backing up $domain → $RESTIC_REPOSITORY ..."
   restic backup "$stage" \
     --tag "$domain" \
@@ -224,7 +222,7 @@ backup_run_all() {
   local f
   for f in "$SITES_DIR"/*.json; do
     local domain
-    domain="$(python3 -c "import json; print(json.load(open('$f'))['domain'])")"
+    domain="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["domain"])' "$f")"
     backup_run_one "$domain" 1
   done
   shopt -u nullglob
@@ -299,8 +297,7 @@ backup_config_get() {
   local host repo cron_enabled
   host="$(hostname -s)"
   if [[ -f "$BACKUP_ENV" ]]; then
-    # shellcheck source=/dev/null
-    source "$BACKUP_ENV"
+    secure_source "$BACKUP_ENV"
   fi
   : "${RCLONE_REMOTE:=gdrive_cecp}"
   : "${GDRIVE_FOLDER:=CECP-VPS-Backups}"
@@ -329,29 +326,27 @@ backup_config_get() {
   }))"
 }
 
-backup_set_env_key() {
-  local key="$1" val="$2"
-  [[ -f "$BACKUP_ENV" ]] || cp "$PANEL_ROOT/templates/backup.env.example" "$BACKUP_ENV"
-  if grep -q "^${key}=" "$BACKUP_ENV" 2>/dev/null; then
-    sed -i "s|^${key}=.*|${key}=${val}|" "$BACKUP_ENV"
-  else
-    echo "${key}=${val}" >>"$BACKUP_ENV"
-  fi
-}
-
 # Usage: backup configure HOUR MINUTE DOW KEEP_DAILY KEEP_WEEKLY KEEP_MONTHLY [KEEP_YEARLY]
 backup_configure() {
   local h="${1:-2}" m="${2:-15}" dow="${3:-*}"
   local kd="${4:-7}" kw="${5:-6}" km="${6:-12}" ky="${7:-0}"
   require_root
-  [[ -f "$BACKUP_ENV" ]] || cp "$PANEL_ROOT/templates/backup.env.example" "$BACKUP_ENV"
-  backup_set_env_key "BACKUP_CRON_HOUR" "$h"
-  backup_set_env_key "BACKUP_CRON_MINUTE" "$m"
-  backup_set_env_key "BACKUP_CRON_DOW" "$dow"
-  backup_set_env_key "RESTIC_KEEP_DAILY" "$kd"
-  backup_set_env_key "RESTIC_KEEP_WEEKLY" "$kw"
-  backup_set_env_key "RESTIC_KEEP_MONTHLY" "$km"
-  backup_set_env_key "RESTIC_KEEP_YEARLY" "$ky"
+  # These land in root's crontab line and in a root-sourced env file: strict formats only.
+  validate_int_range "$h" 0 23 "hour"
+  validate_int_range "$m" 0 59 "minute"
+  [[ "$dow" =~ ^(\*|[0-7](-[0-7])?(,[0-7](-[0-7])?)*)$ ]] || panel_die "Invalid day-of-week: '$dow'"
+  validate_int_range "$kd" 0 3650 "keep-daily"
+  validate_int_range "$kw" 0 520 "keep-weekly"
+  validate_int_range "$km" 0 240 "keep-monthly"
+  validate_int_range "$ky" 0 100 "keep-yearly"
+  [[ -f "$BACKUP_ENV" ]] || install -m 600 "$PANEL_ROOT/templates/backup.env.example" "$BACKUP_ENV"
+  env_set "$BACKUP_ENV" BACKUP_CRON_HOUR "$h"
+  env_set "$BACKUP_ENV" BACKUP_CRON_MINUTE "$m"
+  env_set "$BACKUP_ENV" BACKUP_CRON_DOW "$dow"
+  env_set "$BACKUP_ENV" RESTIC_KEEP_DAILY "$kd"
+  env_set "$BACKUP_ENV" RESTIC_KEEP_WEEKLY "$kw"
+  env_set "$BACKUP_ENV" RESTIC_KEEP_MONTHLY "$km"
+  env_set "$BACKUP_ENV" RESTIC_KEEP_YEARLY "$ky"
   backup_enable_cron
   panel_log "Backup schedule: ${h}:${m} dow=${dow} retention daily=${kd} weekly=${kw} monthly=${km} yearly=${ky}"
 }
@@ -360,6 +355,9 @@ backup_restore() {
   local domain="$1" snapshot_id="$2" target="${3:-}" repo_override="${4:-}"
   require_root
   [[ -n "$domain" && -n "$snapshot_id" ]] || panel_die "Usage: cecp-panel backup restore DOMAIN SNAPSHOT_ID [TARGET_DIR] [RESTIC_REPO]"
+  domain="${domain,,}"
+  validate_domain "$domain"
+  [[ "$snapshot_id" =~ ^([0-9a-f]{8,64}|latest)$ ]] || panel_die "Invalid snapshot id: '$snapshot_id'"
   backup_load_config
   if [[ -n "$repo_override" ]]; then
     export RESTIC_REPOSITORY="$repo_override"

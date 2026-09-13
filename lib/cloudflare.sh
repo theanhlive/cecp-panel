@@ -2,6 +2,58 @@
 # Cloudflare edge helpers (purge, cache level, brotli recommendation)
 set -euo pipefail
 
+CF_REALIP_CONF="/etc/nginx/conf.d/cecp-cloudflare-realip.conf"
+CF_IPS_FILE="$ETC_DIR/cloudflare-ips.txt"
+
+# Write the nginx real-IP config (+ the plain list used by fail2ban ignoreip) from a CIDR list.
+cf_realip_render() {
+  local src="$1"
+  mkdir -p "$ETC_DIR"
+  python3 - "$src" "$CF_REALIP_CONF" "$CF_IPS_FILE" <<'PY'
+import ipaddress, sys
+src, conf, ips_out = sys.argv[1:4]
+nets = []
+for line in open(src, encoding="utf-8"):
+    s = line.strip()
+    if s and not s.startswith("#"):
+        nets.append(str(ipaddress.ip_network(s, strict=True)))
+if len(nets) < 10:
+    sys.exit(f"cf_realip_render: only {len(nets)} ranges in {src}")
+with open(conf, "w", encoding="utf-8") as f:
+    f.write("# CECP Panel — real client IP behind Cloudflare. Managed file: cecp-panel cf realip\n")
+    f.write("# Only Cloudflare edges may set CF-Connecting-IP; direct visitors keep their own IP.\n")
+    for n in nets:
+        f.write(f"set_real_ip_from {n};\n")
+    f.write("real_ip_header CF-Connecting-IP;\n")
+with open(ips_out, "w", encoding="utf-8") as f:
+    f.write("\n".join(nets) + "\n")
+PY
+  chmod 644 "$CF_REALIP_CONF" "$CF_IPS_FILE"
+}
+
+# cecp-panel cf realip — refresh Cloudflare ranges (weekly cron), fall back to the bundled list.
+cf_realip_update() {
+  require_root
+  local tmp
+  tmp="$(mktemp)"
+  if curl -fsS -m 15 https://www.cloudflare.com/ips-v4 >"$tmp" && echo >>"$tmp" \
+     && curl -fsS -m 15 https://www.cloudflare.com/ips-v6 >>"$tmp" \
+     && cf_realip_render "$tmp" 2>/dev/null; then
+    panel_log "Cloudflare IP ranges refreshed ($(grep -c . "$CF_IPS_FILE") ranges)"
+  else
+    panel_log "WARN: could not fetch Cloudflare IP ranges — using the bundled list"
+    cf_realip_render "$PANEL_ROOT/templates/cloudflare-ips.txt"
+  fi
+  rm -f "$tmp"
+  printf '17 4 * * 1 root /usr/local/bin/cecp-panel cf realip >/dev/null 2>&1\n' >/etc/cron.d/cecp-cf-realip
+  chmod 644 /etc/cron.d/cecp-cf-realip
+  nginx_test_and_reload || panel_die "nginx rejected the real-IP config (rolled back)"
+  if [[ -f /etc/fail2ban/jail.d/cecp-00-defaults.conf ]]; then
+    security_fail2ban_defaults
+    systemctl reload fail2ban 2>/dev/null || true
+  fi
+}
+
 cf_load() {
   # shellcheck source=/dev/null
   source "$PANEL_ROOT/lib/dns.sh"
@@ -22,32 +74,39 @@ cf_zone_for_domain() {
   echo "${CF_DEFAULT_ZONE:-}"
 }
 
+# Exit non-zero with the API errors unless a Cloudflare response says success.
+cf_check_response() {
+  python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+if not d.get("success"):
+    raise SystemExit(str(d.get("errors") or d))
+print(sys.argv[1])
+' "$1"
+}
+
 cf_purge() {
   local target="${1:-}"
   require_root
   cf_load
-  local zone zid
+  local zone zid origin_target="all"
   if [[ -z "$target" || "$target" == "--all" || "$target" == "all" ]]; then
     zone="$CF_DEFAULT_ZONE"
   elif [[ "$target" == http* ]]; then
     panel_die "Pass zone or domain, not full URL (or use cf purge-url)"
   else
+    target="${target,,}"
+    validate_domain "$target"
     zone="$(cf_zone_for_domain "$target")"
+    [[ -f "$(site_meta_path "$target")" ]] && origin_target="$target"
   fi
   [[ -n "$zone" ]] || panel_die "No zone resolved"
   zid="$(dns_zone_id "$zone")"
   [[ -n "$zid" ]] || panel_die "Zone not found: $zone"
   panel_log "Cloudflare purge everything zone=$zone ..."
-  dns_cf_api POST "/zones/${zid}/purge_cache" '{"purge_everything":true}' | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-if not d.get('success'):
-    raise SystemExit(str(d.get('errors') or d))
-print('CF purge OK:', '$zone')
-"
-  # also purge origin FastCGI if available
+  dns_cf_api POST "/zones/${zid}/purge_cache" '{"purge_everything":true}' | cf_check_response "CF purge OK: $zone"
   if declare -F optimize_purge_cache >/dev/null 2>&1; then
-    optimize_purge_cache all 2>/dev/null || true
+    optimize_purge_cache "$origin_target" || true
   fi
 }
 
@@ -55,22 +114,19 @@ cf_purge_url() {
   local url="${1:-}"
   require_root
   [[ -n "$url" ]] || panel_die "Usage: cecp-panel cf purge-url https://domain/path"
+  validate_url "$url"
   cf_load
-  local host zone zid
-  host="$(python3 -c "from urllib.parse import urlparse; print(urlparse('$url').hostname or '')")"
-  [[ -n "$host" ]] || panel_die "Invalid URL"
+  local host zone zid body
+  host="$(python3 -c 'import sys; from urllib.parse import urlparse; print(urlparse(sys.argv[1]).hostname or "")' "$url")"
+  validate_domain "$host"
   zone="$(cf_zone_for_domain "$host")"
   zid="$(dns_zone_id "$zone")"
   [[ -n "$zid" ]] || panel_die "Zone not found for $host"
-  local body
-  body="$(python3 -c "import json; print(json.dumps({'files':['$url']}))")"
-  dns_cf_api POST "/zones/${zid}/purge_cache" "$body" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-if not d.get('success'):
-    raise SystemExit(str(d.get('errors') or d))
-print('CF purge URL OK')
-"
+  body="$(python3 -c 'import json,sys; print(json.dumps({"files": [sys.argv[1]]}))' "$url")"
+  dns_cf_api POST "/zones/${zid}/purge_cache" "$body" | cf_check_response "CF purge URL OK"
+  if declare -F optimize_purge_url >/dev/null 2>&1; then
+    optimize_purge_url "$url" || true
+  fi
 }
 
 cf_set_cache_level() {
@@ -86,12 +142,8 @@ cf_set_cache_level() {
   local zid
   zid="$(dns_zone_id "$zone")"
   [[ -n "$zid" ]] || panel_die "Zone not found: $zone"
-  dns_cf_api PATCH "/zones/${zid}/settings/cache_level" "{\"value\":\"${level}\"}" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-if not d.get('success'): raise SystemExit(d.get('errors',d))
-print('CF cache_level →', d['result']['value'])
-"
+  dns_cf_api PATCH "/zones/${zid}/settings/cache_level" "{\"value\":\"${level}\"}" \
+    | cf_check_response "CF cache_level → ${level}"
 }
 
 cf_set_brotli() {
@@ -105,29 +157,13 @@ cf_set_brotli() {
   local zid
   zid="$(dns_zone_id "$zone")"
   [[ -n "$zid" ]] || panel_die "Zone not found: $zone"
-  dns_cf_api PATCH "/zones/${zid}/settings/brotli" "{\"value\":\"${val}\"}" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-if not d.get('success'): raise SystemExit(d.get('errors',d))
-print('CF brotli →', d['result']['value'])
-"
+  dns_cf_api PATCH "/zones/${zid}/settings/brotli" "{\"value\":\"${val}\"}" \
+    | cf_check_response "CF brotli → ${val}"
 }
 
 cf_set_minify() {
-  local zone="${1:-}"
-  require_root
-  cf_load
-  zone="${zone:-$CF_DEFAULT_ZONE}"
-  local zid
-  zid="$(dns_zone_id "$zone")"
-  [[ -n "$zid" ]] || panel_die "Zone not found: $zone"
-  dns_cf_api PATCH "/zones/${zid}/settings/minify" \
-    '{"value":{"css":"on","html":"on","js":"on"}}' | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-if not d.get('success'): raise SystemExit(d.get('errors',d))
-print('CF minify css/html/js ON')
-"
+  echo "Cloudflare retired Auto Minify (August 2024); the API setting no longer exists."
+  echo "Minify at build time or with a WordPress optimisation plugin instead."
 }
 
 cf_recommend() {
@@ -150,16 +186,16 @@ cf_status() {
   require_root
   cf_load
   local zone="${1:-$CF_DEFAULT_ZONE}"
+  zone="${zone,,}"
   local zid
   zid="$(dns_zone_id "$zone")"
   [[ -n "$zid" ]] || panel_die "Zone not found: $zone"
   echo "=== Cloudflare zone: $zone ($zid) ==="
-  for s in ssl brotli cache_level minify security_level; do
-    dns_cf_api GET "/zones/${zid}/settings/${s}" 2>/dev/null | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-r=d.get('result') or {}
-print(f\"  {r.get('id','$s'):20} = {r.get('value')}\")
-" 2>/dev/null || echo "  $s = (unavailable)"
+  for s in ssl brotli cache_level security_level; do
+    dns_cf_api GET "/zones/${zid}/settings/${s}" 2>/dev/null | python3 -c '
+import json, sys
+r = json.load(sys.stdin).get("result") or {}
+print("  %-20s = %s" % (r.get("id", sys.argv[1]), r.get("value")))
+' "$s" 2>/dev/null || echo "  $s = (unavailable)"
   done
 }

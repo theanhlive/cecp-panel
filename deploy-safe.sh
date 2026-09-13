@@ -132,6 +132,7 @@ if command -v rsync >/dev/null 2>&1; then
     --exclude 'dist/' \
     --exclude '.git/' \
     --exclude 'etc/' \
+    --exclude 'bin/' \
     "$src/" /opt/cecp-panel/
 else
   # Fallback: overwrite files from new tree (keep unknown local files)
@@ -166,8 +167,9 @@ if [[ "$WITH_ZONES" == "1" ]]; then
   if [[ -f /opt/cecp-panel/templates/nginx-global-cecp.conf ]]; then
     mkdir -p /var/cache/nginx/cecp
     chown nginx:nginx /var/cache/nginx/cecp 2>/dev/null || chown www-data:www-data /var/cache/nginx/cecp 2>/dev/null || true
-    install -m 644 /opt/cecp-panel/templates/nginx-global-cecp.conf /etc/nginx/conf.d/cecp-global.conf
-    echo "  installed/updated cecp-global.conf (zones only)"
+    rm -f /etc/nginx/conf.d/cecp-global.conf
+    install -m 644 /opt/cecp-panel/templates/nginx-global-cecp.conf /etc/nginx/conf.d/00-cecp-global.conf
+    echo "  installed/updated 00-cecp-global.conf (zones only)"
   fi
 fi
 
