@@ -52,7 +52,7 @@ site_add() {
     useradd -r -m -d "/home/${site_user}" -s /sbin/nologin "$site_user"
   fi
   mkdir -p "$docroot"
-  # SFTP chroot: home root-owned, only public_html writable by site use
+  # SFTP chroot: home root-owned, only public_html writable by site user
   chown root:root "/home/${site_user}"
   chmod 755 "/home/${site_user}"
   chown -R "${site_user}:${site_user}" "$docroot"
@@ -169,7 +169,7 @@ site_remove() {
   site_user="$(python3 -c "import json; print(json.load(open('$meta'))['site_user']")"
   slug="$(domain_slug "$domain")"
   pool_name="$(python3 -c "import json; print(json.load(open('$meta'))['pool_name']")"
-  local db_name db_use
+  local db_name db_user
   db_name="$(python3 -c "import json; print(json.load(open('$meta'))['db_name']")"
   db_user="$(python3 -c "import json; print(json.load(open('$meta'))['db_user']")"
 
@@ -262,7 +262,7 @@ site_sftp_info() {
   cat <<EOF
 SFTP (site-isolated user):
   Host: $ip
-  User: $site_use
+  User: $site_user
   Path: $docroot (chroot: /home/$site_user)
   Set password: cecp-panel site sftp-password $domain
 EOF
@@ -273,8 +273,8 @@ site_sftp_enable() {
   require_root
   mkdir -p /etc/ssh/sshd_config.d
   cat >"/etc/ssh/sshd_config.d/cecp-${site_user}.conf" <<EOF
-Match User $site_use
-    ChrootDirectory /home/$site_use
+Match User $site_user
+    ChrootDirectory /home/$site_user
     ForceCommand internal-sftp
     AllowTcpForwarding no
     X11Forwarding no
@@ -285,7 +285,7 @@ EOF
 site_sftp_password() {
   local domain="${1,,}" pass="${2:-}"
   require_root
-  local meta site_use
+  local meta site_user
   meta="$(site_meta_path "$domain")"
   [[ -f "$meta" ]] || panel_die "Site not found: $domain"
   site_user="$(python3 -c "import json; print(json.load(open('$meta'))['site_user'])")"

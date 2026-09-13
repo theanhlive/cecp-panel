@@ -428,7 +428,7 @@ menu_modsec() {
 
 menu_main() {
   while true; do
-    menu_banne
+    menu_banner
     echo " 1) Domains (add/remove/duplicate/SFTP)"
     echo " 2) SSL (Let's Encrypt)"
     echo " 3) Cloudflare DNS"

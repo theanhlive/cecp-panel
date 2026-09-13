@@ -30,7 +30,7 @@ wp_site_exec() {
   shift
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
   [[ "$(wp_site_is_wordpress "$domain")" == "True" ]] || panel_die "Not a WordPress site: $domain"
-  local docroot site_use
+  local docroot site_user
   docroot="$(wp_site_meta "$domain" "docroot")"
   site_user="$(wp_site_meta "$domain" "site_user")"
   sudo -u "$site_user" php -d memory_limit=512M "$WP_CLI_BIN" --path="$docroot" "$@"

@@ -32,7 +32,7 @@ update_check() {
     rpm -q "$p" 2>/dev/null | sed 's/^/  /' || dpkg -l "$p" 2>/dev/null | awk '/^ii/{print "  "$2" "$3}' || echo "  $p: (not from pkg mgr)"
   done
   command -v php &>/dev/null && echo "  $(php -v | head -1)"
-  update_load_mirro
+  update_load_mirror
   [[ -n "${CECP_PANEL_RAW_BASE:-}" ]] && echo "" && echo "  Update mirror: $CECP_PANEL_RAW_BASE"
 }
 
@@ -73,7 +73,7 @@ update_component() {
 update_panel() {
   local url_ver="${1:-}"
   require_root
-  update_load_mirro
+  update_load_mirror
   local base="${CECP_PANEL_RAW_BASE:-}"
   [[ -n "$base" ]] || panel_die "Set update mirror: cecp-panel update mirror https://raw.githubusercontent.com/ORG/REPO/main/scripts/cecp-panel"
   local ver="${url_ver:-$CECP_PANEL_VERSION}"

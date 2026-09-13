@@ -313,7 +313,7 @@ ssl_fix_for_domain() {
             if [[ "$auto_mode" == "yes" ]]; then
               answer="y"
             else
-              read -r -p "  Apply this fix? [Y/n] " answe
+              read -r -p "  Apply this fix? [Y/n] " answer
               answer="${answer:-y}"
             fi
             if [[ "$answer" =~ ^[Yy]$ ]]; then
@@ -334,7 +334,7 @@ ssl_fix_for_domain() {
           if [[ "$auto_mode" == "yes" ]]; then
             answer="y"
           else
-            read -r -p "  Set CF SSL mode to strict? [Y/n] " answe
+            read -r -p "  Set CF SSL mode to strict? [Y/n] " answer
             answer="${answer:-y}"
           fi
           if [[ "$answer" =~ ^[Yy]$ ]]; then
@@ -352,7 +352,7 @@ ssl_fix_for_domain() {
           echo "  → Best practice: install LE + switch to Full (strict)"
           echo "     Run: cecp-panel ssl issue $domain"
           if [[ "$auto_mode" != "yes" ]]; then
-            read -r -p "  Issue Let's Encrypt now? [Y/n] " answe
+            read -r -p "  Issue Let's Encrypt now? [Y/n] " answer
             answer="${answer:-y}"
           fi
           if [[ "$answer" =~ ^[Yy]$ ]]; then
@@ -370,7 +370,7 @@ ssl_fix_for_domain() {
         if [[ "$auto_mode" == "yes" ]]; then
           answer="y"
         else
-          read -r -p "  Issue Let's Encrypt now? [Y/n] " answe
+          read -r -p "  Issue Let's Encrypt now? [Y/n] " answer
           answer="${answer:-y}"
         fi
         if [[ "$answer" =~ ^[Yy]$ ]]; then
@@ -387,7 +387,7 @@ ssl_fix_for_domain() {
         if [[ "$auto_mode" == "yes" ]]; then
           answer="y"
         else
-          read -r -p "  Issue Let's Encrypt? [Y/n] " answe
+          read -r -p "  Issue Let's Encrypt? [Y/n] " answer
           answer="${answer:-y}"
         fi
         if [[ "$answer" =~ ^[Yy]$ ]]; then
@@ -404,7 +404,7 @@ ssl_fix_for_domain() {
       if [[ "$auto_mode" == "yes" ]]; then
         answer="y"
       else
-        read -r -p "  Re-attach LE to nginx? [Y/n] " answe
+        read -r -p "  Re-attach LE to nginx? [Y/n] " answer
         answer="${answer:-y}"
       fi
       if [[ "$answer" =~ ^[Yy]$ ]]; then
@@ -415,7 +415,7 @@ ssl_fix_for_domain() {
       if [[ "$auto_mode" == "yes" ]]; then
         answer="y"
       else
-        read -r -p "  Issue Let's Encrypt? [Y/n] " answe
+        read -r -p "  Issue Let's Encrypt? [Y/n] " answer
         answer="${answer:-y}"
       fi
       if [[ "$answer" =~ ^[Yy]$ ]]; then

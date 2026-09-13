@@ -183,7 +183,7 @@ backup_setup() {
 backup_stage_site() {
   local domain="$1"
   local meta="$2"
-  local site_user docroot db_name db_use
+  local site_user docroot db_name db_user
   site_user="$(python3 -c "import json; print(json.load(open('$meta'))['site_user'])")"
   docroot="$(python3 -c "import json; print(json.load(open('$meta'))['docroot'])")"
   db_name="$(python3 -c "import json; print(json.load(open('$meta'))['db_name'])")"

@@ -97,7 +97,7 @@ php_set_site_version() {
   site_user="$(python3 -c "import json; print(json.load(open('$meta'))['site_user'])")"
   docroot="$(python3 -c "import json; print(json.load(open('$meta'))['docroot'])")"
   php_sock="$(php_fpm_sock_for_version "$norm" "$pool_name")"
-  local fpm_di
+  local fpm_dir
   fpm_dir="$(php_fpm_d_dir "$norm")"
   mkdir -p "$fpm_dir"
   rm -f /etc/php-fpm.d/cecp-${slug}.conf 2>/dev/null || true

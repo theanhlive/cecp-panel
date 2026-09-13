@@ -160,7 +160,7 @@ system_clean_temp_and_cache() {
 
 system_clean_wp_transients() {
   command -v wp &>/dev/null || return 0
-  local f domain docroot site_use
+  local f domain docroot site_user
   shopt -s nullglob
   for f in "$SITES_DIR"/*.json; do
     python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("wordpress") else 1)' "$f" 2>/dev/null || continue
@@ -177,7 +177,7 @@ system_clean_wp_transients() {
 system_disk_clean() {
   require_root
   system_load_config
-  local pct before afte
+  local pct before after
   pct="$(system_disk_use_pct /)"
   if [[ "$pct" -lt "$DISK_CLEAN_MIN_USE_PCT" ]]; then
     panel_log "Disk use ${pct}% < ${DISK_CLEAN_MIN_USE_PCT}% — light cleanup only"

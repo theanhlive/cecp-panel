@@ -59,12 +59,12 @@ optimize_site() {
     DOMAIN "$domain" POOL_NAME "$pool_name" SITE_USER "$site_user" \
     DOCROOT "$docroot" PHP_SOCK "$php_sock"
   # Remi multi-PHP: re-place pool if site uses non-default version
-  local php_ve
+  local php_ver
   php_ver="$(python3 -c "import json; print(json.load(open('$(site_meta_path "$domain")')).get('php_version','80'))" 2>/dev/null || echo 80)"
   if [[ "$php_ver" != "80" && -f "$PANEL_ROOT/lib/php_mgr.sh" ]]; then
     # shellcheck source=/dev/null
     source "$PANEL_ROOT/lib/php_mgr.sh"
-    local fpm_di
+    local fpm_dir
     fpm_dir="$(php_fpm_d_dir "$php_ver")"
     if [[ -d "$fpm_dir" ]]; then
       template_render "$PANEL_ROOT/templates/php-fpm-pool.conf.tpl" \
@@ -286,7 +286,7 @@ EOF
     [[ -d $d ]] || continue
     f="${d}/cecp-opcache.ini"
     echo "$conf_body" >"$f"
-    local ve
+    local ver
     ver="$(echo "$d" | grep -oE '[0-9]+\.[0-9]+' || true)"
     if [[ -n "$ver" ]] && command -v phpenmod &>/dev/null; then
       phpenmod -v "$ver" cecp-opcache 2>/dev/null || true
@@ -356,7 +356,7 @@ optimize_kernel_bbr() {
   cat >"$f" <<'EOF'
 # CECP Panel — network + fd tuning
 net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bb
+net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_slow_start_after_idle = 0
 net.core.somaxconn = 4096
@@ -454,7 +454,7 @@ optimize_bench() {
 optimize_stack() {
   require_root
   panel_log "Full stack optimize..."
-  optimize_kernel_bb
+  optimize_kernel_bbr
   optimize_nginx_global
   optimize_opcache_jit
   optimize_mariadb_tune

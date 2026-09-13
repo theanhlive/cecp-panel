@@ -174,7 +174,7 @@ fi
 # Post-check nginx
 if ! nginx -t 2>/tmp/cecp-nginx-post.err; then
   echo "ERROR: nginx -t failed after panel file sync — restoring /opt/cecp-panel from backup"
-  cat /tmp/cecp-nginx-post.e
+  cat /tmp/cecp-nginx-post.err
   if [[ -d "$BK/opt-cecp-panel" ]]; then
     rm -rf /opt/cecp-panel
     cp -a "$BK/opt-cecp-panel" /opt/cecp-panel
