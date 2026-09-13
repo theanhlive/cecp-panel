@@ -30,7 +30,7 @@ Body:
   "domain": "shop.example.com",
   "host": "vps1.example.com",
   "ts": "2026-09-13T08:00:00Z",
-  "panel_version": "1.7.0-beta",
+  "panel_version": "1.8.0-beta",
   "details": { "http_code": "502", "ttfb_ms": 15002 }
 }
 ```

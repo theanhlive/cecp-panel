@@ -17,6 +17,7 @@ cecp-panel media enable example.com --max-width 1920 --quality 80
 cecp-panel media enable example.com --no-cron          # chỉ on-upload
 cecp-panel media enable example.com --no-upload        # chỉ cron batch
 cecp-panel media enable example.com --no-webp
+cecp-panel media enable example.com --avif             # thêm AVIF (xem Lưu ý về Cloudflare)
 
 # Tắt (gỡ mu-plugin)
 cecp-panel media disable example.com
@@ -69,6 +70,7 @@ cecp-panel media run-all    # dùng bởi cron
   "on_upload": true,
   "cron": true,
   "webp": true,
+  "avif": false,
   "max_width": 1920,
   "max_height": 1920,
   "quality": 80,
@@ -94,5 +96,8 @@ Mu-plugin config mirror: `wp-content/mu-plugins/cecp-media-optimize.json`
 
 - Không thay thế backup Drive
 - Bulk lần đầu: chạy nhiều lần `--limit 30`, không optimize cả thư viện một phát trên VPS 1GB
-- WebP sidecar không tự rewrite HTML — theme/plugin WebP hoặc `Accept` negotiation (webp-express) vẫn hữu ích cho delivery
+- **Phân phối (1.8+)**: nginx tự trả `photo.webp` / `photo.avif` cho request `photo.jpg` khi trình duyệt gửi `Accept: image/webp|avif`; không cần sửa HTML, không cần plugin. Thiếu sidecar → trả file gốc. Áp dụng cho site cũ bằng `site rebuild-vhost --all`.
+- Sidecar đặt tên theo tên gốc bỏ đuôi, nên `a.jpg` và `a.png` trong cùng thư mục sẽ dùng chung `a.webp`. Tránh đặt hai ảnh trùng tên khác đuôi.
+- **AVIF + Cloudflare**: gói Free/Pro/Business bỏ qua `Vary: Accept`, nên edge có thể trả bản AVIF đã cache cho trình duyệt không hỗ trợ AVIF (Safari < 16.4). Site proxied chỉ nên dùng WebP. Mọi trình duyệt hiện đại đều hỗ trợ WebP.
+- AVIF cần PHP ≥ 8.1 có `imageavif` (on-upload), hoặc Pillow ≥ 11.2 / ImageMagick có libheif (batch). Nếu không có encoder thì chỉ tạo WebP (`avif_note` trong kết quả `media run`).
 - `optimize webp DOMAIN` (plugin webp-express) **khác** module này; có thể dùng song song

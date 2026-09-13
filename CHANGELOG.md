@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.8.0-beta — tăng tốc website (đợt 2)
+
+### Tự purge cache khi sửa nội dung (A4)
+- `cache auto-purge DOMAIN on|off` (WordPress): mu-plugin ghi lại các URL bị ảnh hưởng khi đăng/sửa/xóa bài, có bình luận, đổi tồn kho WooCommerce (bài, trang chủ, feed, chuyên mục/thẻ, tác giả, archive). Đổi theme/menu/widget/plugin/tùy biến thì purge cả site.
+- Việc purge chạy bằng root qua systemd path unit `cecp-purge@SLUG.path` (gần như tức thì), có cron 2 phút dự phòng. Hàng đợi nằm trong `tmp` riêng của site. Panel chỉ nhận URL `http(s)` đúng domain của site, không đi theo symlink và giới hạn kích thước, nên site không thể purge site khác hay ghi đè file hệ thống.
+- Slug có dấu/Unicode (WordPress ghi `%xx` chữ thường, trình duyệt gửi chữ HOA) được purge cả hai dạng. `optimize purge-url` purge cả `http` và `https`.
+- `cache ttl DOMAIN 5m|30m|1h|6h|1d`: TTL cache trang theo từng site. Khi đã bật auto-purge, có thể đặt 1h–1d để gần như mọi lượt xem đều HIT.
+- `cache status DOMAIN` hiển thị TTL, auto-purge, edge cache và hàng đợi.
+
+### Cache HTML ở edge Cloudflare (B3)
+- `cf edge-cache DOMAIN on [--ttl 1h] | off | status`: tạo 1 Cache Rule cho site (host = domain). Bỏ qua `/wp-admin`, `/wp-json`, `wp-login`, giỏ hàng/thanh toán/tài khoản, tìm kiếm/preview, cookie đăng nhập/giỏ hàng/bình luận. Các rule khác trong zone được giữ nguyên. Nếu không đọc được ruleset hiện tại thì từ chối ghi, để không làm mất rule của người khác.
+- Khi bật cùng auto-purge: sửa bài → purge đúng các URL đó ở edge (30 URL/lần gọi); purge cả site → purge theo **hostname**, không purge toàn zone.
+- Token cần quyền **Zone → Cache Rules → Edit** và **Zone → Cache Purge**.
+
+### WebP/AVIF tự động (A5)
+- nginx trả `photo.webp` / `photo.avif` (nằm cạnh `photo.jpg`) cho trình duyệt hỗ trợ; nếu thiếu thì trả file gốc; header `Vary: Accept`.
+- `media enable DOMAIN --avif`: tạo AVIF (PHP ≥ 8.1 với `imageavif`, Pillow ≥ 11.2 hoặc ImageMagick có libheif; chỉ giữ bản nhỏ hơn file gốc). AVIF là tùy chọn vì Cloudflare gói thường bỏ qua `Vary`, nên có thể trả AVIF cho trình duyệt cũ. WebP luôn được bật.
+- Kiểm tra tham số `media enable` (chất lượng, kích thước).
+
+### SSL qua DNS Cloudflare + wildcard (A8)
+- `ssl issue DOMAIN --dns`: DNS-01 qua API Cloudflare. Chạy được khi bản ghi đang proxied hoặc cổng 80 bị chặn.
+- `ssl issue DOMAIN --wildcard`: cert `DOMAIN` + `*.DOMAIN`. Site con một cấp (vd. `shop.DOMAIN`) tự dùng cert này khi thêm site hoặc khi cấp wildcard; gỡ cert thì các site đó tự quay về HTTP, nginx không lỗi.
+- Gia hạn giữ nguyên DNS-01, chỉ bỏ `installer`. Token nằm trong `/etc/letsencrypt/cecp-cloudflare.ini` (600), không đưa lên dòng lệnh. Cảnh báo khi zone đang ở SSL `flexible`.
+- `ssl remove` dựng lại vhost HTTP (trước đây vhost HTTPS vẫn trỏ tới cert đã xóa, làm lần reload nginx sau bị lỗi).
+
+### Khác
+- `fastcgi_cache_path inactive=12h` (TTL dài không bị xóa sớm).
+- `site duplicate` không sao chép cấu hình auto-purge của site nguồn; `site remove` tắt watcher purge.
+- Menu: SSL DNS/wildcard, edge cache, cache TTL/auto-purge.
+
+### Nâng cấp từ 1.7
+```bash
+cecp-panel site rebuild-vhost --all          # WebP/AVIF, TTL cache, template SSL mới
+cecp-panel cache auto-purge example.com on   # từng site WordPress
+cecp-panel cache ttl example.com 1h
+# Cloudflare (token: Cache Rules Edit + Cache Purge + DNS Edit):
+cecp-panel cf edge-cache example.com on --ttl 1h
+cecp-panel ssl issue example.com --wildcard  # tùy chọn
+```
+
 ## 1.7.0-beta — độ tin cậy + bảo vệ khách (đợt 1)
 
 ### Backup (A1)

@@ -1,6 +1,14 @@
-# CECP Panel v1.7 — tính năng
+# CECP Panel v1.8 — tính năng
 
 **Ưu tiên:** Bảo mật → WordPress → Tốc độ → UX → Cloudflare edge → Advanced optional
+
+## v1.8 (tăng tốc website) — chi tiết: [CHANGELOG.md](CHANGELOG.md)
+
+- `cache auto-purge DOMAIN on`: sửa/đăng bài → purge đúng các trang liên quan (origin + edge Cloudflare), gần như tức thì
+- `cache ttl DOMAIN 1h`: TTL cache trang theo site; `cache status DOMAIN`
+- `cf edge-cache DOMAIN on --ttl 1h`: cache HTML ở edge Cloudflare (bỏ qua admin, đăng nhập, giỏ hàng); giữ nguyên rule khác của zone
+- WebP/AVIF tự động theo `Accept`; `media enable DOMAIN --avif`
+- `ssl issue DOMAIN --dns | --wildcard`: SSL qua DNS Cloudflare (không cần cổng 80, chạy được khi proxied); site con dùng chung wildcard
 
 ## v1.7 (độ tin cậy + bảo vệ khách) — chi tiết: [CHANGELOG.md](CHANGELOG.md)
 
@@ -87,4 +95,4 @@ cecp-panel log nginx example.com
 - File Manager / staging
 - WebUI agency (CECP control plane)
 - HTTP/3 QUIC (phụ thuộc build nginx)
-- Media: AVIF, keep-original, queue Redis
+- Media: keep-original, queue Redis
