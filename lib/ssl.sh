@@ -75,6 +75,10 @@ ssl_renew_all() {
 ssl_remove_for_domain() {
   local domain="$1"
   require_root
+  if [[ ! -d "/etc/letsencrypt/live/${domain}" ]]; then
+    panel_log "No certificate for $domain — nothing to remove"
+    return 0
+  fi
   certbot delete --cert-name "$domain" --non-interactive 2>/dev/null || \
     panel_die "Could not delete cert for $domain"
   panel_log "Removed cert: $domain"

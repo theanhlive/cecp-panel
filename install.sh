@@ -10,7 +10,7 @@
 #   ssh -i ~/.ssh/KEY root@VPS_IP 'bash -s' < scripts/cecp-panel/install.sh
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.5.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.5.1-beta}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/cecp-panel}"
 ETC_DIR="/etc/cecp-panel"
 VAR_LIB="/var/lib/cecp-panel"
@@ -59,10 +59,13 @@ detect_os() {
 install_packages_rhel() {
   log "Installing packages (dnf)..."
   dnf -y install epel-release
+  local -a extra=()
+  # Minimal/cloud images ship curl-minimal, which conflicts with the full curl package.
+  command -v curl &>/dev/null || extra+=(curl)
   dnf -y install nginx mariadb-server mariadb fail2ban firewalld \
-    python3 python3-pip curl wget tar unzip policycoreutils-python-utils \
+    python3 python3-pip wget tar unzip policycoreutils-python-utils \
     php php-fpm php-mysqlnd php-cli php-gd php-xml php-mbstring php-json php-opcache \
-    certbot python3-certbot-nginx restic rclone
+    certbot python3-certbot-nginx restic rclone "${extra[@]}"
   if ! command -v wp &>/dev/null; then
     curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
     chmod +x /usr/local/bin/wp

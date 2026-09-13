@@ -46,7 +46,7 @@ wp_harden_site() {
   wp_site_exec "$domain" config set WP_AUTO_UPDATE_CORE "'minor'"
   wp_site_exec "$domain" config set FORCE_SSL_ADMIN true --raw 2>/dev/null || true
   wp_site_exec "$domain" plugin delete hello akismet 2>/dev/null || true
-  wp_site_exec "$domain" rewrite structure --hard
+  wp_site_exec "$domain" rewrite structure '/%postname%/' --hard
   wp_site_exec "$domain" rewrite flush --hard
   wp_site_exec "$domain" cache flush 2>/dev/null || true
   panel_log "WP hardening done for $domain"

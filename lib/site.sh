@@ -171,7 +171,7 @@ site_remove() {
   db_name="$(site_json_get "$domain" db_name)"
   db_user="$(site_json_get "$domain" db_user)"
 
-  ssl_remove_for_domain "$domain" 2>/dev/null || true
+  ssl_remove_for_domain "$domain"
 
   rm -f "/etc/nginx/conf.d/cecp-${slug}.conf"
   rm -f "/etc/php-fpm.d/cecp-${slug}.conf"

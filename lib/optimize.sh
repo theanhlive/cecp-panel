@@ -9,8 +9,15 @@ ensure_nginx_global() {
   local target="/etc/nginx/conf.d/cecp-global.conf"
   mkdir -p /var/cache/nginx/cecp
   chown nginx:nginx /var/cache/nginx/cecp 2>/dev/null || chown www-data:www-data /var/cache/nginx/cecp 2>/dev/null || true
-  if [[ ! -f "$target" ]] || ! cmp -s "$src" "$target"; then
-    install -m 644 "$src" "$target"
+  local rendered
+  rendered="$(<"$src")"
+  # Ubuntu's nginx.conf already has `gzip on;` — a second one fails nginx -t.
+  if grep -qE '^\s*gzip\s+on\s*;' /etc/nginx/nginx.conf 2>/dev/null; then
+    rendered="$(grep -vE '^\s*gzip\s+on\s*;' <<<"$rendered")"
+  fi
+  if [[ ! -f "$target" ]] || [[ "$(<"$target")" != "$rendered" ]]; then
+    printf '%s\n' "$rendered" >"$target"
+    chmod 644 "$target"
     panel_log "Installed/updated shared nginx zones -> $target"
   fi
 }
@@ -19,15 +26,14 @@ optimize_nginx_global() {
   require_root
   ensure_nginx_global
   # worker auto snippet (http context via conf.d is wrong for worker_processes — main context)
-  # Put open_file_cache + keepalive in conf.d (http context OK)
+  # http-context tuning via conf.d. Never repeat directives the distro nginx.conf already sets
+  # (keepalive_timeout, sendfile, gzip on Ubuntu) — nginx -t rejects duplicates.
   cat >/etc/nginx/conf.d/cecp-perf.conf <<'EOF'
 # CECP Panel — http-context performance
 open_file_cache max=10000 inactive=60s;
 open_file_cache_valid 30s;
 open_file_cache_min_uses 2;
 open_file_cache_errors on;
-keepalive_timeout 65;
-keepalive_requests 1000;
 EOF
   # main context worker_processes — only if not already set via custom
   if [[ -f /etc/nginx/nginx.conf ]]; then
@@ -353,6 +359,7 @@ EOF
 optimize_kernel_bbr() {
   require_root
   local f=/etc/sysctl.d/99-cecp-bbr.conf
+  mkdir -p /etc/sysctl.d
   cat >"$f" <<'EOF'
 # CECP Panel — network + fd tuning
 net.core.default_qdisc = fq

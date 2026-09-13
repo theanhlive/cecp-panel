@@ -34,7 +34,10 @@ update_check() {
   done
   command -v php &>/dev/null && echo "  $(php -v | head -1)"
   update_load_mirror
-  [[ -n "${CECP_PANEL_RAW_BASE:-}" ]] && echo "" && echo "  Update mirror: $CECP_PANEL_RAW_BASE"
+  if [[ -n "${CECP_PANEL_RAW_BASE:-}" ]]; then
+    echo ""
+    echo "  Update mirror: $CECP_PANEL_RAW_BASE"
+  fi
 }
 
 update_component() {
