@@ -1,9 +1,9 @@
-# CECP Panel v1.5.1-beta
+# CECP Panel v1.6.0-beta
 
 Standalone VPS panel (LarVPS-style). **One install** = full stack + menu.
 
 **Spec:** [docs/products/CECP_VPS_PANEL_V2.md](../../docs/products/CECP_VPS_PANEL_V2.md)  
-**Tính năng chi tiết:** [FEATURES.md](FEATURES.md)
+**Tính năng chi tiết:** [FEATURES.md](FEATURES.md) · **Thay đổi + runbook nâng cấp:** [CHANGELOG.md](CHANGELOG.md)
 
 ## Cài một lệnh (khách hàng)
 
@@ -24,8 +24,15 @@ cecp-panel onboard   # Cloudflare + Google Drive (tuỳ chọn)
 ## Agency (từ Mac/Windows CECP)
 
 ```bash
-./scripts/cecp-panel/build-release.sh          # tạo dist/*.tar.gz
-SSH_KEY=~/.ssh/KEY ./scripts/cecp-panel/finish-lab.sh root@VPS_IP
+./build-release.sh          # lint gate + dist/*.tar.gz + dist/SHA256SUMS (upload cả SHA256SUMS lên mirror)
+SSH_KEY=~/.ssh/KEY ./deploy-safe.sh root@VPS_IP --with-check
+```
+
+Kiểm thử (cần Docker):
+
+```bash
+bash tests/lint.sh                  # bash -n + shellcheck + check_truncation.py
+bash tests/integration/run.sh       # AlmaLinux 9 + systemd, cài panel và chạy scenario.sh
 ```
 
 ## Features
@@ -33,11 +40,11 @@ SSH_KEY=~/.ssh/KEY ./scripts/cecp-panel/finish-lab.sh root@VPS_IP
 | Menu | Commands |
 |------|----------|
 | Domains | `site add/remove/list/duplicate`, SFTP per site |
-| SSL | Let's Encrypt issue/renew/status/fix |
+| SSL | Let's Encrypt (webroot) issue/renew/status/fix, HTTPS + HTTP/2 template, `ssl hsts` |
 | DNS | Cloudflare A records (`/etc/cecp-panel/credentials.env`) |
 | Backup | restic → Google Drive, tiered retention |
-| Security | fail2ban full, firewall, SSH harden/port/key-only, MariaDB bind, `apply-production`, `check` |
-| Performance | FastCGI cache+purge, Redis+WP, OPcache JIT, BBR, MariaDB RAM tune, brotli/webp, bench |
+| Security | vhost hardening, Cloudflare real IP, fail2ban (+nginx deny), SSH harden/port/key-only/repair, MariaDB bind, Redis ACL, `apply-production`, `check`, `fix-perms` |
+| Performance | FastCGI cache (tracking-param-free key, per-site/URL purge), HTTP/2, Redis+WP, OPcache JIT, BBR, MariaDB tune, brotli/webp, bench, report |
 | Media | Per-site opt-in: on-upload resize/compress/WebP + daily cron batch (`media enable|disable|run`) |
 | System | auto swap, disk/log cleanup, weekly maintain cron |
 | Agent | heartbeat → CECP API (`docs/infrastructure/CECP_PANEL_AGENT_INTEGRATION.md`) |
@@ -59,11 +66,9 @@ cecp-panel backup enable-cron
 ## Nâng cấp panel trên VPS đã cài
 
 ```bash
-# Từ mirror / release mới
+# Từ mirror (bắt buộc có dist/SHA256SUMS) — hoặc deploy-safe.sh từ máy agency
 cecp-panel update panel
-# hoặc rsync/scp scripts/cecp-panel → /opt/cecp-panel rồi:
-cecp-panel security apply-production
-cecp-panel optimize stack
+# rồi làm theo runbook trong CHANGELOG.md (apply-production, site rebuild-vhost --all, ...)
 ```
 
 ## Docs

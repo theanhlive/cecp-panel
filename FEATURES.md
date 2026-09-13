@@ -1,6 +1,21 @@
-# CECP Panel v1.5 — tính năng
+# CECP Panel v1.6 — tính năng
 
 **Ưu tiên:** Bảo mật → WordPress → Tốc độ → UX → Cloudflare edge → Advanced optional
+
+## v1.6 (bảo mật + tốc độ) — chi tiết: [CHANGELOG.md](CHANGELOG.md)
+
+### Bảo mật
+- Vhost template mới: chặn PHP trong uploads, header bảo mật trên mọi response; `site rebuild-vhost DOMAIN|--all`
+- HTTPS panel tự quản (webroot + HTTP/2 + HSTS): `ssl issue`, `ssl hsts DOMAIN on|off|subdomains`
+- IP thật sau Cloudflare: `cf realip`; fail2ban không ban Cloudflare, ban tăng dần, chặn cả ở nginx
+- Validate input + không lộ secret (argv/log); `.env` chỉ nạp khi an toàn
+- Cách ly site: tmp/session riêng, Redis ACL riêng (`optimize redis-acl --all`)
+- Cài/cập nhật bắt buộc khớp `SHA256SUMS`; `security check` PASS/WARN/FAIL; `security fix-perms`
+
+### Tốc độ
+- HTTP/2; cache key bỏ `fbclid`/`gclid`/`utm_*`; background update
+- `optimize purge DOMAIN`, `optimize purge-url URL`, `optimize report DOMAIN`
+- PHP-FPM sizing theo RAM, BBR nạp lúc boot, MariaDB table cache theo số site
 
 ## v1.5 (Performance sâu + UX + Cloud edge + Advanced)
 
@@ -16,7 +31,7 @@
 - Cảnh báo SSL sắp hết hạn + disk đầy (cron daily)
 
 ### Cloudflare edge
-- `cf purge` / `purge-url` / `brotli` / `cache-level` / `minify` / `status` / `recommend`
+- `cf purge` / `purge-url` / `realip` / `brotli` / `cache-level` / `status` / `recommend` (Auto Minify đã bị Cloudflare ngừng 08/2024)
 - Dùng chung CF_API_TOKEN với DNS
 
 ### Security polish
