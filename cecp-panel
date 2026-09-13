@@ -29,12 +29,13 @@ source "$PANEL_ROOT/lib/wordpress.sh"
 source "$PANEL_ROOT/lib/optimize.sh"
 source "$PANEL_ROOT/lib/media.sh"
 source "$PANEL_ROOT/lib/notify.sh"
+source "$PANEL_ROOT/lib/monitor.sh"
 source "$PANEL_ROOT/lib/cloudflare.sh"
 source "$PANEL_ROOT/lib/modsec.sh"
 source "$PANEL_ROOT/lib/logview.sh"
 source "$PANEL_ROOT/lib/menu.sh"
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.6.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.7.0-beta}"
 
 usage() {
   cat <<EOF
@@ -44,11 +45,14 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel status                  Rich health status
 
   cecp-panel site list|add|remove|duplicate|sftp-info|sftp-password|rebuild-vhost
+    site protect-admin DOMAIN on [--ip CIDR,...] [--no-auth] [--user NAME] | off | status | reset-password
     site add DOMAIN [--wordpress|--wp] [--php 82] [--ssl] [--redis]
   cecp-panel ssl list|issue|fix|renew|status|remove|hsts DOMAIN on|off|subdomains
   cecp-panel dns list|add|point|ssl-mode
   cecp-panel cf status|purge|purge-url|realip|brotli|cache-level|recommend [args]
-  cecp-panel backup setup|status|run|list|prune|restore|enable-cron|...
+  cecp-panel backup setup|status|run|verify|list|prune|restore|enable-cron|...
+    backup restore DOMAIN SNAPSHOT|latest [--live [--dry-run] [--yes]] [--target DIR] [--repo REPO]
+    backup verify DOMAIN|--all
   cecp-panel security fail2ban|fail2ban-full|firewall|ssh|ssh-key-only|ssh-harden|ssh-repair
   cecp-panel security ssh-port|mariadb-bind|apply-production|check|unattended|fix-perms
   cecp-panel system info|ensure-swap|swap|disk-clean|maintain|tune
@@ -62,7 +66,8 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel media enable|disable|status|run|run-all|enable-cron|disable-cron
     media enable DOMAIN [--max-width 1920] [--quality 80] [--no-upload] [--no-cron] [--no-webp]
     media run DOMAIN [--dry-run] [--limit N]   # only if enabled for that site
-  cecp-panel notify setup|status|test|health|enable-cron|disable-cron
+  cecp-panel notify setup|status|test|health|enable-cron|disable-cron|webhook URL|off
+  cecp-panel monitor run|status|enable|disable
   cecp-panel modsec status|install|enable|disable|blocking
   cecp-panel log panel|audit|nginx|php|mysql|fail2ban|notify [DOMAIN] [LINES]
 EOF
@@ -124,13 +129,14 @@ case "$cmd" in
         ;;
       sftp-info) [[ -n "${1:-}" ]] && site_sftp_info "$1" || panel_die "Usage: cecp-panel site sftp-info DOMAIN" ;;
       sftp-password) [[ -n "${1:-}" ]] && site_sftp_password "$1" "${2:-}" || panel_die "Usage: cecp-panel site sftp-password DOMAIN [PASS]" ;;
+      protect-admin) site_protect_admin "$@" ;;
       rebuild-vhost)
         if [[ "${1:-}" == "--all" ]]; then site_rebuild_vhost_all
         elif [[ -n "${1:-}" ]]; then site_rebuild_vhost "$1"
         else panel_die "Usage: cecp-panel site rebuild-vhost DOMAIN|--all"
         fi
         ;;
-      *) panel_die "Usage: cecp-panel site list|add|remove|duplicate|sftp-info|sftp-password|rebuild-vhost" ;;
+      *) panel_die "Usage: cecp-panel site list|add|remove|duplicate|sftp-info|sftp-password|rebuild-vhost|protect-admin" ;;
     esac
     ;;
   ssl)
@@ -208,17 +214,15 @@ case "$cmd" in
         ;;
       prune|forget) backup_apply_retention ;;
       prune-dry-run) backup_apply_retention --dry-run ;;
-      restore)
-        [[ -n "${1:-}" && -n "${2:-}" ]] || panel_die "Usage: cecp-panel backup restore DOMAIN SNAPSHOT_ID [TARGET_DIR] [RESTIC_REPO]"
-        backup_restore "$1" "$2" "${3:-}" "${4:-}"
-        ;;
+      restore) backup_restore "$@" ;;
+      verify) backup_verify "${1:---all}" ;;
       enable-cron) backup_enable_cron ;;
       oauth-import)
         shift
         backup_oauth_import "${*:-}"
         ;;
       oauth-status) backup_oauth_status ;;
-      *) panel_die "Usage: cecp-panel backup setup|status|oauth-import|oauth-status|run|list|prune|restore|enable-cron" ;;
+      *) panel_die "Usage: cecp-panel backup setup|status|oauth-import|oauth-status|run|verify|list|prune|restore|enable-cron" ;;
     esac
     ;;
   security)
@@ -337,7 +341,18 @@ case "$cmd" in
       enable-cron) require_root; notify_enable_cron ;;
       disable-cron) require_root; notify_disable_cron ;;
       send) notify_send "$*" ;;
-      *) panel_die "Usage: cecp-panel notify setup|status|test|health|enable-cron|disable-cron" ;;
+      webhook) notify_webhook_set "${1:-}" ;;
+      *) panel_die "Usage: cecp-panel notify setup|status|test|health|enable-cron|disable-cron|webhook URL|off" ;;
+    esac
+    ;;
+  monitor)
+    sub="${1:-status}"; shift || true
+    case "$sub" in
+      run) monitor_run ;;
+      status) monitor_status ;;
+      enable) monitor_enable ;;
+      disable) monitor_disable ;;
+      *) panel_die "Usage: cecp-panel monitor run|status|enable|disable" ;;
     esac
     ;;
   modsec|modsecurity)

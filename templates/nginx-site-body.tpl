@@ -5,7 +5,7 @@
     error_log  /var/log/nginx/{{DOMAIN}}-error.log;
 
     include /etc/nginx/snippets/cecp-headers.conf;
-
+{{ADMIN_GUARD}}
     # Deny rules come first: nginx uses the FIRST matching regex location, so anything after
     # "location ~ \.php$" would never apply (uploaded .php files would execute).
     location ~* /(?:uploads|files)/.*\.(?:php[0-9]?|phtml|phar)$ { deny all; }
@@ -15,6 +15,16 @@
     location = /xmlrpc.php { deny all; }
     location ~ /\.(?!well-known) { deny all; }
     location ~* \.(?:env|git|svn|htaccess|htpasswd|sql|bak|log|ini|sh|swp)$ { deny all; }
+
+    # Login form: tight per-IP rate limit (bots get 429 and then a fail2ban ban); never cached.
+    location = /wp-login.php {
+        limit_req zone=cecp_login burst=10 nodelay;
+        limit_conn cecp_conn 20;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_pass unix:{{PHP_SOCK}};
+        fastcgi_read_timeout 120s;
+    }
 
     location / {
         # Dynamic HTML only — never rate-limit static assets (browsers load 50+ in parallel).

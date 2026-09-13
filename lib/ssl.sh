@@ -221,7 +221,7 @@ ssl_cf_detect_proxy_heuristic() {
   fi
   # Method 2: DNS resolves to VPS IP? If not, and CF NS → likely proxied
   local my_ip dns_ip
-  my_ip="$(curl -4 -s --connect-timeout 3 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')"
+  my_ip="$(curl -4 -s --connect-timeout 3 ifconfig.me 2>/dev/null || panel_local_ipv4)"
   dns_ip="$(dig +short A "$domain" 2>/dev/null | grep -v '\.$' | head -1 || true)"
   if [[ -n "$dns_ip" && -n "$my_ip" ]]; then
     if [[ "$dns_ip" != "$my_ip" ]]; then
@@ -308,7 +308,7 @@ ssl_fix_for_domain() {
   grep -q "listen.*443 ssl" "$nginx_ssl_conf" 2>/dev/null && nginx_has_ssl=true
 
   local my_ip
-  my_ip="$(curl -4 -s --connect-timeout 3 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')"
+  my_ip="$(curl -4 -s --connect-timeout 3 ifconfig.me 2>/dev/null || panel_local_ipv4)"
 
   echo ""
   echo "  Cloudflare       : ${cf_zone:-none (direct DNS)}"

@@ -11,6 +11,40 @@ site_ensure_tmp() {
   fi
 }
 
+# Print the HTTP status of the site's home page, fetched locally and bypassing the page cache
+# (a cached HIT would hide a broken PHP/DB). Succeeds for 2xx/3xx.
+site_http_check() {
+  local domain="$1" scheme="http" code
+  [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]] && scheme="https"
+  code="$(curl -sk -o /dev/null -w '%{http_code}' -m 15 \
+    --resolve "${domain}:80:127.0.0.1" --resolve "${domain}:443:127.0.0.1" \
+    -H 'Cookie: wordpress_logged_in_cecp_healthcheck=1' "${scheme}://${domain}/" 2>/dev/null || true)"
+  code="${code:-000}"
+  echo "$code"
+  [[ "$code" =~ ^[23][0-9][0-9]$ ]]
+}
+
+# After restoring files from a backup: point wp-config.php at the site's current DB credentials
+# (and Redis ACL user) — values go through the environment, not argv.
+site_wp_config_sync() {
+  local domain="$1" cfg
+  cfg="$(site_json_get "$domain" docroot)/wp-config.php"
+  [[ -f "$cfg" ]] || return 0
+  CECP_DB_NAME="$(site_json_get "$domain" db_name)" CECP_DB_USER="$(site_json_get "$domain" db_user)" \
+  CECP_DB_PASS="$(site_json_get "$domain" db_pass)" python3 - "$cfg" <<'PY'
+import os, re, sys
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+for key, env in (("DB_NAME", "CECP_DB_NAME"), ("DB_USER", "CECP_DB_USER"), ("DB_PASSWORD", "CECP_DB_PASS")):
+    src = re.sub(r"define\(\s*['\"]%s['\"]\s*,\s*['\"][^'\"]*['\"]\s*\)" % key,
+                 lambda m, k=key, v=os.environ[env]: "define( '%s', '%s' )" % (k, v), src)
+open(path, "w", encoding="utf-8").write(src)
+PY
+  if [[ "$(site_json_get_or "$domain" redis false)" == "True" ]]; then
+    redis_wp_config_refresh "$domain" || true
+  fi
+}
+
 # HSTS header value from site meta: "on" (default, 180 days), "subdomains", or "off".
 site_hsts_value() {
   case "$(site_json_get_or "$1" hsts on)" in
@@ -18,6 +52,121 @@ site_hsts_value() {
     subdomains) echo "max-age=15552000; includeSubDomains" ;;
     *) echo "max-age=15552000" ;;
   esac
+}
+
+# ---------------------------------------------------------------------------
+# wp-admin / wp-login protection (cecp-panel site protect-admin)
+# Meta: admin_protect_auth (bool), admin_protect_ips ("CIDR,CIDR"), admin_protect_user/pass.
+# ---------------------------------------------------------------------------
+ADMIN_AUTH_DIR="/etc/nginx/cecp-auth"
+
+# http-context part (outside server {}): IP allowlist as a geo variable.
+site_admin_guard_http() {
+  local domain="$1" slug="$2" ips cidr
+  ips="$(site_json_get_or "$domain" admin_protect_ips "")"
+  [[ -n "$ips" ]] || return 0
+  echo "geo \$cecp_admin_ip_${slug} {"
+  echo "    default 0;"
+  for cidr in ${ips//,/ }; do
+    echo "    ${cidr} 1;"
+  done
+  echo "}"
+}
+
+# server-context part: 403 for non-allowlisted IPs and/or basic auth, admin area only.
+site_admin_guard() {
+  local domain="$1" slug="$2" ips auth
+  ips="$(site_json_get_or "$domain" admin_protect_ips "")"
+  auth="$(site_json_get_or "$domain" admin_protect_auth false)"
+  [[ -n "$ips" || "$auth" == "True" ]] || return 0
+  echo "    # wp-admin / wp-login protection (cecp-panel site protect-admin)"
+  if [[ -n "$ips" ]]; then
+    echo "    set \$cecp_admin_block \"\${cecp_admin_area}\${cecp_admin_ip_${slug}}\";"
+    echo "    if (\$cecp_admin_block = \"10\") { return 403; }"
+  fi
+  if [[ "$auth" == "True" ]]; then
+    echo "    set \$cecp_auth off;"
+    echo "    if (\$cecp_admin_area) { set \$cecp_auth \"Restricted\"; }"
+    echo "    auth_basic \$cecp_auth;"
+    echo "    auth_basic_user_file ${ADMIN_AUTH_DIR}/${slug}.htpasswd;"
+  fi
+}
+
+site_admin_write_htpasswd() {
+  local domain="$1" user="$2" slug pass hash
+  slug="$(domain_slug "$domain")"
+  pass="$(rand_alnum 20)"
+  hash="$(printf '%s' "$pass" | openssl passwd -6 -stdin)"
+  install -d -m 750 -o root -g nginx "$ADMIN_AUTH_DIR" 2>/dev/null || install -d -m 750 "$ADMIN_AUTH_DIR"
+  printf '%s:%s\n' "$user" "$hash" >"${ADMIN_AUTH_DIR}/${slug}.htpasswd"
+  chown root:nginx "${ADMIN_AUTH_DIR}/${slug}.htpasswd" 2>/dev/null || true
+  chmod 640 "${ADMIN_AUTH_DIR}/${slug}.htpasswd"
+  site_json_set "$domain" admin_protect_user "$user" admin_protect_pass "$pass"
+  panel_secret "wp-admin protection for $domain — user: $user  password: $pass"
+}
+
+# cecp-panel site protect-admin DOMAIN on [--ip CIDR[,CIDR]] [--no-auth] [--user NAME] | off | status | reset-password
+site_protect_admin() {
+  local domain="${1:-}" action="${2:-status}"
+  shift 2 || true
+  domain="${domain,,}"
+  require_root
+  validate_domain "$domain"
+  [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
+  local slug htfile
+  slug="$(domain_slug "$domain")"
+  htfile="${ADMIN_AUTH_DIR}/${slug}.htpasswd"
+  case "$action" in
+    on)
+      local ips="" auth=1 user="" old_user
+      old_user="$(site_json_get_or "$domain" admin_protect_user "")"
+      user="${old_user:-cecp}"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --ip) ips="${2:-}"; shift 2 || true ;;
+          --no-auth) auth=0; shift ;;
+          --user) user="${2:-}"; shift 2 || true ;;
+          *) panel_die "Unknown option: $1" ;;
+        esac
+      done
+      [[ "$user" =~ ^[a-z][a-z0-9_-]{2,31}$ ]] || panel_die "User must be 3-32 chars [a-z0-9_-]"
+      if [[ -n "$ips" ]]; then
+        ips="$(python3 -c '
+import ipaddress, sys
+nets = [str(ipaddress.ip_network(x.strip(), strict=False)) for x in sys.argv[1].split(",") if x.strip()]
+print(",".join(nets))
+' "$ips" 2>/dev/null)" || panel_die "Invalid --ip list (use CIDRs, e.g. 203.0.113.7/32,198.51.100.0/24)"
+      fi
+      (( auth == 1 )) || [[ -n "$ips" ]] || panel_die "Nothing to enable: use basic auth and/or --ip"
+      if (( auth == 1 )); then
+        if [[ ! -f "$htfile" || "$user" != "$old_user" ]]; then
+          site_admin_write_htpasswd "$domain" "$user"
+        fi
+        site_json_set "$domain" admin_protect_auth true admin_protect_ips "$ips"
+      else
+        rm -f "$htfile"
+        site_json_set "$domain" admin_protect_auth false admin_protect_ips "$ips" admin_protect_user "" admin_protect_pass ""
+      fi
+      ;;
+    off)
+      rm -f "$htfile"
+      site_json_set "$domain" admin_protect_auth false admin_protect_ips "" admin_protect_user "" admin_protect_pass ""
+      ;;
+    reset-password)
+      [[ "$(site_json_get_or "$domain" admin_protect_auth false)" == "True" ]] || panel_die "Basic auth is not enabled for $domain"
+      site_admin_write_htpasswd "$domain" "$(site_json_get_or "$domain" admin_protect_user cecp)"
+      ;;
+    status)
+      echo "wp-admin protection for $domain:"
+      echo "  basic auth: $(site_json_get_or "$domain" admin_protect_auth false) (user: $(site_json_get_or "$domain" admin_protect_user -))"
+      echo "  IP allowlist: $(site_json_get_or "$domain" admin_protect_ips none)"
+      return 0
+      ;;
+    *) panel_die "Usage: cecp-panel site protect-admin DOMAIN on [--ip CIDR,...] [--no-auth] [--user NAME] | off | status | reset-password" ;;
+  esac
+  site_render_vhost "$domain"
+  nginx_test_and_reload || panel_die "nginx rejected the protected vhost for $domain (config rolled back)"
+  panel_log "wp-admin protection for $domain: $action"
 }
 
 # Render the site's nginx vhost: HTTPS variant (HTTP/2, HSTS, 80→301) when a Let's Encrypt
@@ -34,15 +183,18 @@ site_render_vhost() {
   ensure_nginx_global
   body="$(mktemp)"
   template_render "$PANEL_ROOT/templates/nginx-site-body.tpl" "$body" \
-    DOMAIN "$domain" DOCROOT "$docroot" PHP_SOCK "$php_sock"
+    DOMAIN "$domain" DOCROOT "$docroot" PHP_SOCK "$php_sock" \
+    ADMIN_GUARD "$(site_admin_guard "$domain" "$slug")"
   if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
     template_render "$PANEL_ROOT/templates/nginx-vhost-ssl.conf.tpl" "$out" \
       DOMAIN "$domain" DOCROOT "$docroot" LISTEN_SSL "$(nginx_listen_ssl_lines)" \
-      HSTS "$(site_hsts_value "$domain")" SITE_BODY "$(<"$body")"
+      HSTS "$(site_hsts_value "$domain")" SITE_BODY "$(<"$body")" \
+      ADMIN_GUARD_HTTP "$(site_admin_guard_http "$domain" "$slug")"
     site_set_ssl_flag "$domain" true
   else
     template_render "$PANEL_ROOT/templates/nginx-vhost.conf.tpl" "$out" \
-      DOMAIN "$domain" SITE_BODY "$(<"$body")"
+      DOMAIN "$domain" SITE_BODY "$(<"$body")" \
+      ADMIN_GUARD_HTTP "$(site_admin_guard_http "$domain" "$slug")"
   fi
   rm -f "$body"
   chmod 644 "$out"
@@ -276,7 +428,7 @@ site_remove() {
     svc="$(echo "$remi_pool" | sed -E 's#^/etc/opt/remi/(php[0-9]+)/.*#\1#')-php-fpm"
     systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
   done
-  rm -f "/etc/cron.d/cecp-wp-${slug}"
+  rm -f "/etc/cron.d/cecp-wp-${slug}" "${ADMIN_AUTH_DIR}/${slug}.htpasswd"
   if [[ -f "/etc/ssh/sshd_config.d/cecp-${site_user}.conf" ]]; then
     rm -f "/etc/ssh/sshd_config.d/cecp-${site_user}.conf"
     sshd_test_and_reload || panel_log "WARN: sshd -t failed after removing SFTP drop-in — check manually"
@@ -373,7 +525,7 @@ site_sftp_info() {
   docroot="$(site_json_get "$domain" docroot)"
   site_sftp_enable "$site_user"
   local ip
-  ip="$(curl -4 -s --max-time 3 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
+  ip="$(curl -4 -s --max-time 3 ifconfig.me 2>/dev/null || panel_local_ipv4)"
   cat <<EOF
 SFTP (site-isolated user):
   Host: $ip

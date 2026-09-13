@@ -3,7 +3,7 @@
 # shellcheck disable=SC2034  # globals consumed by other lib files
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.6.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.7.0-beta}"
 PANEL_ROOT="${PANEL_ROOT:-/opt/cecp-panel}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/cecp-panel}"
 ETC_DIR="/etc/cecp-panel"
@@ -21,6 +21,18 @@ panel_log() {
 panel_die() { echo "[cecp-panel] ERROR: $*" >&2; exit 1; }
 # Show a secret to the operator's terminal only — never write it to panel.log.
 panel_secret() { echo "[cecp-panel] $*"; }
+
+# Host names without the `hostname` binary (absent on minimal images). panel_host_short matches
+# `hostname -s`, which older releases used as restic's --host: keep it identical.
+panel_host_short() {
+  local h
+  h="$(cat /proc/sys/kernel/hostname 2>/dev/null || true)"
+  h="${h%%.*}"
+  echo "${h:-localhost}"
+}
+panel_host_fqdn() { python3 -c 'import socket; print(socket.getfqdn())' 2>/dev/null || panel_host_short; }
+# First non-loopback IPv4 (fallback when ifconfig.me is unreachable).
+panel_local_ipv4() { ip -4 -o addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}'; }
 
 require_root() {
   [[ "$(id -u)" -eq 0 ]] || panel_die "Run as root: sudo cecp-panel $*"
@@ -87,6 +99,15 @@ env_set() {
   tmp="$(mktemp "${file}.XXXXXX")"
   [[ -f "$file" ]] && grep -v "^${key}=" "$file" >"$tmp" || true
   printf '%s=%q\n' "$key" "$val" >>"$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$file"
+}
+
+env_unset() {
+  local file="$1" key="$2" tmp
+  [[ -f "$file" ]] || return 0
+  tmp="$(mktemp "${file}.XXXXXX")"
+  grep -v "^${key}=" "$file" >"$tmp" || true
   chmod 600 "$tmp"
   mv -f "$tmp" "$file"
 }

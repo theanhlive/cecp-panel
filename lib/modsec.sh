@@ -77,7 +77,7 @@ EOF
   if nginx -t 2>/tmp/modsec-t.err; then
     systemctl reload nginx
     panel_log "ModSecurity ENABLED (engine still DetectionOnly unless you edit main.conf)"
-    notify_send "ModSecurity enabled on $(hostname)" 2>/dev/null || true
+    notify_send "ModSecurity enabled on $(panel_host_fqdn)" 2>/dev/null || true
   else
     rm -f /etc/nginx/conf.d/cecp-modsecurity.conf
     panel_log "nginx -t failed — ModSecurity NOT enabled (module missing?)"

@@ -125,8 +125,8 @@ update_panel() {
     bash -n "$f" || { rm -rf "$tmp"; panel_die "Bundle has a syntax error in $(basename "$f") — update aborted"; }
   done
 
-  bak="$VAR_LIB/backups/panel-$(date +%Y%m%d_%H%M%S)"
-  mkdir -p "$bak"
+  mkdir -p "$VAR_LIB/backups"
+  bak="$(mktemp -d "$VAR_LIB/backups/panel-$(date +%Y%m%d_%H%M%S)-XXXX")"
   [[ -d "$INSTALL_ROOT" ]] && cp -a "$INSTALL_ROOT" "$bak/opt-cecp-panel"
   cp -a "$BIN_PATH" "$bak/cecp-panel.bin" 2>/dev/null || true
   panel_log "Backup previous panel at $bak"

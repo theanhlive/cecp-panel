@@ -406,6 +406,7 @@ security_apply_production() {
 
   panel_log "Applying production security profile..."
   security_fix_permissions
+  system_logrotate_install
   security_firewall_baseline
   security_nginx_hide_version
   security_php_hide_version
@@ -496,6 +497,18 @@ security_self_check() {
   systemctl is-active --quiet fail2ban 2>/dev/null && _ck PASS "fail2ban active" || _ck WARN "fail2ban not active"
   [[ -f /etc/fail2ban/jail.d/cecp-00-defaults.conf ]] && _ck PASS "fail2ban never bans Cloudflare" \
     || _ck WARN "fail2ban defaults missing — run: cecp-panel security fail2ban-full"
+  [[ -f /etc/cron.d/cecp-monitor ]] && _ck PASS "monitoring enabled (alerts + auto-restart)" \
+    || _ck WARN "monitoring disabled — run: cecp-panel monitor enable"
+  local bad_backups
+  bad_backups="$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    d = {}
+print(" ".join(k for k, v in sorted(d.items()) if v.get("last_error") or v.get("last_verify_error")))
+' "$BACKUP_STATE")"
+  [[ -z "$bad_backups" ]] || _ck WARN "backup/verify errors for: $bad_backups (cecp-panel backup status)"
   if [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == "bbr" ]]; then _ck PASS "TCP BBR active"
   else _ck WARN "TCP BBR not active (cecp-panel optimize kernel)"; fi
   if command -v mysql &>/dev/null; then

@@ -100,7 +100,7 @@ dns_point_site() {
   [[ -n "$domain" ]] || panel_die "Usage: cecp-panel dns point DOMAIN [IP]"
   validate_domain "$domain"
   if [[ -z "$ip" ]]; then
-    ip="$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
+    ip="$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || panel_local_ipv4)"
   fi
   validate_ipv4 "$ip"
   local sub="${domain%%.*}"

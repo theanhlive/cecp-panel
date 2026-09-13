@@ -297,6 +297,22 @@ open(path, "w", encoding="utf-8").write(src)
 PY
 }
 
+# Re-write the Redis constants of a site from its meta (e.g. after restoring an old wp-config).
+redis_wp_config_refresh() {
+  local domain="$1" slug user="" pass
+  [[ -f /etc/cecp-panel/redis.env ]] || return 0
+  secure_source /etc/cecp-panel/redis.env
+  slug="$(domain_slug "$domain")"
+  pass="$(site_json_get_or "$domain" redis_pass "")"
+  if [[ -n "$pass" ]]; then
+    user="cecp_${slug}"
+  else
+    pass="$REDIS_PASSWORD"
+  fi
+  redis_wp_config_write "$(site_json_get "$domain" docroot)" "$user" "$pass" \
+    "cecp_${slug}_" "${REDIS_HOST:-127.0.0.1}" "${REDIS_PORT:-6379}"
+}
+
 optimize_redis_wp() {
   local domain="${1,,}"
   require_root

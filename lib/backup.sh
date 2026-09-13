@@ -7,6 +7,46 @@ RCLONE_CONF="$ETC_DIR/rclone.conf"
 RESTIC_PASS_FILE="$ETC_DIR/restic-password"
 BACKUP_STAGING="$VAR_LIB/backup-staging"
 BACKUP_LOG="$LOG_DIR/backup.log"
+BACKUP_STATE="$VAR_LIB/backup-state.json"
+RESTORE_DIR="$VAR_LIB/restore"
+
+# RESTIC_REPOSITORY may also be a local path or sftp:… (second copy, or no Google Drive at all).
+backup_repo_is_rclone() { [[ "${RESTIC_REPOSITORY:-}" == rclone:* ]]; }
+
+# backup_state_set DOMAIN KEY VALUE [KEY VALUE ...] — empty VALUE removes the key.
+backup_state_set() {
+  python3 - "$BACKUP_STATE" "$@" <<'PY'
+import json, os, sys
+path, dom, kv = sys.argv[1], sys.argv[2], sys.argv[3:]
+try:
+    data = json.load(open(path))
+except (OSError, ValueError):
+    data = {}
+entry = data.setdefault(dom, {})
+for k, v in zip(kv[::2], kv[1::2]):
+    if v == "":
+        entry.pop(k, None)
+    else:
+        entry[k] = v
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(data, f, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
+}
+
+backup_state_get() {
+  python3 -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get(sys.argv[2], {}).get(sys.argv[3], ""))
+except (OSError, ValueError):
+    print("")
+' "$BACKUP_STATE" "$1" "$2"
+}
+
+backup_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 backup_load_config() {
   [[ -f "$BACKUP_ENV" ]] || panel_die "Missing $BACKUP_ENV — run: cecp-panel backup setup"
@@ -16,7 +56,7 @@ backup_load_config() {
   : "${RESTIC_REPOSITORY:=}"
   if [[ -z "$RESTIC_REPOSITORY" ]]; then
     local host
-    host="$(hostname -s)"
+    host="$(panel_host_short)"
     RESTIC_REPOSITORY="rclone:${RCLONE_REMOTE}:${GDRIVE_FOLDER}/${host}"
   fi
   export RESTIC_REPOSITORY
@@ -32,7 +72,9 @@ backup_load_config() {
 
 backup_ensure_tools() {
   command -v restic &>/dev/null || panel_die "restic not installed — run: cecp-panel backup setup"
-  command -v rclone &>/dev/null || panel_die "rclone not installed — run: cecp-panel backup setup"
+  if backup_repo_is_rclone; then
+    command -v rclone &>/dev/null || panel_die "rclone not installed — run: cecp-panel backup setup"
+  fi
 }
 
 backup_auth_mode() {
@@ -161,17 +203,20 @@ backup_setup() {
   fi
 
   backup_load_config
-  backup_write_rclone_conf
+  if backup_repo_is_rclone; then
+    backup_write_rclone_conf
+  fi
 
   if [[ ! -f "$RESTIC_PASS_FILE" ]]; then
-    rand_alnum 32 >"$RESTIC_PASS_FILE"
-    chmod 600 "$RESTIC_PASS_FILE"
+    (umask 077; rand_alnum 32 >"$RESTIC_PASS_FILE")
     panel_log "Created restic encryption password: $RESTIC_PASS_FILE (back up offline!)"
   fi
   export RESTIC_PASSWORD_FILE="$RESTIC_PASS_FILE"
 
-  rclone lsd "${RCLONE_REMOTE}:" --config "$RCLONE_CONF" >/dev/null \
-    || panel_die "rclone cannot access Google Drive — re-run OAuth connect or check credentials"
+  if backup_repo_is_rclone; then
+    rclone lsd "${RCLONE_REMOTE}:" --config "$RCLONE_CONF" >/dev/null \
+      || panel_die "rclone cannot access Google Drive — re-run OAuth connect or check credentials"
+  fi
 
   if ! restic snapshots &>/dev/null; then
     restic init
@@ -180,22 +225,72 @@ backup_setup() {
   panel_log "Backup setup OK. Schedule: cecp-panel backup enable-cron"
 }
 
+# Site configuration for disaster recovery on a new VPS (vhost, pool, cron, SFTP, htpasswd,
+# Let's Encrypt lineage). `site rebuild-vhost` can also regenerate vhost/pool from site.json.
+backup_stage_config() {
+  local domain="$1" out="$2" slug site_user f
+  slug="$(domain_slug "$domain")"
+  site_user="$(site_json_get "$domain" site_user)"
+  local -a files=()
+  for f in "/etc/nginx/conf.d/cecp-${slug}.conf" "/etc/php-fpm.d/cecp-${slug}.conf" \
+           /etc/opt/remi/php*/php-fpm.d/cecp-"${slug}".conf "/etc/cron.d/cecp-wp-${slug}" \
+           "/etc/ssh/sshd_config.d/cecp-${site_user}.conf" "/etc/nginx/cecp-auth/${slug}.htpasswd" \
+           "/etc/letsencrypt/renewal/${domain}.conf" "/etc/letsencrypt/live/${domain}" \
+           "/etc/letsencrypt/archive/${domain}"; do
+    [[ -e "$f" ]] && files+=("${f#/}")
+  done
+  (( ${#files[@]} )) || return 0
+  tar -C / -czf "$out/config.tar.gz" "${files[@]}"
+}
+
+# Prints the stage directory. Quiet on stdout otherwise (the caller captures it); errors go
+# to $BACKUP_LOG and make it return non-zero.
 backup_stage_site() {
   local domain="$1"
   local docroot db_name stage cnf
-  docroot="$(site_json_get "$domain" docroot)"
-  db_name="$(site_json_get "$domain" db_name)"
+  docroot="$(site_json_get "$domain" docroot)" || return 1
+  db_name="$(site_json_get "$domain" db_name)" || return 1
 
   stage="$BACKUP_STAGING/$(domain_slug "$domain")-$(date +%Y%m%d_%H%M%S)"
-  (umask 077; mkdir -p "$stage/files")
-  cp "$(site_meta_path "$domain")" "$stage/site.json"
+  (umask 077; mkdir -p "$stage/files" "$stage/config") || return 1
+  cp "$(site_meta_path "$domain")" "$stage/site.json" || { rm -rf "$stage"; return 1; }
   cnf="$(mysql_client_cnf "$(site_json_get "$domain" db_user)" "$(site_json_get "$domain" db_pass)")"
-  mysqldump --defaults-extra-file="$cnf" "$db_name" >"$stage/database.sql"
+  if ! mysqldump --defaults-extra-file="$cnf" --single-transaction --quick --routines --triggers \
+       "$db_name" >"$stage/database.sql" 2>>"$BACKUP_LOG"; then
+    rm -f "$cnf"
+    rm -rf "$stage"
+    echo "$(backup_now) $domain: mysqldump failed" >>"$BACKUP_LOG"
+    return 1
+  fi
   rm -f "$cnf"
-  tar -C "$(dirname "$docroot")" -czf "$stage/files/public_html.tar.gz" "$(basename "$docroot")"
+  if ! tar -C "$(dirname "$docroot")" -czf "$stage/files/public_html.tar.gz" "$(basename "$docroot")" 2>>"$BACKUP_LOG"; then
+    rm -rf "$stage"
+    echo "$(backup_now) $domain: tar of $docroot failed" >>"$BACKUP_LOG"
+    return 1
+  fi
+  backup_stage_config "$domain" "$stage/config" 2>>"$BACKUP_LOG" || true
   echo "$stage"
 }
 
+backup_fail() {
+  local domain="$1" msg="$2"
+  panel_log "ERROR: backup $domain: $msg"
+  backup_state_set "$domain" last_error "$msg" last_error_at "$(backup_now)"
+  notify_event backup_failed critical "Backup FAILED: $domain — $msg" "$domain"
+}
+
+backup_ok() {
+  local domain="$1" snap="$2" prev_err
+  prev_err="$(backup_state_get "$domain" last_error)"
+  backup_state_set "$domain" last_ok "$(backup_now)" last_snapshot "$snap" last_error "" last_error_at ""
+  panel_log "Backup done: $domain (snapshot ${snap:0:8})"
+  if [[ -n "$prev_err" ]]; then
+    notify_event backup_recovered info "Backup OK again: $domain" "$domain"
+  fi
+}
+
+# Returns non-zero (and notifies) when any step fails — a failed backup used to be
+# reported as "done" because restic's exit code was discarded.
 backup_run_one() {
   local domain="${1,,}"
   local skip_retention="${2:-0}"
@@ -205,28 +300,41 @@ backup_run_one() {
   backup_ensure_tools
   export RESTIC_PASSWORD_FILE="$RESTIC_PASS_FILE"
 
-  local stage
-  stage="$(backup_stage_site "$domain")"
+  local stage summary snap rc=0
+  if ! stage="$(backup_stage_site "$domain")" || [[ -z "$stage" ]]; then
+    backup_fail "$domain" "could not dump database / archive files (see $BACKUP_LOG)"
+    return 1
+  fi
   panel_log "Backing up $domain → $RESTIC_REPOSITORY ..."
-  restic backup "$stage" \
-    --tag "$domain" \
-    --host "$(hostname -s)" \
-    --json 2>>"$BACKUP_LOG" | tail -1 || true
+  summary="$(restic backup "$stage" --tag "$domain" --host "$(panel_host_short)" --json 2>>"$BACKUP_LOG" | tail -1)" || rc=$?
   rm -rf "$stage"
-  [[ "$skip_retention" == "1" ]] || backup_apply_retention
-  panel_log "Backup done: $domain"
+  if (( rc != 0 )); then
+    backup_fail "$domain" "restic backup exited with code $rc (see $BACKUP_LOG)"
+    return 1
+  fi
+  snap="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read() or "{}").get("snapshot_id",""))' <<<"$summary" 2>/dev/null || true)"
+  backup_ok "$domain" "$snap"
+  if [[ "$skip_retention" != "1" ]]; then
+    backup_apply_retention || true
+  fi
+  return 0
 }
 
 backup_run_all() {
+  local f domain
+  local -a failed=()
   shopt -s nullglob
-  local f
   for f in "$SITES_DIR"/*.json; do
-    local domain
     domain="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["domain"])' "$f")"
-    backup_run_one "$domain" 1
+    backup_run_one "$domain" 1 || failed+=("$domain")
   done
   shopt -u nullglob
-  backup_apply_retention
+  backup_apply_retention || failed+=("(retention)")
+  if (( ${#failed[@]} )); then
+    panel_log "Backup run finished with failures: ${failed[*]}"
+    return 1
+  fi
+  panel_log "Backup run OK (all sites)"
 }
 
 backup_policy_show() {
@@ -267,10 +375,16 @@ backup_apply_retention() {
     forget_args+=(--keep-yearly "$RESTIC_KEEP_YEARLY")
   fi
   panel_log "Retention: daily=$RESTIC_KEEP_DAILY weekly=$RESTIC_KEEP_WEEKLY monthly=$RESTIC_KEEP_MONTHLY prune=on"
+  local rc=0
   if [[ "$dry" -eq 1 ]]; then
-    restic forget "${forget_args[@]}" --dry-run 2>>"$BACKUP_LOG" || true
+    restic forget "${forget_args[@]}" --dry-run 2>>"$BACKUP_LOG" || rc=$?
   else
-    restic forget "${forget_args[@]}" --prune 2>>"$BACKUP_LOG" || true
+    restic forget "${forget_args[@]}" --prune 2>>"$BACKUP_LOG" || rc=$?
+  fi
+  if (( rc != 0 )); then
+    panel_log "WARN: retention (restic forget) exited with code $rc"
+    notify_event backup_retention_failed warning "Backup retention/prune failed (exit $rc) on $RESTIC_REPOSITORY"
+    return 1
   fi
 }
 
@@ -295,7 +409,7 @@ backup_list_json() {
 
 backup_config_get() {
   local host repo cron_enabled
-  host="$(hostname -s)"
+  host="$(panel_host_short)"
   if [[ -f "$BACKUP_ENV" ]]; then
     secure_source "$BACKUP_ENV"
   fi
@@ -351,10 +465,36 @@ backup_configure() {
   panel_log "Backup schedule: ${h}:${m} dow=${dow} retention daily=${kd} weekly=${kw} monthly=${km} yearly=${ky}"
 }
 
+# The stage directory (site.json + database.sql + files/) inside a restored snapshot tree.
+backup_find_stage() {
+  find "$1" -type f -name site.json -path '*backup-staging*' -printf '%h\n' 2>/dev/null | head -1
+}
+
+# cecp-panel backup restore DOMAIN SNAPSHOT_ID|latest [--live [--dry-run] [--yes]] [--target DIR] [--repo REPO]
+# Legacy positional form still works: backup restore DOMAIN SNAPSHOT_ID [TARGET_DIR] [RESTIC_REPO]
 backup_restore() {
-  local domain="$1" snapshot_id="$2" target="${3:-}" repo_override="${4:-}"
+  local domain="${1:-}" snapshot_id="${2:-}"
+  shift 2 || true
+  local target="" repo_override="" live=0 dry=0 yes=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --live) live=1; shift ;;
+      --dry-run) dry=1; shift ;;
+      --yes|-y) yes=1; shift ;;
+      --target) target="${2:-}"; shift 2 || true ;;
+      --repo) repo_override="${2:-}"; shift 2 || true ;;
+      --*) panel_die "Unknown option: $1" ;;
+      *)
+        if [[ -z "$target" ]]; then target="$1"
+        elif [[ -z "$repo_override" ]]; then repo_override="$1"
+        else panel_die "Too many arguments"
+        fi
+        shift ;;
+    esac
+  done
   require_root
-  [[ -n "$domain" && -n "$snapshot_id" ]] || panel_die "Usage: cecp-panel backup restore DOMAIN SNAPSHOT_ID [TARGET_DIR] [RESTIC_REPO]"
+  [[ -n "$domain" && -n "$snapshot_id" ]] \
+    || panel_die "Usage: cecp-panel backup restore DOMAIN SNAPSHOT_ID|latest [--live [--dry-run] [--yes]] [--target DIR] [--repo REPO]"
   domain="${domain,,}"
   validate_domain "$domain"
   [[ "$snapshot_id" =~ ^([0-9a-f]{8,64}|latest)$ ]] || panel_die "Invalid snapshot id: '$snapshot_id'"
@@ -365,11 +505,180 @@ backup_restore() {
   fi
   backup_ensure_tools
   export RESTIC_PASSWORD_FILE="$RESTIC_PASS_FILE"
-  target="${target:-/var/lib/cecp-panel/restore/${domain}}"
+  if (( live )); then
+    backup_restore_live "$domain" "$snapshot_id" "$dry" "$yes"
+    return
+  fi
+  target="${target:-$RESTORE_DIR/${domain}}"
   mkdir -p "$target"
   panel_log "Restoring $snapshot_id (tag $domain) → $target"
   restic restore "$snapshot_id" --tag "$domain" --target "$target"
-  panel_log "Restore extracted. Review files before swapping live site."
+  panel_log "Restore extracted to $target. To replace the live site: cecp-panel backup restore $domain $snapshot_id --live"
+}
+
+# Copy the site's current database + files aside so a failed live restore can be undone.
+backup_restore_safety_copy() {
+  local domain="$1" dir="$2" docroot db_name
+  docroot="$(site_json_get "$domain" docroot)"
+  db_name="$(site_json_get "$domain" db_name)"
+  (umask 077; mkdir -p "$dir")
+  mysqldump --single-transaction --quick --routines --triggers "$db_name" >"$dir/database.sql" 2>>"$BACKUP_LOG" || return 1
+  tar -C "$(dirname "$docroot")" -czf "$dir/public_html.tar.gz" "$(basename "$docroot")" 2>>"$BACKUP_LOG" || return 1
+}
+
+# Replace the site's files and database with those from STAGE_DIR (a backup stage or a
+# safety copy with database.sql + public_html.tar.gz).
+backup_restore_apply() {
+  local domain="$1" sql="$2" archive="$3" stamp="$4"
+  local docroot site_user db_name new old
+  docroot="$(site_json_get "$domain" docroot)"
+  site_user="$(site_json_get "$domain" site_user)"
+  db_name="$(site_json_get "$domain" db_name)"
+  new="${docroot}.restore-${stamp}"
+  old="${docroot}.pre-restore-${stamp}"
+  rm -rf "$new.tmp" "$new"
+  mkdir -p "$new.tmp"
+  tar -C "$new.tmp" -xzf "$archive" || { rm -rf "$new.tmp"; return 1; }
+  mv "$new.tmp/$(basename "$docroot")" "$new" && rmdir "$new.tmp" || return 1
+  # Files: swap directories (same filesystem → near-atomic)
+  mv "$docroot" "$old" && mv "$new" "$docroot" || return 1
+  chown -R "${site_user}:${site_user}" "$docroot"
+  selinux_fixup_path "$docroot"
+  if command -v getenforce &>/dev/null && [[ "$(getenforce)" != "Disabled" ]]; then
+    chcon -R -t httpd_sys_content_t "$docroot" 2>/dev/null || true
+  fi
+  site_wp_config_sync "$domain"
+  # Database: recreate empty, then import (grants live in mysql.db and survive the drop)
+  mysql -e "DROP DATABASE IF EXISTS \`${db_name}\`; CREATE DATABASE \`${db_name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" || return 1
+  mysql "$db_name" <"$sql" 2>>"$BACKUP_LOG" || return 1
+  rm -rf "$old"
+  # OPcache would keep serving the previous code for up to revalidate_freq (60 s) and make
+  # the health check lie; a graceful reload resets it.
+  php_fpm_reload_all >/dev/null 2>&1 || true
+  optimize_purge_cache "$domain" >/dev/null 2>&1 || true
+  if [[ "$(wp_site_is_wordpress "$domain" 2>/dev/null)" == "True" ]]; then
+    wp_site_exec "$domain" cache flush >/dev/null 2>&1 || true
+  fi
+}
+
+# Live restore: safety copy → swap files → re-import DB → fix wp-config → purge cache → health
+# check. If the site does not answer 2xx/3xx afterwards, the safety copy is put back.
+backup_restore_live() {
+  local domain="$1" snapshot_id="$2" dry="$3" yes="$4"
+  [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site $domain does not exist here — create it first: cecp-panel site add $domain"
+  local stamp work stage tables snap_time code
+  stamp="$(date +%Y%m%d_%H%M%S)"
+  work="$RESTORE_DIR/$(domain_slug "$domain")-${stamp}"
+  (umask 077; mkdir -p "$work")
+  panel_log "Fetching snapshot $snapshot_id of $domain ..."
+  restic restore "$snapshot_id" --tag "$domain" --host "$(panel_host_short)" --target "$work/snap" >>"$BACKUP_LOG" 2>&1 \
+    || restic restore "$snapshot_id" --tag "$domain" --target "$work/snap" >>"$BACKUP_LOG" 2>&1 \
+    || { rm -rf "$work"; panel_die "Snapshot $snapshot_id (tag $domain) could not be restored (see $BACKUP_LOG)"; }
+  stage="$(backup_find_stage "$work/snap")"
+  [[ -n "$stage" && -s "$stage/database.sql" ]] || { rm -rf "$work"; panel_die "Snapshot has no CECP site backup (database.sql missing)"; }
+  tar -tzf "$stage/files/public_html.tar.gz" >/dev/null 2>&1 || { rm -rf "$work"; panel_die "File archive in snapshot is unreadable"; }
+  tables="$(grep -c '^CREATE TABLE' "$stage/database.sql" || true)"
+  snap_time="$(restic snapshots "$snapshot_id" --tag "$domain" --json 2>/dev/null \
+    | python3 -c 'import json,sys; s=json.load(sys.stdin); print(s[-1]["time"][:19] if s else "?")' 2>/dev/null || echo "?")"
+  echo "=== Live restore plan: $domain ==="
+  echo "  snapshot:  $snapshot_id (taken $snap_time UTC)"
+  echo "  database:  $(site_json_get "$domain" db_name) ← ${tables} tables"
+  echo "  files:     $(site_json_get "$domain" docroot) ← $(du -h "$stage/files/public_html.tar.gz" | cut -f1) archive"
+  echo "  safety:    current files + DB saved to $work/pre (automatic rollback on failure)"
+  if (( dry )); then
+    rm -rf "$work"
+    panel_log "Dry run only — nothing changed"
+    return 0
+  fi
+  if (( ! yes )); then
+    [[ -t 0 ]] || { rm -rf "$work"; panel_die "Live restore replaces the site; pass --yes when not running interactively"; }
+    local answer
+    read -r -p "Type the domain to replace the LIVE site with this snapshot: " answer
+    [[ "$answer" == "$domain" ]] || { rm -rf "$work"; panel_die "Aborted"; }
+  fi
+  panel_log "Saving current state of $domain ..."
+  backup_restore_safety_copy "$domain" "$work/pre" || { rm -rf "$work"; panel_die "Could not save the current site — live restore aborted, nothing changed"; }
+  panel_log "Restoring $domain from $snapshot_id ..."
+  if backup_restore_apply "$domain" "$stage/database.sql" "$stage/files/public_html.tar.gz" "$stamp"; then
+    sleep 1
+    if code="$(site_http_check "$domain")"; then
+      rm -rf "$work/snap"
+      panel_log "Live restore OK: $domain (HTTP $code). Pre-restore copy kept in $work/pre"
+      notify_event restore_done info "Restored $domain from snapshot ${snapshot_id:0:8} ($snap_time UTC)" "$domain"
+      return 0
+    fi
+    panel_log "ERROR: $domain answers HTTP $code after restore — rolling back"
+  else
+    panel_log "ERROR: restore step failed — rolling back"
+  fi
+  if backup_restore_apply "$domain" "$work/pre/database.sql" "$work/pre/public_html.tar.gz" "${stamp}-rb" \
+     && code="$(site_http_check "$domain")"; then
+    rm -rf "$(site_json_get "$domain" docroot).pre-restore-${stamp}"
+    notify_event restore_rolled_back critical "Restore of $domain from ${snapshot_id:0:8} failed; previous site restored (HTTP $code)" "$domain"
+    panel_die "Restore failed; the previous site was put back (HTTP $code). Snapshot left in $work/snap for inspection"
+  fi
+  notify_event restore_failed critical "Restore of $domain FAILED and rollback did not bring the site back — manual action needed ($work)" "$domain"
+  panel_die "Restore and rollback failed — manual action needed. Safety copy: $work/pre"
+}
+
+# cecp-panel backup verify DOMAIN|--all — repository check + test import of the latest dump.
+backup_verify() {
+  local target="${1:---all}" rc=0 f d
+  require_root
+  backup_load_config
+  backup_ensure_tools
+  export RESTIC_PASSWORD_FILE="$RESTIC_PASS_FILE"
+  panel_log "Checking repository $RESTIC_REPOSITORY (structure + 5% data sample) ..."
+  if ! restic check --read-data-subset=5% >>"$BACKUP_LOG" 2>&1; then
+    notify_event backup_verify_failed critical "Backup repository check FAILED ($RESTIC_REPOSITORY)"
+    panel_log "ERROR: restic check failed (see $BACKUP_LOG)"
+    rc=1
+  fi
+  if [[ "$target" == "--all" ]]; then
+    shopt -s nullglob
+    for f in "$SITES_DIR"/*.json; do
+      d="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["domain"])' "$f")"
+      backup_verify_site "$d" || rc=1
+    done
+    shopt -u nullglob
+  else
+    backup_verify_site "${target,,}" || rc=1
+  fi
+  return "$rc"
+}
+
+backup_verify_site() {
+  local domain="$1" tmp stage vdb n=0 err=""
+  validate_domain "$domain"
+  tmp="$(mktemp -d "$VAR_LIB/verify.XXXXXX")"
+  if ! restic restore latest --tag "$domain" --host "$(panel_host_short)" --target "$tmp" >>"$BACKUP_LOG" 2>&1; then
+    err="no restorable snapshot"
+  else
+    stage="$(backup_find_stage "$tmp")"
+    if [[ -z "$stage" || ! -s "$stage/database.sql" ]]; then
+      err="snapshot has no database dump"
+    elif ! tar -tzf "$stage/files/public_html.tar.gz" >/dev/null 2>&1; then
+      err="file archive is unreadable"
+    else
+      vdb="cecp_verify_$(rand_alnum 8 | tr '[:upper:]' '[:lower:]')"
+      if mysql -e "CREATE DATABASE \`${vdb}\`" && mysql "$vdb" <"$stage/database.sql" 2>>"$BACKUP_LOG"; then
+        n="$(mysql -Nse "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${vdb}'")"
+        (( n > 0 )) || err="database dump contains no tables"
+      else
+        err="database dump does not import"
+      fi
+      mysql -e "DROP DATABASE IF EXISTS \`${vdb}\`" || true
+    fi
+  fi
+  rm -rf "$tmp"
+  if [[ -n "$err" ]]; then
+    backup_state_set "$domain" last_verify_error "$err" last_verify_error_at "$(backup_now)"
+    notify_event backup_verify_failed critical "Backup verify FAILED: $domain — $err" "$domain"
+    panel_log "ERROR: verify $domain: $err"
+    return 1
+  fi
+  backup_state_set "$domain" last_verify_ok "$(backup_now)" last_verify_error "" last_verify_error_at ""
+  panel_log "Verify OK: $domain (latest snapshot restores; $n tables import cleanly)"
 }
 
 backup_enable_cron() {
@@ -381,6 +690,8 @@ backup_enable_cron() {
   cat >/etc/cron.d/cecp-panel-backup <<EOF
 # CECP backup + tiered retention (cecp-panel backup policy)
 ${m} ${h} * * ${dow} root /usr/local/bin/cecp-panel backup run --all >>/var/log/cecp-panel/backup.log 2>&1
+# Weekly proof that backups restore: repository check + test-import of every site's latest dump
+30 5 * * 0 root /usr/local/bin/cecp-panel backup verify --all >>/var/log/cecp-panel/backup.log 2>&1
 EOF
   chmod 644 /etc/cron.d/cecp-panel-backup
   if [[ "$dow" == "*" ]]; then
@@ -394,6 +705,10 @@ backup_is_configured() {
   # True only when Drive auth + restic password are present (setup completed).
   [[ -f "$BACKUP_ENV" ]] || return 1
   [[ -f "$RESTIC_PASS_FILE" ]] || return 1
+  secure_source "$BACKUP_ENV"
+  if [[ -n "${RESTIC_REPOSITORY:-}" ]] && ! backup_repo_is_rclone; then
+    return 0
+  fi
   local mode
   mode="$(backup_auth_mode)"
   if [[ "$mode" == "oauth" ]]; then
@@ -441,6 +756,24 @@ backup_status() {
   [[ -f /etc/cron.d/cecp-panel-backup ]] && echo "  Cron:       enabled (/etc/cron.d/cecp-panel-backup)" || echo "  Cron:       not enabled (run: backup enable-cron)"
   echo "  Retention:  daily=$RESTIC_KEEP_DAILY weekly=$RESTIC_KEEP_WEEKLY monthly=$RESTIC_KEEP_MONTHLY"
   backup_policy_show
+  echo ""
+  echo "--- Per-site status ($BACKUP_STATE) ---"
+  python3 - "$BACKUP_STATE" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    data = {}
+if not data:
+    print("  (no backup has run yet)")
+for dom, e in sorted(data.items()):
+    line = f"  {dom:35} last_ok={e.get('last_ok', 'never')}"
+    if e.get("last_verify_ok"):
+        line += f" verified={e['last_verify_ok']}"
+    if e.get("last_error"):
+        line += f"  ERROR({e.get('last_error_at', '?')}): {e['last_error']}"
+    print(line)
+PY
   echo ""
   if [[ -f "$RESTIC_PASS_FILE" ]] && backup_ensure_tools 2>/dev/null; then
     export RESTIC_PASSWORD_FILE="$RESTIC_PASS_FILE"

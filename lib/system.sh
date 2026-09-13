@@ -68,8 +68,8 @@ system_swap_recommended_gb() {
 system_info() {
   system_load_config 2>/dev/null || true
   echo "--- VPS ---"
-  hostname -f 2>/dev/null || hostname
-  echo "  IP: $(curl -4 -s --max-time 3 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
+  panel_host_fqdn
+  echo "  IP: $(curl -4 -s --max-time 3 ifconfig.me 2>/dev/null || panel_local_ipv4)"
   echo "  OS: $(cat /etc/os-release 2>/dev/null | awk -F= '/^PRETTY_NAME=/{gsub(/"/,"");print $2}')"
   echo "  Uptime: $(uptime -p 2>/dev/null || uptime)"
   echo "--- Disk ---"
@@ -218,6 +218,41 @@ system_maintain() {
   panel_log "=== CECP system maintain $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
   system_swap_ensure
   system_disk_clean
+  # Pre-restore safety copies and interrupted verify/staging leftovers older than a week.
+  find "$VAR_LIB/restore" -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+  find "$VAR_LIB" -maxdepth 1 -name 'verify.*' -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+  find "$VAR_LIB/backup-staging" -mindepth 1 -maxdepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+}
+
+# Rotate the panel's own logs (per-site nginx logs are covered by the distro's nginx rule).
+system_logrotate_install() {
+  require_root
+  cat >/etc/logrotate.d/cecp-panel <<'EOF'
+# CECP Panel logs (managed by cecp-panel)
+/var/log/cecp-panel/*.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+}
+# wp-cron logs are written by each site's user: truncate in place to keep ownership.
+/var/log/cecp-panel/wp-cron/*.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+  chmod 644 /etc/logrotate.d/cecp-panel
+  if [[ ! -f /etc/logrotate.d/nginx ]] || ! grep -qE '/var/log/nginx/\*\.?log' /etc/logrotate.d/nginx; then
+    panel_log "WARN: no logrotate rule for /var/log/nginx/*.log — per-site nginx logs will grow unbounded"
+  fi
+  panel_log "Logrotate: /etc/logrotate.d/cecp-panel"
 }
 
 system_tune_install() {
@@ -226,7 +261,8 @@ system_tune_install() {
   system_swap_ensure
   system_disk_clean
   system_enable_maintain_cron
-  panel_log "System tune: swap + disk policy + weekly cron"
+  system_logrotate_install
+  panel_log "System tune: swap + disk policy + weekly cron + logrotate"
 }
 
 system_tune() {

@@ -28,6 +28,8 @@ menu_domain() {
     echo " 4) Duplicate domain"
     echo " 5) SFTP info"
     echo " 6) Set SFTP password"
+    echo " 7) Protect wp-admin (basic auth / IP allowlist)"
+    echo " 8) Rebuild vhost + pool (apply current templates)"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -57,6 +59,26 @@ menu_domain() {
         read -r -p "Domain: " dom
         [[ -n "$dom" ]] && site_sftp_password "$dom"
         ;;
+      7)
+        read -r -p "Domain: " dom
+        [[ -z "$dom" ]] && continue
+        read -r -p "on / off / status / reset-password [status]: " a
+        a="${a:-status}"
+        if [[ "$a" == "on" ]]; then
+          read -r -p "Allowed IPs/CIDRs (comma, empty = anywhere): " ips
+          if [[ -n "$ips" ]]; then site_protect_admin "$dom" on --ip "$ips"; else site_protect_admin "$dom" on; fi
+        else
+          site_protect_admin "$dom" "$a"
+        fi
+        ;;
+      8)
+        read -r -p "Domain (or --all): " dom
+        if [[ "$dom" == "--all" ]]; then
+          site_rebuild_vhost_all
+        elif [[ -n "$dom" ]]; then
+          site_rebuild_vhost "$dom"
+        fi
+        ;;
       0) break ;;
     esac
   done
@@ -66,7 +88,7 @@ menu_ssl() {
   while true; do
     echo ""
     echo "== SSL (Let's Encrypt) =="
-    echo " 1) List  2) Add  3) Remove  4) Renew  5) Status"
+    echo " 1) List  2) Add  3) Remove  4) Renew  5) Status  6) HSTS on/off/subdomains"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -75,6 +97,11 @@ menu_ssl() {
       3) read -r -p "Domain: " dom; [[ -n "$dom" ]] && ssl_remove_for_domain "$dom" ;;
       4) ssl_renew_all ;;
       5) ssl_status ;;
+      6)
+        read -r -p "Domain: " dom
+        read -r -p "on / off / subdomains: " m
+        [[ -n "$dom" && -n "$m" ]] && ssl_set_hsts "$dom" "$m"
+        ;;
       0) break ;;
     esac
   done
@@ -95,7 +122,7 @@ menu_dns() {
         read -r -p "Name (test2 or fqdn): " n
         read -r -p "Proxied? (y/n): " px
         local ip
-        ip="$(curl -4 -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
+        ip="$(curl -4 -s ifconfig.me 2>/dev/null || panel_local_ipv4)"
         [[ "$px" =~ ^[nN] ]] && dns_add_a "$n" "$ip" false || dns_add_a "$n" "$ip" true
         ;;
       3)
@@ -122,6 +149,8 @@ menu_security() {
     echo " 9) Apply production profile (all-in-one)"
     echo "10) Security self-check"
     echo "11) Auto security updates (dnf-automatic / unattended)"
+    echo "12) Repair SFTP sshd drop-ins"
+    echo "13) Fix permissions + redact old secrets in logs"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -142,6 +171,8 @@ menu_security() {
       9) security_apply_production ;;
       10) security_self_check ;;
       11) security_unattended_updates ;;
+      12) security_ssh_repair ;;
+      13) security_fix_permissions ;;
       0) break ;;
     esac
   done
@@ -185,6 +216,10 @@ menu_perf() {
     echo "11) Brotli (origin)"
     echo "12) WebP (WordPress plugin)"
     echo "13) Media optimize (per-site on/off)"
+    echo "14) Purge cache of one site"
+    echo "15) Purge one URL (origin cache)"
+    echo "16) Cache report (hit ratio, p50/p95)"
+    echo "17) Redis: per-site ACL for all sites + rotate shared password"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -213,6 +248,10 @@ menu_perf() {
         [[ -n "$d" ]] && optimize_webp "$d"
         ;;
       13) menu_media ;;
+      14) read -r -p "Domain: " d; [[ -n "$d" ]] && optimize_purge_cache "$d" ;;
+      15) read -r -p "URL: " u; [[ -n "$u" ]] && optimize_purge_url "$u" ;;
+      16) read -r -p "Domain: " d; [[ -n "$d" ]] && optimize_report "$d" 5000 ;;
+      17) optimize_redis_acl --all ;;
       0) break ;;
     esac
   done
@@ -345,9 +384,10 @@ menu_update() {
 menu_backup() {
   while true; do
     echo ""
-    echo "== Backup (Google Drive) =="
+    echo "== Backup =="
     echo " 1) Setup  2) Status  3) Run all  4) List snapshots"
-    echo " 5) Policy  6) Daily cron  7) Prune now"
+    echo " 5) Policy  6) Daily cron  7) Prune now  8) Verify (test restore)"
+    echo " 9) Restore to a folder  10) Restore LIVE (with automatic rollback)"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -358,6 +398,17 @@ menu_backup() {
       5) backup_policy_show ;;
       6) backup_enable_cron ;;
       7) backup_apply_retention ;;
+      8) read -r -p "Domain [--all]: " d; backup_verify "${d:---all}" ;;
+      9)
+        read -r -p "Domain: " d
+        read -r -p "Snapshot id [latest]: " s
+        [[ -n "$d" ]] && backup_restore "$d" "${s:-latest}"
+        ;;
+      10)
+        read -r -p "Domain: " d
+        read -r -p "Snapshot id [latest]: " s
+        [[ -n "$d" ]] && backup_restore "$d" "${s:-latest}" --live
+        ;;
       0) break ;;
     esac
   done
@@ -368,7 +419,7 @@ menu_notify() {
     echo ""
     echo "== Notify (Telegram / Discord) =="
     echo " 1) Status  2) Setup  3) Test  4) Health check now"
-    echo " 5) Enable daily cron  6) Disable cron"
+    echo " 5) Enable daily cron  6) Disable cron  7) Webhook (n8n) URL"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -378,6 +429,7 @@ menu_notify() {
       4) notify_health ;;
       5) notify_enable_cron ;;
       6) notify_disable_cron ;;
+      7) read -r -p "Webhook URL (or off): " u; [[ -n "$u" ]] && notify_webhook_set "$u" ;;
       0) break ;;
     esac
   done
@@ -392,6 +444,7 @@ menu_cf() {
     echo " 3) Enable Brotli"
     echo " 4) Cache level aggressive"
     echo " 5) Recommendations"
+    echo " 6) Refresh Cloudflare real-IP ranges"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -400,6 +453,7 @@ menu_cf() {
       3) cf_set_brotli on ;;
       4) cf_set_cache_level aggressive ;;
       5) cf_recommend ;;
+      6) cf_realip_update ;;
       0) break ;;
     esac
   done
@@ -446,6 +500,7 @@ menu_main() {
     echo "15) Cloudflare edge (purge/brotli)"
     echo "16) ModSecurity (optional)"
     echo "17) View logs"
+    echo "18) Monitoring (status / run / enable / disable)"
     echo " 0) Exit"
     echo "========================================================================="
     read -r -p "Choice [0]: " choice
@@ -471,6 +526,15 @@ menu_main() {
         read -r -p "log kind [panel|nginx|php|mysql|fail2ban]: " k
         read -r -p "domain (nginx only, empty=global): " d
         log_view "${k:-panel}" "$d" 80
+        ;;
+      18)
+        read -r -p "status / run / enable / disable [status]: " a
+        case "${a:-status}" in
+          run) monitor_run ;;
+          enable) monitor_enable ;;
+          disable) monitor_disable ;;
+          *) monitor_status ;;
+        esac
         ;;
       0) exit 0 ;;
       *) echo "Unknown option" ;;
@@ -525,5 +589,9 @@ show_status() {
   echo ""
   site_list
   echo ""
-  echo "Cache: X-CECP-Cache header on PHP pages | purge: cecp-panel optimize purge all"
+  if [[ "$(id -u)" -eq 0 && -f "$MONITOR_STATE" ]]; then
+    monitor_status 2>/dev/null | grep -E "FAIL|last run|failing" || true
+    echo ""
+  fi
+  echo "Cache: X-CECP-Cache header on PHP pages | purge: cecp-panel optimize purge DOMAIN"
 }
