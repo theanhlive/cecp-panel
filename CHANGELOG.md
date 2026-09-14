@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.10.0-beta — mặc định thông minh + cập nhật toàn diện
+
+### Mặc định cho site WordPress mới
+- `site add DOMAIN --wp` giờ tự động bật thêm (không cần chạy tay từng lệnh):
+  - `cache auto-purge on` + `cache ttl 1h` (đợt 2): trang được cache 1 giờ nhưng vẫn mới ngay khi sửa bài;
+  - `wp auto-update on --no-major` (đợt 3): tự cập nhật plugin/theme và core (trừ bản major) hằng ngày, có rollback nếu lỗi.
+- Cố ý **không** bật mặc định: Redis (tốn thêm RAM trên VPS 1GB), media optimize (tốn CPU mỗi lần upload), site limits/protect-admin (cần thông tin xác thực hoặc quyết định riêng của bạn).
+- `site add DOMAIN --wp --minimal` để giữ hành vi cũ (không bật 2 mục trên). Tắt sau khi tạo: `cecp-panel cache auto-purge DOMAIN off` / `cecp-panel wp auto-update DOMAIN off`.
+- Áp dụng cho site cũ: chạy tay `cecp-panel cache auto-purge DOMAIN on` và/hoặc `cecp-panel wp auto-update DOMAIN on` — không tự động áp cho site đã có sẵn, để không thay đổi hành vi ngoài ý muốn.
+
+### `cecp-panel update all` — cập nhật toàn bộ trong một lệnh
+- Gộp mọi phần cần cập nhật định kỳ: gói hệ thống (nginx, PHP mọi bản Remi, MariaDB, Redis, restic, rclone, certbot, fail2ban qua `dnf`/`apt`), `wp-cli`, **WordPress (core/plugin/theme) của mọi site** (dùng lại cơ chế an toàn của `wp update`: bản sao trước, kiểm tra sức khỏe, tự rollback nếu site không lên), rồi panel chính nó (nếu đã cấu hình mirror).
+- Mỗi bước cách ly trong subshell: một bước lỗi không làm dừng các bước còn lại; cuối cùng in tổng kết (site nào cập nhật/rollback/lỗi) và gửi sự kiện `update_all_done` (n8n/webhook).
+- Sau khi cập nhật gói hệ thống: tự reload nginx/PHP-FPM, restart ngắn MariaDB/Redis để dùng bản mới, chạy `monitor run` để tự sửa service nào bị tắt, và báo nếu cần **reboot** (kernel/glibc đổi) — panel không tự reboot.
+- Bỏ qua từng phần khi cần: `update all --skip-os` (chỉv WordPress+wp-cli, an toàn hơn khi không muốn đụng gói hệ thống), `--skip-wp`, `--skip-panel`.
+- `update enable-cron` / `disable-cron`: chạy `update all` tự động hằng tuần (CN 04:10 UTC). Site đang là bản staging (`staging_of`) được bỏ qua trong vòng lặp WordPress.
+- `update wp-cli`: cập nhật wp-cli.phar (có kiểm sha512) ngay cả khi đã cài — trước đây `wp_ensure_cli` chỉ cài khi thiếu, không bao giờ cập nhật.
+
+### Nâng cấp từ 1.9
+```bash
+cecp-panel update wp-cli                 # một lần
+cecp-panel update enable-cron            # tuỳ chọn: tự cập nhật hằng tuần
+# Site cũ muốn có mặc định mới (tuỳ chọn, từng site):
+cecp-panel cache auto-purge example.com on
+cecp-panel wp auto-update example.com on --no-major
+```
+
 ## 1.9.0-beta — vận hành agency (đợt 3)
 
 ### Staging 1 lệnh (B1)

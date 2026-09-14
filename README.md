@@ -1,4 +1,4 @@
-# CECP Panel v1.9.0-beta
+# CECP Panel v1.10.0-beta
 
 Standalone VPS panel (LarVPS-style). **One install** = full stack + menu.
 
@@ -41,6 +41,7 @@ bash tests/integration/run.sh       # AlmaLinux 9 + systemd, cài panel và ch�
 |------|----------|
 | Domains | `site add/remove/list/duplicate`, SFTP per site, `protect-admin` (basic auth / IP allowlist), `site auth` (whole site) |
 | Agency | `site staging` + `staging-push` (rollback), safe `wp update` / `auto-update` / `rollback`, `site limits` (CPU/RAM per site), `php config`, `db export/import/shell/slow-report`, `status --json` |
+| Updates | `update all` (OS + wp-cli + every WordPress site + panel, with rollback) + `update enable-cron`; new `site add --wp` turns on cache auto-purge + WordPress auto-update by default |
 | SSL | Let's Encrypt webroot or Cloudflare DNS-01 (`--dns`, `--wildcard`, subdomain sites reuse the wildcard), HTTPS + HTTP/2 template, `ssl hsts` |
 | DNS | Cloudflare A records (`/etc/cecp-panel/credentials.env`) |
 | Backup | restic → Google Drive / local / sftp, tiered retention, `verify`, `restore --live` with rollback |

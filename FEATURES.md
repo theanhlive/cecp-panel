@@ -1,6 +1,12 @@
-# CECP Panel v1.9 — tính năng
+# CECP Panel v1.10 — tính năng
 
 **Ưu tiên:** Bảo mật → WordPress → Tốc độ → UX → Cloudflare edge → Advanced optional
+
+## v1.10 (mặc định thông minh + cập nhật toàn diện) — chi tiết: [CHANGELOG.md](CHANGELOG.md)
+
+- `site add DOMAIN --wp` tự bật cache auto-purge + TTL 1h, WordPress auto-update (minor); `--minimal` để giữ hành vi cũ
+- `cecp-panel update all`: cập nhật OS + wp-cli + WordPress mọi site + panel trong một lệnh, có rollback từng phần; `update enable-cron` để chạy hằng tuần
+- `update wp-cli`: cập nhật wp-cli.phar ngay cả khi đã cài (trước đây chỉ cài khi thiếu)
 
 ## v1.9 (vận hành agency) — chi tiết: [CHANGELOG.md](CHANGELOG.md)
 

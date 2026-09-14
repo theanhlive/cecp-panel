@@ -30,7 +30,7 @@ Body:
   "domain": "shop.example.com",
   "host": "vps1.example.com",
   "ts": "2026-09-13T08:00:00Z",
-  "panel_version": "1.9.0-beta",
+  "panel_version": "1.10.0-beta",
   "details": { "http_code": "502", "ttfb_ms": 15002 }
 }
 ```
@@ -53,6 +53,7 @@ Body:
 | `restore_done` / `restore_rolled_back` / `restore_failed` | info / critical / critical | kết quả `backup restore --live` |
 | `wp_update_done` / `wp_update_rolled_back` / `wp_update_failed` | info / critical / critical | `wp update` (thủ công hoặc auto-update); `details.plan` = danh sách core/plugin/theme, `details.reason` = lý do rollback |
 | `staging_pushed` / `staging_push_rolled_back` / `staging_push_failed` | info / critical / critical | kết quả `site staging-push` |
+| `update_all_done` | info | tóm tắt `cecp-panel update all` (OS, wp-cli, từng site WordPress, panel); `details.raw` là văn bản nhiều dòng |
 | `ssl_expiring`, `disk_high` (cron `notify health` hằng ngày) | warning | tóm tắt hằng ngày |
 | `webhook_configured`, `test` | info | cấu hình / thử |
 
