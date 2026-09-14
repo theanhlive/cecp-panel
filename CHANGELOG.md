@@ -7,10 +7,11 @@
 - Ghi chéo (1 site ghi/cấy file sang site khác) đã được chặn từ trước (docroot không có quyền ghi cho "other", thư mục `tmp` riêng đã là `700`) — lỗ hổng chỉ ở chiều đọc.
 
 ### Vá
-- `cecp-panel security harden-docroot [DOMAIN|--all]` (mới): gỡ quyền đọc "other" khỏi docroot bằng `setfacl -m o::---`, rồi cấp lại đúng quyền đọc/traverse cho riêng user `nginx` qua ACL (`setfacl -m u:nginx:rx`) — không còn world-readable, nginx vẫn phục vụ file tĩnh bình thường. Áp dụng ACL mặc định (`-d`) nên mọi file WordPress/wp-cli tạo sau này tự kế thừa, không cần chạy lại.
-- Tự động áp dụng cho: site mới (`site add`), site nhân bản (`site duplicate` — rsync trước đó có thể phục hồi lại mode bit gốc nên hardening chạy lại sau khi copy), và sau mọi lần `backup restore` (tarball backup cũ có thể còn mode world-readable từ trước bản vá).
+- `cecp-panel security harden-docroot [DOMAIN|--all]` (mới): gỡ quyền đọc "other" khỏi docroot bằng `setfacl -m o::---`, rồi cấp lại cho riêng user `nginx` — nhưng **không cấp trên file `.php` (kể cả `wp-config.php`)**, chỉ trên file tĩnh (ảnh, css, js...) + quyền traverse (`--x`, không listing) trên thư mục. Lý do: nginx không bao giờ tự đọc nội dung file `.php` — request `.php` luôn được proxy sang PHP-FPM pool riêng của site đó qua `fastcgi_pass`, nginx chỉ cần biết file tồn tại (`stat`, cần `x` trên thư mục cha, không cần `r`). Bỏ hẳn quyền đọc `.php` khỏi ACL của nginx nghĩa là **cho dù có tiến trình nào đó (vô tình hay cố ý) chạy chung danh tính `nginx`** (ví dụ 1 site cấu hình tay ngoài panel có PHP-FPM pool set `user = nginx` thay vì user riêng của site), tiến trình đó vẫn không đọc được `wp-config.php` của bất kỳ site nào — không có gì để "thừa hưởng" qua ACL cả.
+- Áp dụng ACL mặc định (`-d`) là `rx` đồng nhất cho file/thư mục mới tạo (để upload ảnh mới hoạt động ngay, không cần chờ) — riêng `.php` mới tạo sẽ tạm có ACL `nginx:rx` cho tới lần hardening kế tiếp thì bị gỡ; vì vậy hardening được chạy lại tự động sau **mọi thao tác WordPress core/plugin/theme update** (`cecp-panel wp update`), không chỉ lúc tạo site.
+- Tự động áp dụng cho: site mới (`site add`, chạy 2 lần — trước và sau khi cài WordPress, vì lần đầu docroot còn rỗng), site nhân bản (`site duplicate` — rsync có thể phục hồi lại mode bit gốc), sau mọi lần `backup restore`, và sau mọi lần `wp update`.
 - `cecp-panel security apply-production` giờ chạy `harden-docroot --all` cho toàn bộ site hiện có như một bước trong quy trình production hoá — **cần chạy lại lệnh này trên site đã tồn tại để áp bản vá** (site tạo mới sau 1.11.0-beta tự động có sẵn).
-- `cecp-panel security check` báo `FAIL` nếu `wp-config.php` của site nào đó vẫn world-readable, kèm lệnh sửa.
+- `cecp-panel security check` báo `FAIL` nếu `wp-config.php` của site nào đó vẫn world-readable HOẶC vẫn còn ACL đọc cho `nginx`, kèm lệnh sửa.
 
 ### Nâng cấp từ 1.10
 ```bash

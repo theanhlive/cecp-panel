@@ -489,6 +489,11 @@ security_self_check() {
       else
         _ck PASS "$dom: wp-config.php not world-readable"
       fi
+      if command -v getfacl &>/dev/null && getfacl -p "$wpcfg" 2>/dev/null | grep -qE '^user:nginx:'; then
+        _ck FAIL "$dom: wp-config.php still has an nginx ACL read entry (any process sharing the nginx identity — e.g. a misconfigured PHP-FPM pool — can read it) — run: cecp-panel security harden-docroot $dom"
+      else
+        _ck PASS "$dom: wp-config.php has no nginx ACL entry"
+      fi
     fi
   done
   shopt -u nullglob

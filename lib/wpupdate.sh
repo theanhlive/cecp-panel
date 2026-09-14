@@ -144,6 +144,9 @@ print("; ".join(parts))
     wp_site_exec "$domain" language theme update --all --quiet || true
   } >>"$log" 2>&1
   rm -f "$docroot/.maintenance"
+  # core/plugin/theme update is the main way new .php files land post-install; the nginx
+  # ACL grant on them needs narrowing back down each time (see site_harden_docroot_perms).
+  site_harden_docroot_perms "$domain" || true
   # New code must be what the checks see: OPcache would serve the old files for up to 60 s.
   php_fpm_reload_all >/dev/null 2>&1 || true
   optimize_purge_cache "$domain" >/dev/null 2>&1 || true

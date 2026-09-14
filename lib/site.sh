@@ -15,11 +15,23 @@ site_ensure_tmp() {
 # it directly off disk — including another site's PHP-FPM worker, which open_basedir
 # confines from reaching other sites' files *through PHP*, but not through a plain
 # read() syscall if it ever gets OS-level code execution outside that jail. wp-config.php
-# (DB credentials, auth salts) is exactly the file that matters here. nginx still needs
-# read+traverse to serve static assets and isn't in any site's private group, so it gets
-# a named ACL entry instead of blanket "other" access. Default ACLs make this stick: any
-# file WordPress/wp-cli creates later under docroot inherits the same (no world-read,
-# nginx explicitly allowed) without re-running this.
+# (DB credentials, auth salts) is exactly the file that matters here.
+#
+# nginx needs SOME access to serve static assets, and isn't in any site's private group,
+# so it gets a named ACL entry rather than blanket "other" access — but nginx *never*
+# opens/reads .php file content itself (a .php request is always proxied to this site's
+# own PHP-FPM pool via fastcgi_pass; nginx only needs to traverse directories and read
+# non-PHP files it actually serves). So .php files get NO nginx ACL entry at all. This
+# matters beyond nginx itself: if ANY process ever ends up sharing the "nginx" Linux
+# identity (a misconfigured PHP-FPM pool set to `user = nginx` instead of its own site
+# user, e.g. a manually-added site outside the panel), it still can't read wp-config.php
+# or any other site's PHP source through this grant — there's nothing to inherit.
+#
+# Default ACLs (-d) make new files/dirs usable immediately without re-running this: they
+# get rx uniformly (files need to be servable — mostly media uploads, never .php in
+# practice for how WordPress writes new files day to day), narrowed back down to "no
+# nginx entry" on .php specifically next time this runs (also hooked into wp_update_site
+# right after core/plugin/theme updates, the main source of new .php files post-install).
 site_harden_docroot_perms() {
   local domain="${1,,}" site_user docroot
   site_user="$(site_json_get "$domain" site_user)"
@@ -33,8 +45,15 @@ site_harden_docroot_perms() {
   fi
   setfacl -R -m o::--- "$docroot" 2>/dev/null || return 1
   setfacl -R -d -m o::--- "$docroot" 2>/dev/null || true
+  # Functional default for anything created from now on (mostly media uploads; dirs need
+  # traversal too) — narrowed for .php specifically below, on whatever exists right now.
   setfacl -R -m u:nginx:rx "$docroot" 2>/dev/null || true
   setfacl -R -d -m u:nginx:rx "$docroot" 2>/dev/null || true
+  # Directories only need search (traversal), not listing — nginx never directory-lists
+  # (no autoindex); stricter than the rx default above, applied to what exists today.
+  find "$docroot" -type d -exec setfacl -m u:nginx:--x {} + 2>/dev/null
+  # .php: no nginx ACL entry at all, existing files only (see comment above for new ones).
+  find "$docroot" -type f -name '*.php' -exec setfacl -x u:nginx {} + 2>/dev/null
 }
 
 # Retrofit every existing site (upgrade path — new sites get this at creation time).
@@ -538,6 +557,12 @@ EOF
 EOF
     chown "${site_user}:${site_user}" "$docroot/index.html"
   fi
+
+  # The first harden call (above) ran against an empty docroot, before WordPress core
+  # (or index.html) existed — those new files inherited the default ACL's uniform rx,
+  # wp-config.php included. Re-sweep now that content actually exists to narrow .php back
+  # down before the site ever goes live.
+  site_harden_docroot_perms "$domain"
 
   php_fpm_restart_for_new_pool php-fpm
   nginx_test_and_reload || panel_die "nginx rejected the new vhost for $domain (config rolled back)"
