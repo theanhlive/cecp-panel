@@ -79,7 +79,7 @@ CECP Panel v$CECP_PANEL_VERSION
     php config DOMAIN [memory_limit=512M upload_max_filesize=128M max_execution_time=300 ...] | DOMAIN --reset [KEY]
   cecp-panel update check|mirror|panel|component|os|wp-cli
     update all [--skip-os] [--skip-wp] [--skip-panel]   # OS + wp-cli + every WP site + panel
-    update enable-cron|disable-cron                     # weekly (Sun 04:10 UTC) `update all`
+    update enable-cron|disable-cron                     # weekly (Sun 04:10 UTC), runs update all
   cecp-panel wp harden|optimize|cron|status DOMAIN
     wp update DOMAIN [--exclude a,b] [--no-major] [--dry-run]    # safety copy + health check + auto rollback
     wp auto-update DOMAIN on [--exclude a,b] [--no-major] | off | status

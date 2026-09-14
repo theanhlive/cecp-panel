@@ -237,11 +237,39 @@ def check_heredoc_stdin(files, problems):
                                 "sys.stdin (that is the script itself) — pass data via argv/env")
 
 
+def check_heredoc_backtick(files, problems):
+    """An unquoted heredoc (<<EOF, not <<'EOF') is expanded by the shell like a double-quoted
+    string: an unescaped backtick in it runs as a command substitution, not literal text (1.10
+    usage() bug: a markdown-style `update all` in the help text ran "update all" as a command
+    and printed "update: command not found" every time `cecp-panel help` was called)."""
+    heredoc_re = re.compile(r"<<(-?)\s*(['\"]?)(\w+)\2[^\n]*\n")
+    for f in files:
+        text = read(f)
+        for m in heredoc_re.finditer(text):
+            if m.group(2):  # quoted delimiter: no shell expansion inside, safe
+                continue
+            delim, strip_tabs = m.group(3), m.group(1)
+            lines = []
+            for line in text[m.end():].split("\n"):
+                check = line.lstrip("\t") if strip_tabs else line
+                if check == delim:
+                    break
+                lines.append(line)
+            body = "\n".join(lines)
+            # A backtick counts only if not escaped with a backslash.
+            if re.search(r"(?<!\\)`", body):
+                problems.append(f"{rel(f)}:{text.count(chr(10), 0, m.start()) + 1}: unquoted heredoc "
+                                f"<<{delim} has an unescaped backtick — bash runs it as a command "
+                                "substitution, not literal text (escape it \\` or quote the delimiter <<'"
+                                f"{delim}')")
+
+
 def main():
     problems = []
     check_baseline(text_files(), problems)
     check_heuristic(shell_files(), problems)
     check_python(shell_files(), problems)
+    check_heredoc_backtick(shell_files(), problems)
     check_heredoc_stdin(shell_files(), problems)
     for p in sorted(set(problems)):
         print(p)
