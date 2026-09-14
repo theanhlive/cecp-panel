@@ -22,6 +22,29 @@ wp_ensure_cli() {
   rm -rf "$tmp"
 }
 
+# cecp-panel update wp-cli — re-download and verify even if already installed (wp_ensure_cli
+# only installs when missing). Used by `update all` and standalone.
+wp_update_cli() {
+  require_root
+  local base="https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar" tmp old new
+  old="$([[ -x "$WP_CLI_BIN" ]] && "$WP_CLI_BIN" --allow-root cli version 2>/dev/null | awk '{print $NF}' || echo "none")"
+  tmp="$(mktemp -d)"
+  curl -fsSL "$base/wp-cli.phar" -o "$tmp/wp-cli.phar" || { rm -rf "$tmp"; panel_die "Could not download wp-cli.phar"; }
+  curl -fsSL "$base/wp-cli.phar.sha512" -o "$tmp/wp-cli.phar.sha512" || { rm -rf "$tmp"; panel_die "Could not download wp-cli.phar.sha512"; }
+  if [[ "$(sha512sum "$tmp/wp-cli.phar" | cut -d' ' -f1)" != "$(tr -dc '0-9a-f' <"$tmp/wp-cli.phar.sha512")" ]]; then
+    rm -rf "$tmp"
+    panel_die "wp-cli.phar checksum mismatch — not updated"
+  fi
+  install -m 755 "$tmp/wp-cli.phar" "$WP_CLI_BIN"
+  rm -rf "$tmp"
+  new="$("$WP_CLI_BIN" --allow-root cli version 2>/dev/null | awk '{print $NF}')"
+  if [[ "$old" == "$new" ]]; then
+    panel_log "wp-cli already at the latest version ($new)"
+  else
+    panel_log "wp-cli updated: $old -> $new"
+  fi
+}
+
 wp_site_meta() {
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' \
     "$(site_meta_path "$(wp_domain_lc "$1")")" "$2"

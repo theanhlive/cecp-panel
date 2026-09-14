@@ -391,6 +391,7 @@ site_list() {
 site_add() {
   local domain="${1,,}"
   local install_wp="${2:-n}"
+  local smart_defaults="${3:-y}"
   require_root
   validate_domain "$domain"
 
@@ -470,6 +471,19 @@ EOF
     site_install_wordpress "$domain" "$docroot" "$site_user" "$db_name" "$db_user" "$db_pass"
     wp_harden_site "$domain"
     wp_install_system_cron "$domain"
+    if [[ "$smart_defaults" =~ ^[yY] ]]; then
+      # Sensible defaults for a new WordPress site, so the operator does not have to run
+      # these by hand every time. Left off: Redis (extra RAM on a 1 GB VPS), media optimize
+      # (CPU per upload), site limits/protect-admin (need credentials or a deliberate choice).
+      cache_auto_purge "$domain" on \
+        || panel_log "WARN: could not enable cache auto-purge for $domain (site created anyway)"
+      cache_ttl "$domain" 1h \
+        || panel_log "WARN: could not raise the cache TTL for $domain (site created anyway)"
+      wp_auto_update "$domain" on --no-major \
+        || panel_log "WARN: could not enable WordPress auto-update for $domain (site created anyway)"
+      panel_log "Smart defaults applied: cache auto-purge + 1h TTL, WordPress auto-update (minor/security only)"
+      panel_log "  Turn off: cecp-panel cache auto-purge $domain off | wp auto-update $domain off"
+    fi
   else
     cat >"$docroot/index.html" <<EOF
 <!DOCTYPE html><html><head><title>${domain}</title></head>

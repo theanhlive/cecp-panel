@@ -3,7 +3,7 @@
 # shellcheck disable=SC2034  # globals consumed by other lib files
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.9.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.10.0-beta}"
 PANEL_ROOT="${PANEL_ROOT:-/opt/cecp-panel}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/cecp-panel}"
 ETC_DIR="/etc/cecp-panel"

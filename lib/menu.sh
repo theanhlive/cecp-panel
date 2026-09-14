@@ -380,6 +380,8 @@ menu_update() {
     echo " 5) Update mariadb"
     echo " 6) Update php (system)"
     echo " 7) Update all OS packages"
+    echo " 8) Update everything (OS + wp-cli + every WordPress site + panel)"
+    echo " 9) Periodic full update: enable/disable weekly cron"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -393,6 +395,11 @@ menu_update() {
       5) update_component mariadb ;;
       6) update_component php ;;
       7) update_component all ;;
+      8) update_all ;;
+      9)
+        read -r -p "on / off [on]: " a
+        if [[ "${a:-on}" == off ]]; then update_all_disable_cron; else update_all_enable_cron; fi
+        ;;
       0) break ;;
     esac
   done

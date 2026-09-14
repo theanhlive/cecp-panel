@@ -40,7 +40,7 @@ source "$PANEL_ROOT/lib/modsec.sh"
 source "$PANEL_ROOT/lib/logview.sh"
 source "$PANEL_ROOT/lib/menu.sh"
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.9.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.10.0-beta}"
 
 usage() {
   cat <<EOF
@@ -55,7 +55,9 @@ CECP Panel v$CECP_PANEL_VERSION
     site limits DOMAIN [--cpu 100] [--mem 1G] [--tasks 256] | off | show   # own PHP-FPM with CPU/RAM caps
     site auth DOMAIN on [--user NAME] | off | status | reset-password    # basic auth on the whole site
     site protect-admin DOMAIN on [--ip CIDR,...] [--no-auth] [--user NAME] | off | status | reset-password
-    site add DOMAIN [--wordpress|--wp] [--php 82] [--ssl] [--redis]
+    site add DOMAIN [--wordpress|--wp] [--php 82] [--ssl] [--redis] [--minimal]
+      --wp alone also enables: cache auto-purge + 1h TTL, WordPress auto-update (minor only)
+      --minimal skips those two (plain 5m cache, no auto-update)
   cecp-panel ssl list|issue|fix|renew|status|remove|hsts DOMAIN on|off|subdomains
     ssl issue DOMAIN [--dns] [--wildcard]      # DNS-01 via Cloudflare (no port 80 needed); wildcard = DOMAIN + *.DOMAIN
   cecp-panel dns list|add|point|ssl-mode
@@ -75,7 +77,9 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel onboard
   cecp-panel php list|install VER|set DOMAIN VER
     php config DOMAIN [memory_limit=512M upload_max_filesize=128M max_execution_time=300 ...] | DOMAIN --reset [KEY]
-  cecp-panel update check|mirror|panel|component|os
+  cecp-panel update check|mirror|panel|component|os|wp-cli
+    update all [--skip-os] [--skip-wp] [--skip-panel]   # OS + wp-cli + every WP site + panel
+    update enable-cron|disable-cron                     # weekly (Sun 04:10 UTC) `update all`
   cecp-panel wp harden|optimize|cron|status DOMAIN
     wp update DOMAIN [--exclude a,b] [--no-major] [--dry-run]    # safety copy + health check + auto rollback
     wp auto-update DOMAIN on [--exclude a,b] [--no-major] | off | status
@@ -96,8 +100,8 @@ EOF
 site_add_with_flags() {
   local dom="${1:-}"
   shift || true
-  [[ -n "$dom" ]] || panel_die "Usage: cecp-panel site add DOMAIN [--wordpress] [--php 82] [--ssl] [--redis]"
-  local wp=n php_ver="" do_ssl=0 do_redis=0
+  [[ -n "$dom" ]] || panel_die "Usage: cecp-panel site add DOMAIN [--wordpress] [--php 82] [--ssl] [--redis] [--minimal]"
+  local wp=n php_ver="" do_ssl=0 do_redis=0 smart=y
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --wordpress|--wp) wp=y; shift ;;
@@ -107,10 +111,11 @@ site_add_with_flags() {
       --php=*) php_ver="${1#--php=}"; shift ;;
       --ssl) do_ssl=1; shift ;;
       --redis) do_redis=1; shift ;;
+      --minimal) smart=n; shift ;;
       *) panel_die "Unknown flag: $1" ;;
     esac
   done
-  site_add "$dom" "$wp"
+  site_add "$dom" "$wp" "$smart"
   if [[ -n "$php_ver" ]]; then
     php_set_site_version "$dom" "$php_ver"
   fi
@@ -444,7 +449,11 @@ case "$cmd" in
       panel) require_root; update_panel "$@" ;;
       component) require_root; update_component "${1:-all}" ;;
       os) require_root; update_component os ;;
-      *) panel_die "Usage: cecp-panel update check|mirror|panel|component|os" ;;
+      wp-cli) require_root; wp_ensure_cli; wp_update_cli ;;
+      all) update_all "$@" ;;
+      enable-cron) update_all_enable_cron ;;
+      disable-cron) update_all_disable_cron ;;
+      *) panel_die "Usage: cecp-panel update check|mirror|panel|component|os|all|wp-cli|enable-cron|disable-cron" ;;
     esac
     ;;
   -h|--help|help) usage ;;
