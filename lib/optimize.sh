@@ -143,6 +143,14 @@ optimize_install_redis() {
   if command -v security_audit_log &>/dev/null; then
     security_audit_log "optimize redis-install"
   fi
+  # A Redis this panel never set up (no redis.env yet) but that is already running belongs to
+  # something else on the box — do not touch its config (requirepass, disabled persistence,
+  # bind, maxmemory) or a shared/multi-tenant VPS's other services could lose their connection
+  # or their data. Confirmed live: doing this on a VPS also running several unrelated custom
+  # services broke nothing only because none of them happened to be connected at that moment.
+  if [[ ! -f /etc/cecp-panel/redis.env ]] && systemctl is-active --quiet redis 2>/dev/null; then
+    panel_die "Redis is already running and was not installed by this panel (no /etc/cecp-panel/redis.env) — refusing to reconfigure it (could break another service using it). If you want the panel to manage it, back up /etc/redis/redis.conf yourself first, then set REDIS_PASSWORD etc. in /etc/cecp-panel/redis.env and re-run."
+  fi
   if [[ -f /etc/almalinux-release || -f /etc/rocky-release || -f /etc/redhat-release ]]; then
     dnf -y install redis 2>/dev/null || true
     dnf -y install php-pecl-redis php-redis 2>/dev/null || true
