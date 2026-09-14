@@ -11,6 +11,51 @@ site_ensure_tmp() {
   fi
 }
 
+# A docroot world-readable (644/755, the historical default) lets ANY local user read
+# it directly off disk — including another site's PHP-FPM worker, which open_basedir
+# confines from reaching other sites' files *through PHP*, but not through a plain
+# read() syscall if it ever gets OS-level code execution outside that jail. wp-config.php
+# (DB credentials, auth salts) is exactly the file that matters here. nginx still needs
+# read+traverse to serve static assets and isn't in any site's private group, so it gets
+# a named ACL entry instead of blanket "other" access. Default ACLs make this stick: any
+# file WordPress/wp-cli creates later under docroot inherits the same (no world-read,
+# nginx explicitly allowed) without re-running this.
+site_harden_docroot_perms() {
+  local domain="${1,,}" site_user docroot
+  site_user="$(site_json_get "$domain" site_user)"
+  docroot="$(site_json_get "$domain" docroot)"
+  [[ -n "$docroot" && -d "$docroot" ]] || return 0
+  if ! command -v setfacl &>/dev/null; then
+    (command -v dnf &>/dev/null && dnf install -y acl) \
+      || (command -v yum &>/dev/null && yum install -y acl) \
+      || (command -v apt-get &>/dev/null && apt-get install -y acl) \
+      || { panel_log "WARN: 'acl' package unavailable, $domain docroot left world-readable"; return 1; }
+  fi
+  setfacl -R -m o::--- "$docroot" 2>/dev/null || return 1
+  setfacl -R -d -m o::--- "$docroot" 2>/dev/null || true
+  setfacl -R -m u:nginx:rx "$docroot" 2>/dev/null || true
+  setfacl -R -d -m u:nginx:rx "$docroot" 2>/dev/null || true
+}
+
+# Retrofit every existing site (upgrade path — new sites get this at creation time).
+site_harden_docroot_perms_all() {
+  require_root
+  local f domain ok=0 fail=0
+  shopt -s nullglob
+  for f in "$SITES_DIR"/*.json; do
+    [[ -f "$f" ]] || continue
+    domain="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["domain"])' "$f")"
+    if site_harden_docroot_perms "$domain"; then
+      ok=$((ok + 1))
+    else
+      fail=$((fail + 1))
+      panel_log "WARN: docroot harden failed for $domain"
+    fi
+  done
+  shopt -u nullglob
+  panel_log "Docroot ACL hardening: $ok site(s) OK, $fail failed (world-read removed, nginx kept via ACL)"
+}
+
 # Let's Encrypt directory that serves DOMAIN: its own lineage, else a parent wildcard
 # (*.example.com covers shop.example.com — one label only, like the certificate itself).
 site_cert_dir() {
@@ -428,7 +473,7 @@ site_add() {
   chown root:root "/home/${site_user}"
   chmod 755 "/home/${site_user}"
   chown -R "${site_user}:${site_user}" "$docroot"
-  chmod 755 "$docroot"
+  chmod 750 "$docroot"
   if command -v getenforce &>/dev/null && [[ "$(getenforce)" != "Disabled" ]]; then
     setsebool -P httpd_enable_homedirs 1 2>/dev/null || true
     setsebool -P httpd_read_user_content 1 2>/dev/null || true
@@ -462,6 +507,8 @@ site_add() {
 }
 EOF
 )"
+
+  site_harden_docroot_perms "$domain"
 
   panel_log "PHP-FPM pool + nginx vhost ..."
   site_render_pool "$domain"
@@ -619,6 +666,10 @@ site_duplicate() {
   panel_log "Copying files $src → $dst ..."
   rsync -a --delete "$src_doc/" "$dst_doc/" 2>/dev/null || cp -a "$src_doc/." "$dst_doc/"
   chown -R "$(site_json_get "$dst" site_user):" "$dst_doc"
+  # rsync -a copies the source's own mode bits (possibly still world-readable, e.g. a site
+  # backed up before this hardening existed) onto every copied file — reapply after, not just
+  # at site_add's empty-docroot stage.
+  site_harden_docroot_perms "$dst"
   # The auto-purge config names the source site's queue; enable it on the copy separately.
   rm -f "$dst_doc/wp-content/mu-plugins/cecp-cache-purge.php" "$dst_doc/wp-content/mu-plugins/cecp-cache-purge.json"
   if [[ "$src_wp" == "True" ]]; then

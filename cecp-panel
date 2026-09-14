@@ -40,7 +40,7 @@ source "$PANEL_ROOT/lib/modsec.sh"
 source "$PANEL_ROOT/lib/logview.sh"
 source "$PANEL_ROOT/lib/menu.sh"
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.10.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.11.0-beta}"
 
 usage() {
   cat <<EOF
@@ -71,6 +71,7 @@ CECP Panel v$CECP_PANEL_VERSION
     backup verify DOMAIN|--all
   cecp-panel security fail2ban|fail2ban-full|firewall|ssh|ssh-key-only|ssh-harden|ssh-repair
   cecp-panel security ssh-port|mariadb-bind|apply-production|check|unattended|fix-perms
+  cecp-panel security harden-docroot [DOMAIN|--all]   # nginx ACL, removes world-read (cross-site read protection)
   cecp-panel system info|ensure-swap|swap|disk-clean|maintain|tune
   cecp-panel mysql secure
   cecp-panel agent install|status
@@ -284,7 +285,15 @@ case "$cmd" in
       check|self-check) security_self_check ;;
       unattended|auto-update) require_root; security_unattended_updates ;;
       fix-perms) require_root; security_fix_permissions ;;
-      *) panel_die "Usage: cecp-panel security ...|unattended" ;;
+      harden-docroot)
+        require_root
+        if [[ "${1:-}" == "--all" || -z "${1:-}" ]]; then
+          site_harden_docroot_perms_all
+        else
+          site_harden_docroot_perms "$1" && panel_log "Docroot ACL hardened: $1 (world-read removed, nginx kept via ACL)"
+        fi
+        ;;
+      *) panel_die "Usage: cecp-panel security ...|unattended|harden-docroot [DOMAIN|--all]" ;;
     esac
     ;;
   system)

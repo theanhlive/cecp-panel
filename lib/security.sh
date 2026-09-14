@@ -406,6 +406,7 @@ security_apply_production() {
 
   panel_log "Applying production security profile..."
   security_fix_permissions
+  site_harden_docroot_perms_all
   system_logrotate_install
   security_firewall_baseline
   security_nginx_hide_version
@@ -424,7 +425,7 @@ security_apply_production() {
   nginx_test_and_reload || true
   php_fpm_reload || true
   panel_log "Production profile applied:"
-  panel_log "  - permissions + log redaction, firewall baseline, server_tokens off, expose_php=Off"
+  panel_log "  - permissions + log redaction, docroot ACL harden (no cross-site world-read), firewall baseline, server_tokens off, expose_php=Off"
   panel_log "  - Cloudflare real IP, fail2ban (incremental, nginx deny), SSH harden (key root only)"
   panel_log "  - MariaDB bind localhost + baseline secure"
   panel_log "Next: cecp-panel site rebuild-vhost --all   # apply new vhost/pool templates"
@@ -478,6 +479,16 @@ security_self_check() {
     sock="$(site_json_get_or "$dom" php_sock "")"
     if [[ -S "$sock" && "$(stat -c %U "$sock")" != "nginx" ]] && id nginx &>/dev/null; then
       _ck FAIL "$dom: PHP-FPM socket owned by $(stat -c %U:%G "$sock") — nginx gets 502 (run: systemctl restart php-fpm)"
+    fi
+    local docroot wpcfg
+    docroot="$(site_json_get_or "$dom" docroot "")"
+    wpcfg="${docroot}/wp-config.php"
+    if [[ -f "$wpcfg" ]]; then
+      if (( (8#$(stat -c %a "$wpcfg" 2>/dev/null || echo 644) & 8#004) != 0 )); then
+        _ck FAIL "$dom: wp-config.php is world-readable (another site's user can read DB creds off disk) — run: cecp-panel security harden-docroot $dom"
+      else
+        _ck PASS "$dom: wp-config.php not world-readable"
+      fi
     fi
   done
   shopt -u nullglob

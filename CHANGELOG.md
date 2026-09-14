@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.11.0-beta — vá lỗ hổng đọc chéo giữa các site (world-readable docroot)
+
+### Vấn đề
+- Từ trước tới giờ, docroot mỗi site được tạo `755`/file `644` (world-readable) để nginx (không nằm trong group riêng của site nào) đọc được file tĩnh. Hệ quả: **user Linux của site A đọc thẳng được `wp-config.php` (mật khẩu DB, khóa salt) của site B** ở tầng hệ điều hành — không đi qua PHP nên `open_basedir`/`disable_functions` của pool PHP-FPM (vốn đã cô lập tốt ở tầng thực thi PHP) không chặn được đường này. Phát hiện và xác minh trực tiếp trên VPS production (theanh-lap-01) ngày 2026-09-14.
+- Ghi chéo (1 site ghi/cấy file sang site khác) đã được chặn từ trước (docroot không có quyền ghi cho "other", thư mục `tmp` riêng đã là `700`) — lỗ hổng chỉ ở chiều đọc.
+
+### Vá
+- `cecp-panel security harden-docroot [DOMAIN|--all]` (mới): gỡ quyền đọc "other" khỏi docroot bằng `setfacl -m o::---`, rồi cấp lại đúng quyền đọc/traverse cho riêng user `nginx` qua ACL (`setfacl -m u:nginx:rx`) — không còn world-readable, nginx vẫn phục vụ file tĩnh bình thường. Áp dụng ACL mặc định (`-d`) nên mọi file WordPress/wp-cli tạo sau này tự kế thừa, không cần chạy lại.
+- Tự động áp dụng cho: site mới (`site add`), site nhân bản (`site duplicate` — rsync trước đó có thể phục hồi lại mode bit gốc nên hardening chạy lại sau khi copy), và sau mọi lần `backup restore` (tarball backup cũ có thể còn mode world-readable từ trước bản vá).
+- `cecp-panel security apply-production` giờ chạy `harden-docroot --all` cho toàn bộ site hiện có như một bước trong quy trình production hoá — **cần chạy lại lệnh này trên site đã tồn tại để áp bản vá** (site tạo mới sau 1.11.0-beta tự động có sẵn).
+- `cecp-panel security check` báo `FAIL` nếu `wp-config.php` của site nào đó vẫn world-readable, kèm lệnh sửa.
+
+### Nâng cấp từ 1.10
+```bash
+cecp-panel security apply-production      # vá lỗ hổng world-readable cho toàn bộ site hiện có
+cecp-panel security check                 # xác nhận không còn cảnh báo wp-config.php world-readable
+```
+
 ## 1.10.0-beta — mặc định thông minh + cập nhật toàn diện
 
 ### Mặc định cho site WordPress mới

@@ -545,6 +545,10 @@ backup_restore_apply() {
   # Files: swap directories (same filesystem → near-atomic)
   mv "$docroot" "$old" && mv "$new" "$docroot" || return 1
   chown -R "${site_user}:${site_user}" "$docroot"
+  # The extracted tar carries whatever mode bits it had at backup time — may predate the
+  # nginx-ACL hardening (e.g. a snapshot from before this version), so reapply rather than
+  # trust it's already non-world-readable.
+  site_harden_docroot_perms "$domain"
   selinux_fixup_path "$docroot"
   if command -v getenforce &>/dev/null && [[ "$(getenforce)" != "Disabled" ]]; then
     chcon -R -t httpd_sys_content_t "$docroot" 2>/dev/null || true

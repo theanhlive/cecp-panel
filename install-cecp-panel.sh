@@ -8,7 +8,7 @@
 #
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.10.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.11.0-beta}"
 # Public mirror — one-command install for end users
 CECP_PANEL_RAW_BASE="${CECP_PANEL_RAW_BASE:-https://isharevn.net/downloads/cecp-panel}"
 
