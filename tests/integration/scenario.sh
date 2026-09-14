@@ -43,6 +43,7 @@ expect_cache() {
   curl -s -o /dev/null -D - "http://${3:-$D}$1" | tr -d '\r' | tee /dev/stderr \
     | awk -F': ' 'tolower($1)=="x-cecp-cache"{print $2}' | grep -qx "$2"
 }
+meta_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "/var/lib/cecp-panel/sites/$1.json" "$2"; }
 
 echo "=== CLI ==="
 check "cli reports version $VERSION" bash -c "cecp-panel help | head -1 | grep -qF '$VERSION'"
@@ -73,6 +74,19 @@ check "WP admin password never written to panel.log" bash -c "[ -n '$WPPASS' ] &
 check "panel.log is not world-readable" bash -c "[ \"\$(stat -c %a /var/log/cecp-panel/panel.log)\" = 640 ]"
 check "slug collision refused (a-b.test vs a.b.test)" \
   bash -c "cecp-panel site add a-b.test && ! cecp-panel site add a.b.test && cecp-panel site remove a-b.test"
+
+echo "=== Smart defaults for new WordPress sites ==="
+cache_default_ok() { [ "$(meta_of "$D" cache_autopurge)" = True ] && [ "$(meta_of "$D" cache_ttl)" = 1h ]; }
+check "site add --wp turns on cache auto-purge + 1h TTL by default" cache_default_ok
+autoupdate_default_ok() { [ "$(meta_of "$D" wp_autoupdate)" = True ] && [ "$(meta_of "$D" wp_update_no_major)" = True ]; }
+check "site add --wp turns on WordPress auto-update (minor only) by default" autoupdate_default_ok
+check "the purge watcher from the default is actually running" systemctl is-active --quiet "cecp-purge@${SLUG}.path"
+minimal_skips_defaults() {
+  cecp-panel site add minimal.test --wp --minimal || return 1
+  [ -z "$(meta_of minimal.test cache_autopurge)" ] && [ -z "$(meta_of minimal.test wp_autoupdate)" ] && [ -z "$(meta_of minimal.test cache_ttl)" ]
+}
+check "--minimal skips both defaults (neither was ever applied)" minimal_skips_defaults
+check "site remove minimal.test" cecp-panel site remove minimal.test
 
 echo "=== SFTP / sshd guard ==="
 check "sftp-password writes a valid drop-in" \
@@ -415,6 +429,24 @@ GOOD="$(cut -d' ' -f1 /tmp/mirror/dist/SHA256SUMS)"
 rm -f /tmp/mirror/dist/SHA256SUMS
 check "missing SHA256SUMS is refused" bash -c "cecp-panel update panel 2>&1 | grep -q 'refusing an unverified update'"
 check "pinned --sha256 works" cecp-panel update panel "$VERSION" --sha256 "$GOOD"
+
+echo "=== Update everything (update all) ==="
+set_meta() { bash -c "source /opt/cecp-panel/lib/common.sh; site_json_set $1 $2 '$3'"; }
+check "update wp-cli (checksum verified, works even though wp-cli is already installed)" \
+  bash -c "cecp-panel update wp-cli && /usr/local/bin/wp --allow-root --version >/dev/null"
+set_meta "$D2" staging_of "fake-parent.test"
+check "update all --skip-os --skip-panel runs every step and finishes" \
+  bash -c "cecp-panel update all --skip-os --skip-panel | tee /tmp/update-all.out | grep -q 'update all: done'"
+check "wp-cli step ran" grep -q 'wp-cli: up to date' /tmp/update-all.out
+check "wordpress step updated the real site, skipped the site faked as a staging copy" \
+  grep -qF 'wordpress sites: 1 up to date/updated, 0 rolled back, 0 failed, 1 staging copies skipped' /tmp/update-all.out
+check "skipped steps say so" bash -c "grep -q 'os packages: skipped' /tmp/update-all.out && grep -q 'panel: skipped (--skip-panel)' /tmp/update-all.out"
+check "summary reached panel.log too" grep -q 'update all: summary' /var/log/cecp-panel/panel.log
+set_meta "$D2" staging_of ""
+d2_staging_flag_cleared() { [ -z "$(meta_of "$D2" staging_of)" ]; }
+check "$D2 no longer marked as staging" d2_staging_flag_cleared
+check "update enable-cron installs the weekly job" bash -c "cecp-panel update enable-cron && grep -q 'update all' /etc/cron.d/cecp-panel-update-all"
+check "update disable-cron removes it" bash -c "cecp-panel update disable-cron && [ ! -e /etc/cron.d/cecp-panel-update-all ]"
 
 echo "=== Image negotiation (WebP / AVIF sidecars) ==="
 UP="$DOCROOT/wp-content/uploads"
