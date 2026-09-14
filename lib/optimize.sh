@@ -408,9 +408,13 @@ opcache.max_accelerated_files=20000
 opcache.validate_timestamps=1
 opcache.revalidate_freq=60
 opcache.save_comments=1
-; JIT (PHP 8.0+; ignored on older)
-opcache.jit=1255
-opcache.jit_buffer_size=64M
+; JIT off by default: PHP 8.0's JIT is experimental and crashes (SIGSEGV) under real
+; WordPress traffic (hook-heavy, highly dynamic code is exactly what triggers its bugs) —
+; confirmed live on a production VPS. It also buys little for an I/O-bound web workload;
+; the real win here is opcache.enable=1 above. Turn on deliberately, per PHP version, only
+; after load-testing: opcache.jit=1255 / opcache.jit_buffer_size=64M.
+opcache.jit=disable
+opcache.jit_buffer_size=0
 EOF
 )"
 
@@ -444,7 +448,7 @@ EOF
     | awk '{print $1}' | while read -r svc; do
       systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
     done
-  panel_log "OPcache memory=${mem}M JIT=1255 buffer=64M"
+  panel_log "OPcache memory=${mem}M, JIT off by default (unstable under PHP 8.0; enable manually per version after testing)"
 }
 
 # ---------------------------------------------------------------------------

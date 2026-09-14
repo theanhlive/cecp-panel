@@ -120,6 +120,8 @@ check "sysctl file requests bbr" grep -qx 'net.ipv4.tcp_congestion_control = bbr
 check "tcp_bbr loaded at boot" grep -qx tcp_bbr /etc/modules-load.d/cecp-bbr.conf
 check "nginx perf conf installed" test -f /etc/nginx/conf.d/cecp-perf.conf
 check "opcache ini installed" test -f /etc/php.d/99-cecp-opcache.ini
+check "JIT is off by default (crashed php-fpm with SIGSEGV under real traffic on PHP 8.0 — see CHANGELOG)" \
+  bash -c "grep -qx 'opcache.jit=disable' /etc/php.d/99-cecp-opcache.ini && grep -qx 'opcache.jit_buffer_size=0' /etc/php.d/99-cecp-opcache.ini"
 check "mariadb tune installed" grep -q 'table_open_cache = 2000' /etc/my.cnf.d/cecp-tune.cnf
 check "redis secured and running" bash -c 'test -f /etc/cecp-panel/redis.env && systemctl is-active --quiet redis'
 check "redis config not world-readable" bash -c '[ "$(stat -c %a /etc/redis/cecp.conf)" = 640 ]'
