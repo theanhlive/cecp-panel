@@ -16,6 +16,10 @@
 - `pm.max_children` tự động giờ tính trên **RAM còn lại** sau buffer pool MariaDB + `maxmemory` Redis + ~300 MB cho hệ điều hành (tối thiểu ¼ RAM), chia cho số site, 2..32. Trước đây PHP được cấp 50% RAM (tối thiểu 4 tiến trình/site) *cộng thêm* MariaDB 30% + Redis 10% → VPS 1 GB nhiều site dễ hết RAM, OOM killer tắt MariaDB. Ví dụ VPS 1 GB, 1 site: 8 → 5 tiến trình.
 - `security check` cảnh báo khi tổng tiến trình PHP tối đa (kể cả giá trị đặt tay) vượt ngân sách RAM; `system info` hiện ngân sách này.
 
+### DNS Cloudflare
+- `dns point` / `dns add` tìm **đúng zone** của domain (dò từ tên đầy đủ lên dần, mọi zone token quản lý). Trước đây `dns point shop.khachhang.vn` tạo nhầm `shop.<CF_DEFAULT_ZONE>`, còn domain gốc `khachhang.vn` bị hiểu zone là `vn`. `dns ssl-mode MODE DOMAIN` nhận cả subdomain.
+- Tài liệu mới [docs/CLOUDFLARE_DNS.md](docs/CLOUDFLARE_DNS.md): quy trình chuẩn trỏ domain qua Cloudflare (token, thứ tự cấp SSL → trỏ DNS → SSL mode strict, subdomain/www, khoá IP gốc, kiểm tra, bảng lỗi 521/522/525/526); `AGENTS.md` + `CLAUDE.md` để AI Agent tự đọc.
+
 ### WordPress + SSL
 - `FORCE_SSL_ADMIN` chỉ bật khi site **đã có chứng chỉ**: trước đây site mới (`site add --wp`, chưa `ssl issue`) bị chuyển wp-admin sang `https://` không tồn tại → không vào được trang quản trị.
 - `ssl issue` giờ chuyển `home`/`siteurl` của WordPress sang `https://` (và `ssl remove` chuyển về `http://`) — chỉ khi URL đúng là `http(s)://DOMAIN`, không đụng URL tuỳ chỉnh/thư mục con. Trước đây mọi link nội bộ đều phải đi qua redirect 301.

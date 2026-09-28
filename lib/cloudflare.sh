@@ -62,17 +62,8 @@ cf_load() {
 }
 
 cf_zone_for_domain() {
-  local domain="${1,,}"
-  # try full domain as zone, then parent
-  local zid
-  zid="$(dns_zone_id "$domain" 2>/dev/null || true)"
-  if [[ -n "$zid" ]]; then echo "$domain"; return 0; fi
-  local parent="${domain#*.}"
-  if [[ "$parent" != "$domain" ]]; then
-    zid="$(dns_zone_id "$parent" 2>/dev/null || true)"
-    if [[ -n "$zid" ]]; then echo "$parent"; return 0; fi
-  fi
-  echo "${CF_DEFAULT_ZONE:-}"
+  # Longest active zone suffix (any depth), else the default zone as before.
+  dns_find_zone "$1" || echo "${CF_DEFAULT_ZONE:-}"
 }
 
 # Exit non-zero with the API errors unless a Cloudflare response says success.
