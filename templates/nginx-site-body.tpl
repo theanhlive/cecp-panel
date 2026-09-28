@@ -25,6 +25,11 @@
     location = /xmlrpc.php { deny all; }
     location ~ /\.(?!well-known) { deny all; }
     location ~* \.(?:env|git|svn|htaccess|htpasswd|sql|bak|log|ini|sh|swp)$ { deny all; }
+    # Backup/migration plugin archives: on Apache their .htaccess protects them, nginx ignores
+    # .htaccess, so the whole site + database would be downloadable by anyone guessing the name.
+    location ~* ^/wp-content/(?:ai1wm-backups|updraft|backups-dup-(?:lite|pro)|backup-db|backupwordpress-[^/]*|wpvividbackups|backuply|uploads/(?:backwpup-[^/]*|wp-migrate-db|wp-staging))/ { deny all; }
+    # Database dumps and editor/backup leftovers (wp-config.php.save, wp-config.php~, *.orig ...).
+    location ~* (?:\.(?:wpress|wpstg|sql\.(?:gz|zip|bz2|xz)|dump|orig|old|save|swo)|~)$ { deny all; }
 
     # Login form: tight per-IP rate limit (bots get 429 and then a fail2ban ban); never cached.
     location = /wp-login.php {

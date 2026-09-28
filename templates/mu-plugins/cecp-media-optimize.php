@@ -115,6 +115,13 @@ final class Cecp_Media_Optimize {
         if (!is_file($path) || !is_readable($path)) {
             return;
         }
+        // wp_handle_upload already optimised this file and wp_generate_attachment_metadata
+        // hands it over again: a second lossy re-encode only degrades it (and burns CPU).
+        $marker = $path . '.cecp-opt';
+        clearstatcache(true, $path);
+        if (is_file($marker) && filemtime($marker) >= filemtime($path)) {
+            return;
+        }
         $cfg = self::config();
         $skip_kb = (int) ($cfg['skip_under_kb'] ?? 200);
         $size = filesize($path);
@@ -154,7 +161,6 @@ final class Cecp_Media_Optimize {
             self::maybe_write_sidecar($path, max(30, $quality - 20), 'avif');
         }
 
-        $marker = $path . '.cecp-opt';
         @file_put_contents($marker, gmdate('c') . " optimized\n");
     }
 
@@ -191,6 +197,11 @@ final class Cecp_Media_Optimize {
             @imagewebp($img, $out, $quality);
         }
         imagedestroy($img);
+        // nginx prefers the sidecar: one that is not smaller than the original only costs bandwidth.
+        clearstatcache(true, $out);
+        if (is_file($out) && filesize($out) >= filesize($path)) {
+            @unlink($out);
+        }
     }
 }
 

@@ -265,7 +265,10 @@ backup_stage_site() {
     return 1
   fi
   rm -f "$cnf"
-  if ! tar -C "$(dirname "$docroot")" -czf "$stage/files/public_html.tar.gz" "$(basename "$docroot")" 2>>"$BACKUP_LOG"; then
+  # Uncompressed on purpose: restic deduplicates (and, repository v2, compresses) by content, but
+  # gzip reshuffles the whole stream after the first changed byte — with .tar.gz every daily
+  # backup re-uploaded almost the entire site to Google Drive. Restores read both formats.
+  if ! tar -C "$(dirname "$docroot")" -cf "$stage/files/public_html.tar" "$(basename "$docroot")" 2>>"$BACKUP_LOG"; then
     rm -rf "$stage"
     echo "$(backup_now) $domain: tar of $docroot failed" >>"$BACKUP_LOG"
     return 1
@@ -472,6 +475,16 @@ backup_find_stage() {
   find "$1" -type f -name site.json -path '*backup-staging*' -printf '%h\n' 2>/dev/null | head -1
 }
 
+# File archive of a stage: public_html.tar (1.12+) or public_html.tar.gz (older snapshots).
+backup_stage_archive() {
+  local f
+  for f in "$1/files/public_html.tar" "$1/files/public_html.tar.gz"; do
+    [[ -f "$f" ]] && { echo "$f"; return 0; }
+  done
+  echo "$1/files/public_html.tar"
+  return 1
+}
+
 # cecp-panel backup restore DOMAIN SNAPSHOT_ID|latest [--live [--dry-run] [--yes]] [--target DIR] [--repo REPO]
 # Legacy positional form still works: backup restore DOMAIN SNAPSHOT_ID [TARGET_DIR] [RESTIC_REPO]
 backup_restore() {
@@ -540,7 +553,8 @@ backup_restore_apply() {
   old="${docroot}.pre-restore-${stamp}"
   rm -rf "$new.tmp" "$new"
   mkdir -p "$new.tmp"
-  tar -C "$new.tmp" -xzf "$archive" || { rm -rf "$new.tmp"; return 1; }
+  # -xf, not -xzf: GNU tar detects the compression itself (.tar backups, .tar.gz safety copies).
+  tar -C "$new.tmp" -xf "$archive" || { rm -rf "$new.tmp"; return 1; }
   mv "$new.tmp/$(basename "$docroot")" "$new" && rmdir "$new.tmp" || return 1
   # Files: swap directories (same filesystem → near-atomic)
   mv "$docroot" "$old" && mv "$new" "$docroot" || return 1
@@ -572,7 +586,7 @@ backup_restore_apply() {
 backup_restore_live() {
   local domain="$1" snapshot_id="$2" dry="$3" yes="$4"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site $domain does not exist here — create it first: cecp-panel site add $domain"
-  local stamp work stage tables snap_time code
+  local stamp work stage archive tables snap_time code
   stamp="$(date +%Y%m%d_%H%M%S)"
   work="$RESTORE_DIR/$(domain_slug "$domain")-${stamp}"
   (umask 077; mkdir -p "$work")
@@ -582,14 +596,15 @@ backup_restore_live() {
     || { rm -rf "$work"; panel_die "Snapshot $snapshot_id (tag $domain) could not be restored (see $BACKUP_LOG)"; }
   stage="$(backup_find_stage "$work/snap")"
   [[ -n "$stage" && -s "$stage/database.sql" ]] || { rm -rf "$work"; panel_die "Snapshot has no CECP site backup (database.sql missing)"; }
-  tar -tzf "$stage/files/public_html.tar.gz" >/dev/null 2>&1 || { rm -rf "$work"; panel_die "File archive in snapshot is unreadable"; }
+  archive="$(backup_stage_archive "$stage")" && tar -tf "$archive" >/dev/null 2>&1 \
+    || { rm -rf "$work"; panel_die "File archive in snapshot is unreadable"; }
   tables="$(grep -c '^CREATE TABLE' "$stage/database.sql" || true)"
   snap_time="$(restic snapshots "$snapshot_id" --tag "$domain" --json 2>/dev/null \
     | python3 -c 'import json,sys; s=json.load(sys.stdin); print(s[-1]["time"][:19] if s else "?")' 2>/dev/null || echo "?")"
   echo "=== Live restore plan: $domain ==="
   echo "  snapshot:  $snapshot_id (taken $snap_time UTC)"
   echo "  database:  $(site_json_get "$domain" db_name) ← ${tables} tables"
-  echo "  files:     $(site_json_get "$domain" docroot) ← $(du -h "$stage/files/public_html.tar.gz" | cut -f1) archive"
+  echo "  files:     $(site_json_get "$domain" docroot) ← $(du -h "$archive" | cut -f1) archive"
   echo "  safety:    current files + DB saved to $work/pre (automatic rollback on failure)"
   if (( dry )); then
     rm -rf "$work"
@@ -606,7 +621,7 @@ backup_restore_live() {
   panel_log "Saving current state of $domain ..."
   backup_restore_safety_copy "$domain" "$work/pre" || { rm -rf "$work"; panel_die "Could not save the current site — live restore aborted, nothing changed"; }
   panel_log "Restoring $domain from $snapshot_id ..."
-  if backup_restore_apply "$domain" "$stage/database.sql" "$stage/files/public_html.tar.gz" "$stamp"; then
+  if backup_restore_apply "$domain" "$stage/database.sql" "$archive" "$stamp"; then
     sleep 1
     if code="$(site_http_check "$domain")"; then
       rm -rf "$work/snap"
@@ -664,7 +679,7 @@ backup_verify_site() {
     stage="$(backup_find_stage "$tmp")"
     if [[ -z "$stage" || ! -s "$stage/database.sql" ]]; then
       err="snapshot has no database dump"
-    elif ! tar -tzf "$stage/files/public_html.tar.gz" >/dev/null 2>&1; then
+    elif ! tar -tf "$(backup_stage_archive "$stage")" >/dev/null 2>&1; then
       err="file archive is unreadable"
     else
       vdb="cecp_verify_$(rand_alnum 8 | tr '[:upper:]' '[:lower:]')"

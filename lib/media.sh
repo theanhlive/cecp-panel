@@ -325,9 +325,14 @@ PY
   fi
 }
 
+# Runs as the SITE user, never root: uploads/ is writable by the site, so a compromised
+# WordPress could plant symlinks (photo.webp -> /etc/shadow) and a root process writing the
+# WebP/AVIF sidecars or .cecp-opt markers would overwrite system files through them.
 media_run_python() {
-  # Args: DOCROOT MAX_W MAX_H QUALITY SKIP_KB BATCH WEBP DRY_RUN [AVIF]
-  python3 - "$@" <<'PY'
+  # Args: SITE_USER DOCROOT MAX_W MAX_H QUALITY SKIP_KB BATCH WEBP DRY_RUN [AVIF]
+  local site_user="$1"
+  shift
+  (cd / && runuser -u "$site_user" -- python3 - "$@") <<'PY'
 import os, sys, time, json
 from pathlib import Path
 
@@ -422,6 +427,23 @@ if avif and not (pil_avif or im_avif):
     stats["avif_note"] = "no AVIF encoder (Pillow>=11.2 or ImageMagick with libheif); only WebP written"
 
 
+def to_rgb_or_rgba(im):
+    """RGB/RGBA for WebP/AVIF, keeping transparency (palette PNG logos lost it: black background)."""
+    if im.mode in ("RGB", "RGBA"):
+        return im
+    alpha = im.mode in ("LA", "PA", "RGBa", "La") or "transparency" in im.info
+    return im.convert("RGBA" if alpha else "RGB")
+
+def drop_if_not_smaller(sidecar: Path, original: Path):
+    """A sidecar at least as big as the original only costs bandwidth: nginx would prefer it."""
+    try:
+        if sidecar.is_file() and sidecar.stat().st_size >= original.stat().st_size:
+            sidecar.unlink()
+            return False
+    except OSError:
+        return False
+    return sidecar.is_file()
+
 def write_avif(path: Path):
     """photo.jpg -> photo.avif (same name the nginx negotiation looks for). Best effort."""
     if not avif:
@@ -430,9 +452,7 @@ def write_avif(path: Path):
     try:
         if pil_avif:
             with Image.open(path) as im:
-                im = ImageOps.exif_transpose(im)
-                if im.mode not in ("RGB", "RGBA"):
-                    im = im.convert("RGBA" if "A" in im.mode else "RGB")
+                im = to_rgb_or_rgba(ImageOps.exif_transpose(im))
                 im.save(out, "AVIF", quality=max(30, quality - 20))
         elif im_avif:
             subprocess.run([im_bin, str(path), "-quality", str(max(30, quality - 20)), str(out)],
@@ -441,19 +461,19 @@ def write_avif(path: Path):
             return False
     except Exception:
         return False
-    if out.is_file() and out.stat().st_size >= path.stat().st_size:
-        out.unlink()  # AVIF that is not smaller only costs bandwidth-negotiation complexity
-        return False
-    return out.is_file()
+    return drop_if_not_smaller(out, path)
 
 def optimize_pil(path: Path):
     before = path.stat().st_size
     if before < skip_under:
         return "skip", before, before, False
     with Image.open(path) as im:
+        # Stripping the colour profile shifts colours (Display P3 photos from phones look dull).
+        icc = im.info.get("icc_profile")
         im = ImageOps.exif_transpose(im)
         w, h = im.size
-        if w > max_w or h > max_h:
+        resized = w > max_w or h > max_h
+        if resized:
             resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
             im.thumbnail((max_w, max_h), resample)
         ext = path.suffix.lower()
@@ -468,22 +488,27 @@ def optimize_pil(path: Path):
             save_kw = dict(format="PNG", optimize=True)
         else:
             return "skip", before, before, False
+        if icc:
+            save_kw["icc_profile"] = icc
         if dry:
             return "dry", before, before, False
         tmp = path.with_suffix(path.suffix + ".cecp-tmp")
         im.save(tmp, **save_kw)
-        tmp.replace(path)
+        # Re-encoding an already optimised file at the same size often makes it BIGGER (and
+        # always a bit worse): keep the original unless the new one is smaller.
+        if resized or tmp.stat().st_size < before:
+            tmp.replace(path)
+        else:
+            tmp.unlink()
         after = path.stat().st_size
         webp_ok = False
         if webp and ext in (".jpg", ".jpeg", ".png"):
             webp_path = path.with_suffix(".webp")
             try:
-                im2 = Image.open(path)
-                im2 = ImageOps.exif_transpose(im2)
-                if im2.mode not in ("RGB", "RGBA"):
-                    im2 = im2.convert("RGB")
-                im2.save(webp_path, "WEBP", quality=quality, method=4)
-                webp_ok = True
+                with Image.open(path) as im2:
+                    im2 = to_rgb_or_rgba(ImageOps.exif_transpose(im2))
+                    im2.save(webp_path, "WEBP", quality=quality, method=4, **({"icc_profile": icc} if icc else {}))
+                webp_ok = drop_if_not_smaller(webp_path, path)
             except Exception:
                 webp_ok = False
         if write_avif(path):
@@ -508,8 +533,10 @@ def optimize_im(path: Path):
         cmd += ["-quality", str(quality), str(tmp)]
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if tmp.is_file() and tmp.stat().st_size > 0:
+        if tmp.is_file() and 0 < tmp.stat().st_size < before:
             tmp.replace(path)
+        elif tmp.is_file() and tmp.stat().st_size > 0:
+            tmp.unlink()  # not smaller: keep the original (see optimize_pil)
         else:
             tmp.unlink(missing_ok=True)
             return "err", before, before, False
@@ -525,7 +552,7 @@ def optimize_im(path: Path):
                 [im_bin, str(path), "-quality", str(quality), str(webp_path)],
                 check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            webp_ok = webp_path.is_file()
+            webp_ok = drop_if_not_smaller(webp_path, path)
         except Exception:
             webp_ok = False
     if write_avif(path):
@@ -615,9 +642,17 @@ media_run() {
     fi
   }
 
+  local site_user
+  site_user="$(media_site_user "$domain")"
+  # Files left root-owned by runs of older versions (which ran as root) would not be writable
+  # by the site user now. -h/find -P: never follow the site's symlinks.
+  if [[ -d "$docroot/wp-content/uploads" ]]; then
+    find "$docroot/wp-content/uploads" ! -user "$site_user" -exec chown -h "${site_user}:${site_user}" {} + 2>/dev/null || true
+  fi
+
   panel_log "Media run $domain dry=$dry batch=$batch max=${max_w}x${max_h} q=$quality webp=$webp"
   local out
-  out="$(media_run_python "$docroot" "$max_w" "$max_h" "$quality" "$skip_kb" "$batch" "$webp" "$dry" "${avif:-false}")"
+  out="$(media_run_python "$site_user" "$docroot" "$max_w" "$max_h" "$quality" "$skip_kb" "$batch" "$webp" "$dry" "${avif:-false}")"
   echo "$out" | python3 -m json.tool 2>/dev/null || echo "$out"
 
   if [[ "$dry" != "true" ]]; then
@@ -641,12 +676,6 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
     f.write("\n")
 PY
-    # Fix ownership of any new webp/markers under uploads
-    local site_user
-    site_user="$(media_site_user "$domain")"
-    if [[ -d "$docroot/wp-content/uploads" ]]; then
-      chown -R "${site_user}:${site_user}" "$docroot/wp-content/uploads" 2>/dev/null || true
-    fi
   fi
   panel_log "Media run done: $domain"
 }

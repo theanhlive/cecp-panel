@@ -515,6 +515,21 @@ menu_modsec() {
   done
 }
 
+# Run a menu action in a subshell: a panel_die (typo in a domain, a failed step) used to exit
+# the whole interactive menu back to the shell. errexit stays on inside the action; it is only
+# lifted in the parent, so a failure comes back here as a status code.
+menu_try() {
+  local rc
+  set +e
+  ( set -e; "$@" )
+  rc=$?
+  set -e
+  if (( rc != 0 )); then
+    echo -e "${C_RED:-}  ✗ Lỗi (mã $rc) — xem thông báo phía trên. Đã quay lại menu.${C_RESET:-}"
+  fi
+  return 0
+}
+
 menu_main() {
   while true; do
     menu_banner
@@ -542,37 +557,37 @@ menu_main() {
     read -r -p "Choice [0]: " choice
     choice="${choice:-0}"
     case "$choice" in
-      1) menu_domain ;;
-      2) menu_ssl ;;
-      3) menu_dns ;;
-      4) menu_backup ;;
-      5) menu_security ;;
-      6) menu_wordpress ;;
-      7) menu_perf ;;
-      8) menu_system ;;
-      9) mysql_secure_basics ;;
-      10) menu_php ;;
-      11) menu_update ;;
-      12) agent_install; agent_status ;;
-      13) show_status ;;
-      14) menu_notify ;;
-      15) menu_cf ;;
-      16) menu_modsec ;;
+      1) menu_try menu_domain ;;
+      2) menu_try menu_ssl ;;
+      3) menu_try menu_dns ;;
+      4) menu_try menu_backup ;;
+      5) menu_try menu_security ;;
+      6) menu_try menu_wordpress ;;
+      7) menu_try menu_perf ;;
+      8) menu_try menu_system ;;
+      9) menu_try mysql_secure_basics ;;
+      10) menu_try menu_php ;;
+      11) menu_try menu_update ;;
+      12) menu_try agent_install; menu_try agent_status ;;
+      13) menu_try show_status ;;
+      14) menu_try menu_notify ;;
+      15) menu_try menu_cf ;;
+      16) menu_try menu_modsec ;;
       17)
         read -r -p "log kind [panel|nginx|php|mysql|fail2ban]: " k
         read -r -p "domain (nginx only, empty=global): " d
-        log_view "${k:-panel}" "$d" 80
+        menu_try log_view "${k:-panel}" "$d" 80
         ;;
       18)
         read -r -p "status / run / enable / disable [status]: " a
         case "${a:-status}" in
-          run) monitor_run ;;
-          enable) monitor_enable ;;
-          disable) monitor_disable ;;
-          *) monitor_status ;;
+          run) menu_try monitor_run ;;
+          enable) menu_try monitor_enable ;;
+          disable) menu_try monitor_disable ;;
+          *) menu_try monitor_status ;;
         esac
         ;;
-      19) menu_agency ;;
+      19) menu_try menu_agency ;;
       0) exit 0 ;;
       *) echo "Unknown option" ;;
     esac

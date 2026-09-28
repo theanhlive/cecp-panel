@@ -592,9 +592,12 @@ site_install_wordpress() {
   # Not "admin": the first name every wp-login brute-force list tries.
   admin_user="admin_$(rand_alnum 6 | tr '[:upper:]' '[:lower:]')"
   admin_pass="$(rand_alnum 20)"
+  # A subdomain covered by a parent wildcard certificate is served over HTTPS from the start.
+  local scheme=http
+  site_cert_dir "$domain" >/dev/null && scheme=https
   "${wp_run[@]}" core install \
     --path="$docroot" \
-    --url="http://${domain}" \
+    --url="${scheme}://${domain}" \
     --title="${domain}" \
     --admin_user="$admin_user" \
     --prompt=admin_password \

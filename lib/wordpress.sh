@@ -76,7 +76,11 @@ wp_harden_site() {
   panel_log "Hardening WordPress: $domain"
   wp_site_exec "$domain" config set DISALLOW_FILE_EDIT true --raw
   wp_site_exec "$domain" config set WP_AUTO_UPDATE_CORE "'minor'"
-  wp_site_exec "$domain" config set FORCE_SSL_ADMIN true --raw 2>/dev/null || true
+  # Only with a certificate: on a plain-HTTP site it redirects wp-admin to an https:// that does
+  # not exist (admin locked out until `ssl issue`, which turns it on — ssl_wp_sync_scheme).
+  if site_cert_dir "$domain" >/dev/null; then
+    wp_site_exec "$domain" config set FORCE_SSL_ADMIN true --raw 2>/dev/null || true
+  fi
   wp_site_exec "$domain" plugin delete hello akismet 2>/dev/null || true
   wp_site_exec "$domain" rewrite structure '/%postname%/' --hard
   wp_site_exec "$domain" rewrite flush --hard
@@ -102,8 +106,12 @@ wp_install_system_cron() {
   install -d -m 755 "$LOG_DIR/wp-cron"
   [[ -f "$cron_log" ]] || install -m 640 /dev/null "$cron_log"
   chown "${site_user}:${site_user}" "$cron_log"
+  # Each site gets its own minute within the 15-minute cycle: with */15 every site booted
+  # WordPress at the same second (CPU/RAM spike at :00/:15/:30/:45 on multi-site servers).
+  local minute
+  minute=$(( $(cksum <<<"$slug" | cut -d' ' -f1) % 15 ))
   cat >/etc/cron.d/cecp-wp-${slug} <<EOF
-*/15 * * * * ${site_user} cd ${docroot} && /usr/local/bin/wp cron event run --due-now >>${cron_log} 2>&1
+${minute}-59/15 * * * * ${site_user} cd ${docroot} && /usr/local/bin/wp cron event run --due-now >>${cron_log} 2>&1
 EOF
   chmod 644 /etc/cron.d/cecp-wp-${slug}
   wp_site_exec "$domain" config set DISABLE_WP_CRON true --raw

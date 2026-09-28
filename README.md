@@ -1,4 +1,4 @@
-# CECP Panel v1.10.0-beta
+# CECP Panel v1.12.0-beta
 
 Standalone VPS panel (LarVPS-style). **One install** = full stack + menu.
 
@@ -20,6 +20,8 @@ cecp-panel security apply-production
 cecp-panel optimize stack
 cecp-panel onboard   # Cloudflare + Google Drive (tuỳ chọn)
 ```
+
+Gõ lệnh nhanh: phím **Tab** gợi ý lệnh, cờ và domain (`cecp-panel ssl issue <Tab>`), có hiệu lực ở phiên SSH mới.
 
 ## Agency (từ Mac/Windows CECP)
 

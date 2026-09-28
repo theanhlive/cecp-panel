@@ -1,0 +1,99 @@
+# bash completion for cecp-panel — installed to /etc/bash_completion.d/cecp-panel.
+# Completes commands, sub-commands, flags and the domains of this server's sites.
+
+_cecp_panel_domains() {
+  local f
+  for f in /var/lib/cecp-panel/sites/*.json; do
+    [[ -e "$f" ]] || continue
+    f="${f##*/}"
+    printf '%s\n' "${f%.json}"
+  done
+}
+
+_cecp_panel() {
+  local cur cmd sub words=""
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  cmd="${COMP_WORDS[1]:-}"
+  sub="${COMP_WORDS[2]:-}"
+
+  if (( COMP_CWORD == 1 )); then
+    words="status site ssl dns cf cache backup security system mysql agent onboard wp db optimize
+           media notify monitor modsec log php update help"
+  elif (( COMP_CWORD == 2 )); then
+    case "$cmd" in
+      status) words="--json" ;;
+      site) words="list add remove duplicate sftp-info sftp-password rebuild-vhost protect-admin auth limits staging staging-push" ;;
+      ssl) words="list issue fix renew status remove hsts" ;;
+      dns) words="list add point ssl-mode" ;;
+      cf|cloudflare) words="status purge purge-url realip edge-cache brotli cache-level minify recommend" ;;
+      cache) words="status auto-purge ttl purge purge-url" ;;
+      backup) words="setup status policy run list verify prune prune-dry-run restore enable-cron configure config-get oauth-status" ;;
+      security) words="fail2ban fail2ban-full firewall ssh ssh-key-only ssh-harden ssh-repair ssh-port mariadb-bind
+                       apply-production check unattended fix-perms harden-docroot" ;;
+      system) words="info ensure-swap swap disk-clean clean-logs maintain tune enable-cron" ;;
+      mysql) words="secure" ;;
+      agent) words="install status" ;;
+      wp) words="harden optimize cron status update auto-update rollback" ;;
+      db) words="export import shell info size slow-log slow-report" ;;
+      optimize) words="site nginx redis redis-wp redis-acl mariadb opcache kernel purge purge-url stack bench report webp brotli" ;;
+      media) words="enable disable status run run-all enable-cron disable-cron" ;;
+      notify) words="setup status test health enable-cron disable-cron webhook" ;;
+      monitor) words="run status enable disable" ;;
+      modsec|modsecurity) words="status install enable disable blocking" ;;
+      log|logs) words="panel audit nginx php mysql fail2ban notify" ;;
+      php) words="list install set config" ;;
+      update) words="check mirror panel component os wp-cli all enable-cron disable-cron" ;;
+    esac
+  elif [[ "$cur" == -* ]]; then
+    case "$cmd $sub" in
+      "site add") words="--wordpress --wp --php --ssl --redis --minimal" ;;
+      "site staging") words="--name --no-auth" ;;
+      "site staging-push") words="--files-only --db-only --dry-run --yes" ;;
+      "site limits") words="--cpu --mem --tasks" ;;
+      "site protect-admin") words="--ip --no-auth --user" ;;
+      "site auth") words="--user" ;;
+      "site rebuild-vhost"|"optimize redis-acl"|"backup run"|"backup verify"|"security harden-docroot"|"ssl fix") words="--all" ;;
+      "ssl issue") words="--dns --wildcard" ;;
+      "cf edge-cache") words="--ttl" ;;
+      "backup restore") words="--live --dry-run --yes --target --repo" ;;
+      "wp update") words="--exclude --no-major --dry-run" ;;
+      "wp auto-update") words="--exclude --no-major" ;;
+      "wp rollback"|"db import") words="--yes --replace-url" ;;
+      "media enable") words="--max-width --max-height --quality --skip-under-kb --batch --no-upload --no-cron --no-webp --avif --no-avif" ;;
+      "media run") words="--dry-run --limit" ;;
+      "update all") words="--skip-os --skip-wp --skip-panel" ;;
+      "update panel") words="--sha256" ;;
+      "php config") words="--reset" ;;
+    esac
+  elif (( COMP_CWORD == 3 )); then
+    case "$cmd $sub" in
+      "site add"|"site list"|"site list-json") ;;
+      "php install") words="81 82 83 84" ;;
+      "update component") words="nginx mariadb php certbot restic rclone fail2ban os all" ;;
+      "db slow-log") words="on off status" ;;
+      "system swap") words="1 2 4" ;;
+      site\ *|ssl\ issue|ssl\ fix|ssl\ remove|ssl\ hsts|dns\ point|cf\ edge-cache|cf\ status|cache\ *|backup\ run|\
+      backup\ verify|backup\ restore|security\ harden-docroot|wp\ *|db\ export|db\ import|db\ shell|db\ info|\
+      optimize\ site|optimize\ redis-wp|optimize\ redis-acl|optimize\ purge|optimize\ report|optimize\ bench|\
+      optimize\ webp|media\ enable|media\ disable|media\ status|media\ run|php\ set|php\ config|log\ nginx|logs\ nginx)
+        words="$(_cecp_panel_domains)" ;;
+    esac
+  elif (( COMP_CWORD == 4 )); then
+    case "$cmd $sub" in
+      "site protect-admin") words="on off status reset-password" ;;
+      "site auth") words="on off status reset-password" ;;
+      "site limits") words="off show --cpu --mem --tasks" ;;
+      "ssl hsts") words="on off subdomains" ;;
+      "cache auto-purge"|"cf edge-cache") words="on off status" ;;
+      "cache ttl") words="5m 30m 1h 6h 1d" ;;
+      "wp auto-update") words="on off status" ;;
+      "backup restore") words="latest" ;;
+      "php set") words="81 82 83 84" ;;
+    esac
+  fi
+
+  # shellcheck disable=SC2207  # word list is plain tokens
+  COMPREPLY=($(compgen -W "$words" -- "$cur"))
+}
+
+complete -F _cecp_panel cecp-panel

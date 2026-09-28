@@ -298,7 +298,7 @@ settle
 APASS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("admin_protect_pass",""))' "/var/lib/cecp-panel/sites/$D.json")"
 check "wp-login.php asks for credentials (401)" test "$(status_of "http://$D/wp-login.php")" = 401
 check "wp-admin asks for credentials (401)" test "$(status_of "http://$D/wp-admin/")" = 401
-# wp_harden sets FORCE_SSL_ADMIN, so WordPress answers wp-login.php over http with 302 → https.
+# 200, or 302 → https when FORCE_SSL_ADMIN is on (set once the site has a certificate).
 reaches_wp_login() { [[ "$(status_of "$@" "http://$D/wp-login.php")" =~ ^(200|302)$ ]]; }
 check "correct credentials pass through to WordPress" reaches_wp_login -u "cecp:$APASS"
 check "wp-admin with credentials reaches WordPress (not 401)" \

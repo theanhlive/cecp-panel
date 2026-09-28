@@ -144,6 +144,9 @@ update_panel() {
     rm -rf "$tmp"
     panel_die "Install failed — previous panel restored from $bak"
   fi
+  if [[ -f "$INSTALL_ROOT/templates/cecp-panel.bash-completion" ]]; then
+    install -D -m 0644 "$INSTALL_ROOT/templates/cecp-panel.bash-completion" /etc/bash_completion.d/cecp-panel 2>/dev/null || true
+  fi
   python3 - "$ETC_DIR/panel.json" "$ver" "$bak" "$actual" <<'PY'
 import json, os, sys
 from datetime import datetime, timezone

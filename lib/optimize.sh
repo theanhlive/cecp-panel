@@ -32,6 +32,39 @@ ensure_nginx_global() {
   if [[ ! -f /etc/nginx/conf.d/cecp-cloudflare-realip.conf ]]; then
     cf_realip_render "$PANEL_ROOT/templates/cloudflare-ips.txt"
   fi
+  nginx_default_ssl_install
+}
+
+# Without a default HTTPS server nginx answers ANY hostname (and a bare-IP request) on 443 with
+# the first site's certificate and content: internet-wide certificate scans then map the site to
+# this origin IP (bypassing Cloudflare), and other hostnames pointed here serve that site.
+# ssl_reject_handshake (nginx >= 1.19.4) refuses the handshake instead; older nginx: skipped.
+nginx_default_ssl_install() {
+  local f=/etc/nginx/conf.d/00-cecp-default-ssl.conf v
+  v="$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  if [[ -z "$v" || "$(printf '%s\n%s\n' 1.19.4 "$v" | sort -V | head -1)" != "1.19.4" ]]; then
+    rm -f "$f"
+    return 0
+  fi
+  [[ -f "$f" ]] && return 0
+  # Another 443 default_server (added by hand): a second one would fail nginx -t.
+  if grep -rqsE '^[^#]*listen[^;]*443[^;]*default_server' /etc/nginx/nginx.conf /etc/nginx/conf.d /etc/nginx/sites-enabled; then
+    return 0
+  fi
+  cat >"$f" <<'EOF'
+# CECP Panel — HTTPS catch-all: hostnames without a site here (and direct-IP requests) get no
+# certificate at all, so nothing reveals which sites live on this origin.
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    ssl_reject_handshake on;
+}
+EOF
+  chmod 644 "$f"
+  if ! nginx -t -q 2>/dev/null; then
+    rm -f "$f"
+    panel_log "WARN: nginx rejected the HTTPS catch-all server — skipped"
+  fi
 }
 
 optimize_nginx_global() {
@@ -84,14 +117,29 @@ optimize_purge_cache() {
   local domain="${target,,}"
   validate_domain "$domain"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
-  # Every cache file carries a "KEY: <scheme><method><host><uri>" header line.
-  local f n=0
-  while IFS= read -r -d '' f; do
-    rm -f "$f" && n=$((n + 1))
-  done < <(grep -rlaZF \
-             -e "KEY: httpsGET${domain}/" -e "KEY: httpGET${domain}/" \
-             -e "KEY: httpsHEAD${domain}/" -e "KEY: httpHEAD${domain}/" \
-             "$CECP_CACHE_DIR" 2>/dev/null || true)
+  # Every cache file carries a "KEY: <scheme><method><host><uri>" line right after its small
+  # binary header: read only the first 4 KB of each file (grep scanned whole pages, up to the
+  # 1 GB cache, on every "purge all" of a site).
+  local n
+  n="$(python3 - "$CECP_CACHE_DIR" "$domain" <<'PY'
+import os, sys
+root, dom = sys.argv[1], sys.argv[2]
+keys = [f"KEY: {s}{m}{dom}/".encode() for s in ("http", "https") for m in ("GET", "HEAD")]
+n = 0
+for dirpath, _, files in os.walk(root):
+    for name in files:
+        p = os.path.join(dirpath, name)
+        try:
+            with open(p, "rb") as f:
+                head = f.read(4096)
+            if any(k in head for k in keys):
+                os.unlink(p)
+                n += 1
+        except OSError:
+            pass
+print(n)
+PY
+)"
   panel_log "Purged FastCGI cache for $domain (${n} entries)"
 }
 
@@ -148,7 +196,8 @@ optimize_install_redis() {
   # bind, maxmemory) or a shared/multi-tenant VPS's other services could lose their connection
   # or their data. Confirmed live: doing this on a VPS also running several unrelated custom
   # services broke nothing only because none of them happened to be connected at that moment.
-  if [[ ! -f /etc/cecp-panel/redis.env ]] && systemctl is-active --quiet redis 2>/dev/null; then
+  if [[ ! -f /etc/cecp-panel/redis.env ]] \
+     && { systemctl is-active --quiet redis 2>/dev/null || systemctl is-active --quiet redis-server 2>/dev/null; }; then
     panel_die "Redis is already running and was not installed by this panel (no /etc/cecp-panel/redis.env) — refusing to reconfigure it (could break another service using it). If you want the panel to manage it, back up /etc/redis/redis.conf yourself first, then set REDIS_PASSWORD etc. in /etc/cecp-panel/redis.env and re-run."
   fi
   if [[ -f /etc/almalinux-release || -f /etc/rocky-release || -f /etc/redhat-release ]]; then

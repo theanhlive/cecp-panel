@@ -7,8 +7,7 @@ MAINTAIN_CRON="/etc/cron.d/cecp-system-maintain"
 
 system_load_config() {
   if [[ -f "$SYSTEM_ENV" ]]; then
-    # shellcheck source=/dev/null
-    source "$SYSTEM_ENV"
+    secure_source "$SYSTEM_ENV"
   fi
   : "${SWAP_MIN_TOTAL_MB:=512}"
   : "${SWAP_MAX_GB:=4}"
@@ -150,11 +149,20 @@ system_clean_package_cache() {
   fi
 }
 
+# FULL=1 (disk above DISK_CLEAN_MIN_USE_PCT) also drops the page cache and restic's local cache.
+# Not on every weekly run: an empty page cache makes every site slow until it refills, and
+# without its cache restic re-downloads the repository index from Google Drive on each backup.
+# Both are size-bounded anyway (nginx max_size=1g; restic cache --cleanup prunes stale repos).
 system_clean_temp_and_cache() {
+  local full="${1:-0}"
   find /tmp -mindepth 1 -maxdepth 1 -type f -mtime +7 -delete 2>/dev/null || true
   find /var/tmp -mindepth 1 -maxdepth 1 -type f -mtime +7 -delete 2>/dev/null || true
-  rm -rf /var/cache/nginx/cecp/* 2>/dev/null || true
-  rm -rf /root/.cache/restic 2>/dev/null || true
+  if [[ "$full" == 1 ]]; then
+    rm -rf /var/cache/nginx/cecp/* 2>/dev/null || true
+    rm -rf /root/.cache/restic 2>/dev/null || true
+  elif command -v restic &>/dev/null; then
+    restic cache --cleanup >/dev/null 2>&1 || true
+  fi
   if command -v certbot &>/dev/null; then
     find /var/log/letsencrypt -type f -name '*.log' -mtime +30 -delete 2>/dev/null || true
   fi
@@ -189,7 +197,11 @@ system_disk_clean() {
   before="$(df / | awk 'NR==2 {print $3}')"
   system_clean_logs
   system_clean_package_cache
-  system_clean_temp_and_cache
+  if [[ "$pct" -ge "$DISK_CLEAN_MIN_USE_PCT" ]]; then
+    system_clean_temp_and_cache 1
+  else
+    system_clean_temp_and_cache 0
+  fi
   if [[ "$pct" -ge "$DISK_CLEAN_MIN_USE_PCT" ]]; then
     system_clean_wp_transients
   fi

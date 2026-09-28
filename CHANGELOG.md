@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.12.0-beta — rà soát bảo mật, tốc độ, dữ liệu backup và thao tác
+
+### Bảo mật
+- **Media optimize không còn chạy bằng root trên thư mục `uploads/`** (của site): trước đây một WordPress bị hack có thể đặt symlink (vd. `anh.webp -> /etc/shadow`) và job tối ưu ảnh hằng đêm (root) sẽ ghi đè file hệ thống qua symlink đó. Giờ script chạy bằng user của chính site (`runuser`), file cũ do root tạo được chuyển quyền trước (`chown -h`, không đi theo symlink).
+- **Chặn tải file backup qua web**: `wp-content/ai1wm-backups`, `updraft`, `backups-dup-*`, `backwpup-*`, `wpvividbackups`, `backuply`, `wp-migrate-db`, `wp-staging` và các đuôi `.wpress .wpstg .sql.gz .sql.zip .dump .orig .old .save ~`. Các plugin này chỉ tự bảo vệ bằng `.htaccess` — nginx bỏ qua `.htaccess`, nên ai đoán được tên file là tải được toàn bộ site + database.
+- **HTTPS catch-all** (`00-cecp-default-ssl.conf`, nginx ≥ 1.19.4): hostname lạ hoặc truy cập thẳng bằng IP trên cổng 443 bị từ chối bắt tay TLS, thay vì nhận chứng chỉ + nội dung của site đầu tiên. Chặn việc quét chứng chỉ để tìm ra IP gốc sau Cloudflare. Tự bỏ qua nếu nginx cũ hoặc đã có `default_server` 443 khác.
+- `system.env` được nạp qua `secure_source` (như mọi file env khác); `optimize redis` nhận ra Redis có sẵn trên Ubuntu (`redis-server`) để không cấu hình đè.
+
+### WordPress + SSL
+- `FORCE_SSL_ADMIN` chỉ bật khi site **đã có chứng chỉ**: trước đây site mới (`site add --wp`, chưa `ssl issue`) bị chuyển wp-admin sang `https://` không tồn tại → không vào được trang quản trị.
+- `ssl issue` giờ chuyển `home`/`siteurl` của WordPress sang `https://` (và `ssl remove` chuyển về `http://`) — chỉ khi URL đúng là `http(s)://DOMAIN`, không đụng URL tuỳ chỉnh/thư mục con. Trước đây mọi link nội bộ đều phải đi qua redirect 301.
+- Site con dùng wildcard của domain cha được cài WordPress với `https://` ngay từ đầu.
+
+### Tốc độ / dữ liệu
+- **Backup không nén `public_html` trước khi đưa cho restic** (`public_html.tar` thay cho `.tar.gz`): restic khử trùng lặp theo nội dung (và tự nén với repository v2), còn gzip làm thay đổi toàn bộ luồng dữ liệu → trước đây **mỗi ngày upload lại gần như toàn bộ site lên Google Drive**. Giờ chỉ phần thay đổi được upload. Restore/verify đọc được cả snapshot cũ (`.tar.gz`). Lưu ý: thư mục staging tạm thời cần dung lượng bằng kích thước site (không nén). Repository tạo bằng restic < 0.14 (v1, không nén): `restic migrate upgrade_repo_v2`.
+- Bảo trì hằng tuần (`system maintain`) **không còn xoá sạch page cache nginx và cache của restic** mỗi lần chạy (site chậm cho tới khi cache đầy lại; backup kế tiếp phải tải lại index từ Google Drive) — chỉ xoá khi ổ đĩa vượt ngưỡng `DISK_CLEAN_MIN_USE_PCT`; bình thường chỉ `restic cache --cleanup`.
+- `cache purge DOMAIN` đọc 4 KB đầu mỗi file cache (dòng `KEY:`) thay vì `grep` toàn bộ nội dung (tới 1 GB) — nhanh hơn nhiều khi auto-purge "xoá hết" chạy thường xuyên.
+- wp-cron của mỗi site chạy ở một phút riêng trong chu kỳ 15 phút (trước đây mọi site cùng khởi động WordPress lúc :00/:15/:30/:45 → đỉnh CPU/RAM). Áp dụng cho site cũ: `cecp-panel wp cron DOMAIN`.
+- gzip thêm font (`ttf/otf/eot`) và favicon.
+
+### Tối ưu ảnh
+- Ảnh PNG trong suốt (logo, dạng palette) **không còn bị nền đen** trong bản WebP/AVIF.
+- Giữ ICC color profile khi nén lại JPEG/WebP (ảnh chụp từ điện thoại không bị nhạt màu).
+- Không ghi đè ảnh gốc nếu bản nén lại không nhỏ hơn (trừ khi resize); xoá sidecar WebP/AVIF nếu nó **lớn hơn** ảnh gốc (nginx ưu tiên sidecar → trước đây có thể phục vụ file to hơn).
+- mu-plugin: ảnh vừa upload không bị nén lossy lần thứ hai ở bước tạo metadata.
+
+### Thao tác
+- **Menu tương tác không còn bị thoát ra shell khi một thao tác lỗi** (gõ sai domain, bước nào đó thất bại) — báo lỗi rồi quay lại menu.
+- **Tự động gợi ý bằng phím Tab** (`/etc/bash_completion.d/cecp-panel`): lệnh, lệnh con, cờ (`--wp`, `--dns`…) và domain của các site trên VPS. Có hiệu lực ở phiên SSH mới.
+- Cài thêm `bash-completion` và `acl` ngay khi cài panel.
+
+### Nâng cấp từ 1.11
+```bash
+cecp-panel update panel                  # hoặc deploy-safe.sh từ máy agency
+cecp-panel site rebuild-vhost --all      # áp rule chặn file backup + HTTPS catch-all
+cecp-panel wp cron DOMAIN                # (từng site WordPress) rải lịch wp-cron
+cecp-panel ssl issue DOMAIN              # (site đã có SSL) chuyển URL WordPress sang https nếu còn http
+```
+
 ## 1.11.0-beta — vá lỗ hổng đọc chéo giữa các site (world-readable docroot)
 
 ### Vấn đề

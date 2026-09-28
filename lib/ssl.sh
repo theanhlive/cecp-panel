@@ -67,6 +67,36 @@ ssl_reattach_nginx() {
   ssl_renewal_use_webroot "$domain"
   site_render_vhost "$domain"
   nginx_test_and_reload || panel_die "nginx rejected the HTTPS vhost for $domain (config rolled back)"
+  ssl_wp_sync_scheme "$domain"
+}
+
+# WordPress stores its own URL: after a certificate is added (or removed) home/siteurl kept
+# http:// (every link a 301, cookies/redirects on the wrong scheme). Follow the certificate —
+# but only for URLs that are exactly http(s)://DOMAIN, never a custom or sub-directory URL.
+ssl_wp_sync_scheme() {
+  local domain="$1" want=http other=https k cur changed=0
+  [[ "$(wp_site_is_wordpress "$domain" 2>/dev/null)" == "True" ]] || return 0
+  if site_cert_dir "$domain" >/dev/null; then want=https; other=http; fi
+  for k in home siteurl; do
+    cur="$(wp_site_exec "$domain" option get "$k" 2>/dev/null || true)"
+    [[ "$cur" == "${other}://${domain}" ]] || continue
+    if wp_site_exec "$domain" option update "$k" "${want}://${domain}" >/dev/null 2>&1; then
+      changed=1
+    else
+      panel_log "WARN: could not switch WordPress $k of $domain to ${want}://"
+    fi
+  done
+  if [[ "$want" == https ]]; then
+    wp_site_exec "$domain" config set FORCE_SSL_ADMIN true --raw >/dev/null 2>&1 || true
+  elif (( changed )); then
+    # Back to plain HTTP: FORCE_SSL_ADMIN would lock wp-admin out.
+    wp_site_exec "$domain" config delete FORCE_SSL_ADMIN >/dev/null 2>&1 || true
+  fi
+  if (( changed )); then
+    wp_site_exec "$domain" cache flush >/dev/null 2>&1 || true
+    optimize_purge_cache "$domain" >/dev/null 2>&1 || true
+    panel_log "WordPress URLs of $domain now use ${want}://"
+  fi
 }
 
 # CECP_CERTBOT lets the integration test substitute a fake certbot (no Let's Encrypt in Docker).
@@ -119,6 +149,7 @@ ssl_rerender_subsites() {
     sub="$(basename "$f" .json)"
     [[ "${sub%."$domain"}" != *.* && ! -f "/etc/letsencrypt/live/${sub}/fullchain.pem" ]] || continue
     site_render_vhost "$sub"
+    ssl_wp_sync_scheme "$sub"
     panel_log "  $sub: vhost re-rendered for the *.$domain certificate change"
   done
   shopt -u nullglob
@@ -226,6 +257,7 @@ ssl_remove_for_domain() {
   [[ -f "$(site_meta_path "$domain")" ]] && site_render_vhost "$domain"
   ssl_rerender_subsites "$domain"
   nginx_test_and_reload || panel_log "WARN: nginx rejected the config after removing the certificate of $domain"
+  [[ -f "$(site_meta_path "$domain")" ]] && ssl_wp_sync_scheme "$domain"
   panel_log "Removed cert: $domain"
 }
 
