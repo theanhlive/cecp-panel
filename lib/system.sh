@@ -78,6 +78,7 @@ system_info() {
   echo "  Root use: ${pct}% (auto disk-clean when >= ${DISK_CLEAN_MIN_USE_PCT:-70}%)"
   echo "--- Memory ---"
   free -h | sed 's/^/  /'
+  echo "  PHP-FPM RAM budget: $(php_ram_budget_mb 2>/dev/null || echo '?')MB → pm.max_children auto = $(php_pool_max_children 2>/dev/null || echo '?') per site"
   echo "--- Swap ---"
   swapon --show 2>/dev/null | sed 's/^/  /' || echo "  (no swap)"
   local rec

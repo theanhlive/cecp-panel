@@ -132,7 +132,7 @@ check "open_basedir uses per-site tmp (no shared /tmp)" \
   grep -qx "php_admin_value\[open_basedir\] = $DOCROOT:/home/$SU/tmp" "/etc/php-fpm.d/cecp-$SLUG.conf"
 check "sessions in per-site tmp" grep -qx "php_admin_value\[session.save_path\] = /home/$SU/tmp" "/etc/php-fpm.d/cecp-$SLUG.conf"
 check "per-site tmp is 700 and owned by the site user" test "$(stat -c '%a %U' "/home/$SU/tmp")" = "700 $SU"
-check "pm.max_children sized (4..32)" bash -c "v=\$(sed -nE 's/^pm.max_children = ([0-9]+)$/\1/p' /etc/php-fpm.d/cecp-$SLUG.conf); [ \"\$v\" -ge 4 ] && [ \"\$v\" -le 32 ]"
+check "pm.max_children sized (2..32)" bash -c "v=\$(sed -nE 's/^pm.max_children = ([0-9]+)$/\1/p' /etc/php-fpm.d/cecp-$SLUG.conf); [ \"\$v\" -ge 2 ] && [ \"\$v\" -le 32 ]"
 
 echo "=== nginx hardening ==="
 check "security headers on PHP responses" \
@@ -616,6 +616,9 @@ head -c 5000000 /dev/zero >/tmp/5m.bin
 check "5 MB upload is not refused by nginx (was 413 with the 1m default)" \
   bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' -F f=@/tmp/5m.bin http://$D/?upload-probe)\" != 413 ]"
 check "invalid PHP settings rejected" bash -c "! cecp-panel php config $D memory_limit=99T && ! cecp-panel php config $D foo=1 && ! cecp-panel php config $D max_execution_time=5 && ! cecp-panel php config $D 'memory_limit=512M;id'"
+check "putenv disabled by default" grep -qE 'disable_functions\] = .*,putenv$' "$POOL"
+check "allow_putenv=on re-enables putenv, reset disables it again" \
+  bash -c "cecp-panel php config $D allow_putenv=on >/dev/null && ! grep -q putenv $POOL && cecp-panel php config $D --reset allow_putenv >/dev/null && grep -q ',putenv$' $POOL"
 check "php config --reset" bash -c "cecp-panel php config $D --reset memory_limit >/dev/null && grep -q 'memory_limit\] = 256M' $POOL"
 
 echo "=== Per-site resource limits (own PHP-FPM) ==="

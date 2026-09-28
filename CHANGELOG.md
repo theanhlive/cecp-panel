@@ -8,6 +8,14 @@
 - **HTTPS catch-all** (`00-cecp-default-ssl.conf`, nginx ≥ 1.19.4): hostname lạ hoặc truy cập thẳng bằng IP trên cổng 443 bị từ chối bắt tay TLS, thay vì nhận chứng chỉ + nội dung của site đầu tiên. Chặn việc quét chứng chỉ để tìm ra IP gốc sau Cloudflare. Tự bỏ qua nếu nginx cũ hoặc đã có `default_server` 443 khác.
 - `system.env` được nạp qua `secure_source` (như mọi file env khác); `optimize redis` nhận ra Redis có sẵn trên Ubuntu (`redis-server`) để không cấu hình đè.
 
+- **`cecp-panel security cf-only on|off|status`** (mới, tự chọn bật): cổng 80/443 chỉ nhận kết nối từ dải IP Cloudflare (firewalld ipset / ufw), SSH không đổi. Kẻ tấn công biết IP gốc không còn vượt qua được WAF/chống DDoS của Cloudflare. Trước khi bật, panel kiểm tra mọi site đều đã proxy qua Cloudflare (mây cam) — site nào chưa sẽ bị liệt kê và lệnh dừng lại (`--force` để bỏ qua). Danh sách IP tự cập nhật theo cron `cf realip` hằng tuần.
+- **Chặn `putenv`** trong PHP (`disable_functions`): cặp `putenv("LD_PRELOAD=…")` + `mail()` là cách phổ biến để chạy lệnh hệ thống dù `exec/system` đã bị cấm. Plugin nào cần: `cecp-panel php config DOMAIN allow_putenv=on`.
+- **Restore/verify backup không import database bằng root nữa**: restore dùng user DB của chính site (như `db import`), verify dùng một user tạm chỉ có quyền trên database tạm rồi xoá ngay. Trước đây một bản dump bị sửa độc (`CREATE USER … GRANT ALL ON *.*`) chạy với quyền root MariaDB.
+
+### RAM
+- `pm.max_children` tự động giờ tính trên **RAM còn lại** sau buffer pool MariaDB + `maxmemory` Redis + ~300 MB cho hệ điều hành (tối thiểu ¼ RAM), chia cho số site, 2..32. Trước đây PHP được cấp 50% RAM (tối thiểu 4 tiến trình/site) *cộng thêm* MariaDB 30% + Redis 10% → VPS 1 GB nhiều site dễ hết RAM, OOM killer tắt MariaDB. Ví dụ VPS 1 GB, 1 site: 8 → 5 tiến trình.
+- `security check` cảnh báo khi tổng tiến trình PHP tối đa (kể cả giá trị đặt tay) vượt ngân sách RAM; `system info` hiện ngân sách này.
+
 ### WordPress + SSL
 - `FORCE_SSL_ADMIN` chỉ bật khi site **đã có chứng chỉ**: trước đây site mới (`site add --wp`, chưa `ssl issue`) bị chuyển wp-admin sang `https://` không tồn tại → không vào được trang quản trị.
 - `ssl issue` giờ chuyển `home`/`siteurl` của WordPress sang `https://` (và `ssl remove` chuyển về `http://`) — chỉ khi URL đúng là `http(s)://DOMAIN`, không đụng URL tuỳ chỉnh/thư mục con. Trước đây mọi link nội bộ đều phải đi qua redirect 301.
@@ -37,6 +45,8 @@ cecp-panel update panel                  # hoặc deploy-safe.sh từ máy agenc
 cecp-panel site rebuild-vhost --all      # áp rule chặn file backup + HTTPS catch-all
 cecp-panel wp cron DOMAIN                # (từng site WordPress) rải lịch wp-cron
 cecp-panel ssl issue DOMAIN              # (site đã có SSL) chuyển URL WordPress sang https nếu còn http
+cecp-panel security check                # xem cảnh báo RAM; site rebuild-vhost --all ở trên đã áp số tiến trình mới + putenv
+cecp-panel security cf-only status       # (tuỳ chọn) nếu mọi site qua Cloudflare: cecp-panel security cf-only on
 ```
 
 ## 1.11.0-beta — vá lỗ hổng đọc chéo giữa các site (world-readable docroot)

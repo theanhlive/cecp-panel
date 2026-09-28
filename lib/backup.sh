@@ -568,9 +568,9 @@ backup_restore_apply() {
     chcon -R -t httpd_sys_content_t "$docroot" 2>/dev/null || true
   fi
   site_wp_config_sync "$domain"
-  # Database: recreate empty, then import (grants live in mysql.db and survive the drop)
-  mysql -e "DROP DATABASE IF EXISTS \`${db_name}\`; CREATE DATABASE \`${db_name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" || return 1
-  mysql "$db_name" <"$sql" 2>>"$BACKUP_LOG" || return 1
+  # Database: recreate empty, then import AS THE SITE'S DB USER (db_import_file) — a dump is
+  # site-controlled data; imported as root, a tampered one could GRANT itself the server.
+  db_import_file "$domain" "$sql" 2>>"$BACKUP_LOG" || return 1
   rm -rf "$old"
   # OPcache would keep serving the previous code for up to revalidate_freq (60 s) and make
   # the health check lie; a graceful reload resets it.
@@ -669,6 +669,23 @@ backup_verify() {
   return "$rc"
 }
 
+# Test-import a dump into a throw-away database as a throw-away user that can only touch it
+# (never as root: the dump is data the site controls). The user is dropped again right away.
+backup_verify_import() {
+  local vdb="$1" sql="$2" vpass cnf rc=0
+  vpass="$(rand_alnum 24)"
+  mysql <<SQL || return 1
+CREATE DATABASE \`${vdb}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER '${vdb}'@'localhost' IDENTIFIED BY '${vpass}';
+GRANT ALL PRIVILEGES ON \`${vdb}\`.* TO '${vdb}'@'localhost';
+SQL
+  cnf="$(mysql_client_cnf "$vdb" "$vpass")"
+  sed -E 's/DEFINER=`[^`]+`@`[^`]+`//g' "$sql" | mysql --defaults-extra-file="$cnf" "$vdb" 2>>"$BACKUP_LOG" || rc=1
+  rm -f "$cnf"
+  mysql -e "DROP USER IF EXISTS '${vdb}'@'localhost'" || true
+  return "$rc"
+}
+
 backup_verify_site() {
   local domain="$1" tmp stage vdb n=0 err=""
   validate_domain "$domain"
@@ -683,7 +700,7 @@ backup_verify_site() {
       err="file archive is unreadable"
     else
       vdb="cecp_verify_$(rand_alnum 8 | tr '[:upper:]' '[:lower:]')"
-      if mysql -e "CREATE DATABASE \`${vdb}\`" && mysql "$vdb" <"$stage/database.sql" 2>>"$BACKUP_LOG"; then
+      if backup_verify_import "$vdb" "$stage/database.sql"; then
         n="$(mysql -Nse "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${vdb}'")"
         (( n > 0 )) || err="database dump contains no tables"
       else

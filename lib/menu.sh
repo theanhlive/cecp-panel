@@ -154,6 +154,7 @@ menu_security() {
     echo "11) Auto security updates (dnf-automatic / unattended)"
     echo "12) Repair SFTP sshd drop-ins"
     echo "13) Fix permissions + redact old secrets in logs"
+    echo "14) Cloudflare-only web ports (hide origin IP) on/off/status"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -176,6 +177,10 @@ menu_security() {
       11) security_unattended_updates ;;
       12) security_ssh_repair ;;
       13) security_fix_permissions ;;
+      14)
+        read -r -p "on / off / status [status]: " a
+        security_cf_only "${a:-status}"
+        ;;
       0) break ;;
     esac
   done

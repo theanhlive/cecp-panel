@@ -297,14 +297,36 @@ nginx_listen_ssl_lines() {
   fi
 }
 
-# pm.max_children per pool: ~50% of RAM at ~60 MB/worker, shared by all sites, 4..32.
-php_pool_max_children() {
-  local ram_mb sites n
+# RAM (MB) left for PHP-FPM workers once MariaDB's buffer pool, Redis' maxmemory and ~300 MB
+# for the OS/nginx are taken — never less than a quarter of RAM (swap absorbs short peaks).
+# Before, PHP alone was sized at 50% of RAM on top of MariaDB (30%) and Redis (10%): a busy
+# 1 GB VPS ran out of memory and the OOM killer took MariaDB down.
+php_ram_budget_mb() {
+  local ram_mb db_mb=0 redis_mb=0 cnf budget
   ram_mb="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 1024)"
+  for cnf in /etc/my.cnf.d/cecp-tune.cnf /etc/mysql/mariadb.conf.d/99-cecp-tune.cnf /etc/mysql/conf.d/cecp-tune.cnf; do
+    [[ -f "$cnf" ]] || continue
+    db_mb="$(awk -F= '/^[[:space:]]*innodb_buffer_pool_size/ {gsub(/[^0-9]/, "", $2); print $2; exit}' "$cnf")"
+    break
+  done
+  [[ "$db_mb" =~ ^[0-9]+$ && "$db_mb" -gt 0 ]] || db_mb=$(( ram_mb * 30 / 100 ))
+  if [[ -f "$ETC_DIR/redis.env" ]]; then
+    redis_mb="$(sed -nE 's/^REDIS_MAXMEMORY_MB=([0-9]+)$/\1/p' "$ETC_DIR/redis.env" | head -1)"
+  fi
+  redis_mb="${redis_mb:-0}"
+  budget=$(( ram_mb - db_mb - redis_mb - 300 ))
+  (( budget < ram_mb / 4 )) && budget=$(( ram_mb / 4 ))
+  echo "$budget"
+}
+
+# pm.max_children per pool: the PHP RAM budget at ~60 MB/worker, shared by all sites, 2..32
+# (pm = ondemand: idle sites hold no workers, the cap only matters when sites are busy together).
+php_pool_max_children() {
+  local sites n
   sites="$(find "$SITES_DIR" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)"
   (( sites < 1 )) && sites=1
-  n=$(( ram_mb / 2 / 60 / sites ))
-  (( n < 4 )) && n=4
+  n=$(( $(php_ram_budget_mb) / 60 / sites ))
+  (( n < 2 )) && n=2
   (( n > 32 )) && n=32
   echo "$n"
 }

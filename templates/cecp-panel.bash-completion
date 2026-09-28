@@ -29,7 +29,7 @@ _cecp_panel() {
       cache) words="status auto-purge ttl purge purge-url" ;;
       backup) words="setup status policy run list verify prune prune-dry-run restore enable-cron configure config-get oauth-status" ;;
       security) words="fail2ban fail2ban-full firewall ssh ssh-key-only ssh-harden ssh-repair ssh-port mariadb-bind
-                       apply-production check unattended fix-perms harden-docroot" ;;
+                       apply-production check unattended fix-perms harden-docroot cf-only" ;;
       system) words="info ensure-swap swap disk-clean clean-logs maintain tune enable-cron" ;;
       mysql) words="secure" ;;
       agent) words="install status" ;;
@@ -64,6 +64,7 @@ _cecp_panel() {
       "update all") words="--skip-os --skip-wp --skip-panel" ;;
       "update panel") words="--sha256" ;;
       "php config") words="--reset" ;;
+      "security cf-only") words="--force" ;;
     esac
   elif (( COMP_CWORD == 3 )); then
     case "$cmd $sub" in
@@ -71,6 +72,7 @@ _cecp_panel() {
       "php install") words="81 82 83 84" ;;
       "update component") words="nginx mariadb php certbot restic rclone fail2ban os all" ;;
       "db slow-log") words="on off status" ;;
+      "security cf-only") words="on off status" ;;
       "system swap") words="1 2 4" ;;
       site\ *|ssl\ issue|ssl\ fix|ssl\ remove|ssl\ hsts|dns\ point|cf\ edge-cache|cf\ status|cache\ *|backup\ run|\
       backup\ verify|backup\ restore|security\ harden-docroot|wp\ *|db\ export|db\ import|db\ shell|db\ info|\

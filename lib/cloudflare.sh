@@ -48,6 +48,7 @@ cf_realip_update() {
   printf '17 4 * * 1 root /usr/local/bin/cecp-panel cf realip >/dev/null 2>&1\n' >/etc/cron.d/cecp-cf-realip
   chmod 644 /etc/cron.d/cecp-cf-realip
   nginx_test_and_reload || panel_die "nginx rejected the real-IP config (rolled back)"
+  security_cf_only_refresh || panel_log "WARN: cf-only firewall refresh failed"
   if [[ -f /etc/fail2ban/jail.d/cecp-00-defaults.conf ]]; then
     security_fail2ban_defaults
     systemctl reload fail2ban 2>/dev/null || true

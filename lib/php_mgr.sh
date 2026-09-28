@@ -69,7 +69,7 @@ php_install_version() {
 # ---------------------------------------------------------------------------
 # Per-site PHP settings (cecp-panel php config). Stored in site meta as php_<key>.
 # ---------------------------------------------------------------------------
-PHP_CFG_KEYS="memory_limit upload_max_filesize post_max_size max_execution_time max_input_time max_input_vars pm_max_children"
+PHP_CFG_KEYS="memory_limit upload_max_filesize post_max_size max_execution_time max_input_time max_input_vars pm_max_children allow_putenv"
 
 php_cfg_default() {
   case "$1" in
@@ -78,6 +78,7 @@ php_cfg_default() {
     max_execution_time|max_input_time) echo 120 ;;
     max_input_vars) echo 3000 ;;
     pm_max_children) echo auto ;;
+    allow_putenv) echo off ;;
   esac
 }
 
@@ -85,6 +86,13 @@ php_cfg_get() {
   local v
   v="$(site_json_get_or "$1" "php_$2" "")"
   echo "${v:-$(php_cfg_default "$2")}"
+}
+
+# disable_functions of a site's pool (putenv only when allow_putenv=on).
+php_cfg_disable_functions() {
+  local list="exec,passthru,shell_exec,system,proc_open,popen,parse_ini_file,show_source,pcntl_exec,pcntl_fork"
+  [[ "$(php_cfg_get "$1" allow_putenv)" == on ]] || list+=",putenv"
+  echo "$list"
 }
 
 # "512M" / "2G" -> megabytes
@@ -120,6 +128,9 @@ php_cfg_validate() {
       [[ "$val" == auto ]] && { echo auto; return 0; }
       [[ "$val" =~ ^[0-9]{1,3}$ ]] && (( val >= 2 && val <= 256 )) || panel_die "pm_max_children must be 2..256 or auto"
       echo "$val"
+      ;;
+    allow_putenv)
+      case "${val,,}" in on|1|yes|true) echo on ;; off|0|no|false) echo off ;; *) panel_die "allow_putenv must be on or off" ;; esac
       ;;
     *) panel_die "Unknown setting '$key' (allowed: ${PHP_CFG_KEYS// /, })" ;;
   esac

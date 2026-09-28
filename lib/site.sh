@@ -394,7 +394,8 @@ site_render_pool() {
     UPLOAD_MAX_FILESIZE "$(php_cfg_get "$domain" upload_max_filesize)" \
     MAX_EXECUTION_TIME "$(php_cfg_get "$domain" max_execution_time)" \
     MAX_INPUT_TIME "$(php_cfg_get "$domain" max_input_time)" \
-    MAX_INPUT_VARS "$(php_cfg_get "$domain" max_input_vars)"
+    MAX_INPUT_VARS "$(php_cfg_get "$domain" max_input_vars)" \
+    DISABLE_FUNCTIONS "$(php_cfg_disable_functions "$domain")"
 }
 
 # Re-apply current templates (vhost + pool) to an existing site, with nginx rollback on error.

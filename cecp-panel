@@ -72,12 +72,13 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel security fail2ban|fail2ban-full|firewall|ssh|ssh-key-only|ssh-harden|ssh-repair
   cecp-panel security ssh-port|mariadb-bind|apply-production|check|unattended|fix-perms
   cecp-panel security harden-docroot [DOMAIN|--all]   # nginx ACL, removes world-read (cross-site read protection)
+  cecp-panel security cf-only on [--force]|off|status  # ports 80/443 from Cloudflare only (hide origin)
   cecp-panel system info|ensure-swap|swap|disk-clean|maintain|tune
   cecp-panel mysql secure
   cecp-panel agent install|status
   cecp-panel onboard
   cecp-panel php list|install VER|set DOMAIN VER
-    php config DOMAIN [memory_limit=512M upload_max_filesize=128M max_execution_time=300 ...] | DOMAIN --reset [KEY]
+    php config DOMAIN [memory_limit=512M upload_max_filesize=128M max_execution_time=300 allow_putenv=on ...] | DOMAIN --reset [KEY]
   cecp-panel update check|mirror|panel|component|os|wp-cli
     update all [--skip-os] [--skip-wp] [--skip-panel]   # OS + wp-cli + every WP site + panel
     update enable-cron|disable-cron                     # weekly (Sun 04:10 UTC), runs update all
@@ -285,6 +286,7 @@ case "$cmd" in
       check|self-check) security_self_check ;;
       unattended|auto-update) require_root; security_unattended_updates ;;
       fix-perms) require_root; security_fix_permissions ;;
+      cf-only) security_cf_only "$@" ;;
       harden-docroot)
         require_root
         if [[ "${1:-}" == "--all" || -z "${1:-}" ]]; then
