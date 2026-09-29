@@ -112,11 +112,10 @@ media_install_mu_plugin() {
   docroot="$(media_docroot "$domain")"
   site_user="$(media_site_user "$domain")"
   mudir="$(media_mu_plugin_dir "$docroot")"
-  mkdir -p "$mudir"
   local src="$PANEL_ROOT/templates/mu-plugins/cecp-media-optimize.php"
   [[ -f "$src" ]] || panel_die "Missing template: $src"
-  install -m 644 "$src" "$mudir/cecp-media-optimize.php"
-  chown "${site_user}:${site_user}" "$mudir" "$mudir/cecp-media-optimize.php" 2>/dev/null || true
+  # As the site user (see site_write_file): a root chown of a planted symlink gave away /etc.
+  site_write_file "$site_user" "$mudir/cecp-media-optimize.php" 644 <"$src"
 }
 
 media_write_mu_config() {
@@ -125,10 +124,9 @@ media_write_mu_config() {
   docroot="$(media_docroot "$domain")"
   site_user="$(media_site_user "$domain")"
   mudir="$(media_mu_plugin_dir "$docroot")"
-  mkdir -p "$mudir"
-  python3 - "$domain" "$mudir/cecp-media-optimize.json" <<'PY'
+  python3 - "$domain" <<'PY' | site_write_file "$site_user" "$mudir/cecp-media-optimize.json" 644
 import json, sys
-domain, out = sys.argv[1].lower(), sys.argv[2]
+domain = sys.argv[1].lower()
 path = f"/var/lib/cecp-panel/sites/{domain}.json"
 with open(path, encoding="utf-8") as f:
     data = json.load(f)
@@ -145,13 +143,9 @@ payload = {
     "avif": bool(cfg.get("avif", False)),
     "skip_under_kb": int(cfg.get("skip_under_kb", 200)),
 }
-with open(out, "w", encoding="utf-8") as f:
-    json.dump(payload, f, indent=2)
-    f.write("\n")
-print(out)
+json.dump(payload, sys.stdout, indent=2)
+sys.stdout.write("\n")
 PY
-  chown "${site_user}:${site_user}" "$mudir/cecp-media-optimize.json" 2>/dev/null || true
-  chmod 644 "$mudir/cecp-media-optimize.json" 2>/dev/null || true
 }
 
 media_remove_mu_plugin() {
@@ -159,7 +153,7 @@ media_remove_mu_plugin() {
   local docroot mudir
   docroot="$(media_docroot "$domain")"
   mudir="$(media_mu_plugin_dir "$docroot")"
-  rm -f "$mudir/cecp-media-optimize.php" "$mudir/cecp-media-optimize.json" 2>/dev/null || true
+  site_run_as "$(media_site_user "$domain")" rm -f -- "$mudir/cecp-media-optimize.php" "$mudir/cecp-media-optimize.json" 2>/dev/null || true
 }
 
 media_enable() {

@@ -51,10 +51,11 @@ cache_auto_purge() {
   case "$action" in
     on)
       [[ "$(wp_site_is_wordpress "$domain" 2>/dev/null)" == "True" ]] || panel_die "auto-purge needs a WordPress site"
-      install -d -o "$su" -g "$su" -m 755 "$mudir"
-      install -m 644 -o root -g root "$PANEL_ROOT/templates/mu-plugins/cecp-cache-purge.php" "$mudir/cecp-cache-purge.php"
+      # Written as the site user (site_write_file): root writes under a docroot follow symlinks.
+      # The queue path the root worker reads comes from site meta, never from this JSON.
+      site_write_file "$su" "$mudir/cecp-cache-purge.php" 644 <"$PANEL_ROOT/templates/mu-plugins/cecp-cache-purge.php"
       python3 -c 'import json,sys; print(json.dumps({"queue": sys.argv[1]}))' "$q" \
-        | install -m 644 -o root -g root /dev/stdin "$mudir/cecp-cache-purge.json"
+        | site_write_file "$su" "$mudir/cecp-cache-purge.json" 644
       site_ensure_tmp "$su"
       # The tmp dir belongs to the site user: never write through what they may have put there,
       # create the queue with their own privileges.
@@ -68,7 +69,7 @@ cache_auto_purge() {
       ;;
     off)
       systemctl disable --now "cecp-purge@${slug}.path" >/dev/null 2>&1 || true
-      rm -f "$mudir/cecp-cache-purge.php" "$mudir/cecp-cache-purge.json"
+      site_run_as "$su" rm -f -- "$mudir/cecp-cache-purge.php" "$mudir/cecp-cache-purge.json"
       site_json_set "$domain" cache_autopurge false
       panel_log "Auto-purge OFF for $domain"
       ;;

@@ -155,6 +155,8 @@ menu_security() {
     echo "12) Repair SFTP sshd drop-ins"
     echo "13) Fix permissions + redact old secrets in logs"
     echo "14) Cloudflare-only web ports (hide origin IP) on/off/status"
+    echo "15) Scan all sites for malware / cross-site infection"
+    echo "16) After a hack: rotate secrets of a site (or --all)"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -180,6 +182,12 @@ menu_security() {
       14)
         read -r -p "on / off / status [status]: " a
         security_cf_only "${a:-status}"
+        ;;
+      15) security_scan --all || true ;;
+      16)
+        read -r -p "Domain (or --all): " d
+        read -r -p "Also new passwords for every WordPress administrator? (y/n): " a
+        if [[ "$a" =~ ^[yY] ]]; then security_rotate_secrets "$d" --admins; else security_rotate_secrets "$d"; fi
         ;;
       0) break ;;
     esac

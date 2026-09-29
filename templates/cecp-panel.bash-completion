@@ -29,7 +29,7 @@ _cecp_panel() {
       cache) words="status auto-purge ttl purge purge-url" ;;
       backup) words="setup status policy run list verify prune prune-dry-run restore enable-cron configure config-get oauth-status" ;;
       security) words="fail2ban fail2ban-full firewall ssh ssh-key-only ssh-harden ssh-repair ssh-port mariadb-bind
-                       apply-production check unattended fix-perms harden-docroot cf-only" ;;
+                       apply-production check unattended fix-perms harden-docroot cf-only scan rotate-secrets php-isolation" ;;
       system) words="info ensure-swap swap disk-clean clean-logs maintain tune enable-cron" ;;
       mysql) words="secure" ;;
       agent) words="install status" ;;
@@ -65,6 +65,8 @@ _cecp_panel() {
       "update panel") words="--sha256" ;;
       "php config") words="--reset" ;;
       "security cf-only") words="--force" ;;
+      "security scan") words="--all --days" ;;
+      "security rotate-secrets") words="--all --admins" ;;
     esac
   elif (( COMP_CWORD == 3 )); then
     case "$cmd $sub" in
@@ -75,7 +77,7 @@ _cecp_panel() {
       "security cf-only") words="on off status" ;;
       "system swap") words="1 2 4" ;;
       site\ *|ssl\ issue|ssl\ fix|ssl\ remove|ssl\ hsts|dns\ point|cf\ edge-cache|cf\ status|cache\ *|backup\ run|\
-      backup\ verify|backup\ restore|security\ harden-docroot|wp\ *|db\ export|db\ import|db\ shell|db\ info|\
+      backup\ verify|backup\ restore|security\ harden-docroot|security\ scan|security\ rotate-secrets|wp\ *|db\ export|db\ import|db\ shell|db\ info|\
       optimize\ site|optimize\ redis-wp|optimize\ redis-acl|optimize\ purge|optimize\ report|optimize\ bench|\
       optimize\ webp|media\ enable|media\ disable|media\ status|media\ run|media\ prune-originals|php\ set|php\ config|log\ nginx|logs\ nginx)
         words="$(_cecp_panel_domains)" ;;

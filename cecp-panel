@@ -38,6 +38,7 @@ source "$PANEL_ROOT/lib/monitor.sh"
 source "$PANEL_ROOT/lib/cloudflare.sh"
 source "$PANEL_ROOT/lib/modsec.sh"
 source "$PANEL_ROOT/lib/logview.sh"
+source "$PANEL_ROOT/lib/incident.sh"
 source "$PANEL_ROOT/lib/menu.sh"
 
 CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.12.0-beta}"
@@ -73,6 +74,9 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel security ssh-port|mariadb-bind|apply-production|check|unattended|fix-perms
   cecp-panel security harden-docroot [DOMAIN|--all]   # nginx ACL, removes world-read (cross-site read protection)
   cecp-panel security cf-only on [--force]|off|status  # ports 80/443 from Cloudflare only (hide origin)
+  cecp-panel security scan [DOMAIN|--all] [--days 7]   # web shells, cross-site writes, backdoors (read-only)
+  cecp-panel security rotate-secrets DOMAIN|--all [--admins]   # after a hack: new DB/Redis/SFTP/WP secrets
+  cecp-panel security php-isolation                    # OPcache isolation between sites (part of apply-production)
   cecp-panel system info|ensure-swap|swap|disk-clean|maintain|tune
   cecp-panel mysql secure
   cecp-panel agent install|status
@@ -289,6 +293,9 @@ case "$cmd" in
       unattended|auto-update) require_root; security_unattended_updates ;;
       fix-perms) require_root; security_fix_permissions ;;
       cf-only) security_cf_only "$@" ;;
+      scan) security_scan "$@" ;;
+      rotate-secrets) security_rotate_secrets "$@" ;;
+      php-isolation) require_root; security_php_isolation ;;
       harden-docroot)
         require_root
         if [[ "${1:-}" == "--all" || -z "${1:-}" ]]; then

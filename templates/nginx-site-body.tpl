@@ -4,6 +4,10 @@
     access_log /var/log/nginx/{{DOMAIN}}-access.log cecp;
     error_log  /var/log/nginx/{{DOMAIN}}-error.log;
 
+    # A symlink planted by this site's (compromised) code must not let nginx serve another site's
+    # files, or anything else on the server: follow only links owned like their target.
+    disable_symlinks if_not_owner from=$document_root;
+
     # Follows PHP post_max_size (nginx default is 1m: media uploads failed with 413).
     client_max_body_size {{BODY_SIZE}};
 
@@ -30,6 +34,16 @@
     location ~* ^/wp-content/(?:ai1wm-backups|updraft|backups-dup-(?:lite|pro)|backup-db|backupwordpress-[^/]*|wpvividbackups|backuply|uploads/(?:backwpup-[^/]*|wp-migrate-db|wp-staging))/ { deny all; }
     # Database dumps and editor/backup leftovers (wp-config.php.save, wp-config.php~, *.orig ...).
     location ~* (?:\.(?:wpress|wpstg|sql\.(?:gz|zip|bz2|xz)|dump|orig|old|save|swo)|~)$ { deny all; }
+
+    # wp-cron.php: with the server cron (cecp-panel wp cron) only the loopback call may run it, in
+    # this site's own PHP-FPM pool; public hits were a free way to burn CPU. Never page-cached.
+    location = /wp-cron.php {
+{{CRON_ACCESS}}
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_pass unix:{{PHP_SOCK}};
+        fastcgi_read_timeout {{FCGI_TIMEOUT}};
+    }
 
     # Login form: tight per-IP rate limit (bots get 429 and then a fail2ban ban); never cached.
     location = /wp-login.php {

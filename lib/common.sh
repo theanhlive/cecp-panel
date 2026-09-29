@@ -404,6 +404,29 @@ with open(out, "w", encoding="utf-8") as f:
 PY
 }
 
+# ---------------------------------------------------------------------------
+# Touching a site's files. Root must NEVER create, write or chown a path inside a docroot: the
+# site's own PHP (compromised, in the worst case) controls every file and directory there and
+# can turn any of them into a symlink — to /etc (a root `chown` through it hands the attacker the
+# whole server) or to another site's wp-config.php (a root write through it infects that site).
+# These helpers do the work AS THE SITE USER, so a planted symlink only reaches what that site
+# could already write.
+# ---------------------------------------------------------------------------
+# site_run_as USER CMD... — cwd / (root's cwd may be unreadable to the site user).
+site_run_as() {
+  local u="$1"
+  shift
+  [[ "$u" =~ ^site_[a-z0-9_]+$ ]] || panel_die "site_run_as: invalid site user '$u'"
+  (cd / && runuser -u "$u" -- "$@")
+}
+
+# site_write_file USER FILE [MODE] < content — atomic replace (a symlink at FILE is replaced,
+# never followed), parent directories created as the site user.
+site_write_file() {
+  site_run_as "$1" sh -c 'umask 022; mkdir -p -- "$(dirname -- "$1")" \
+    && t="$(mktemp -- "$1.XXXXXX")" && cat >"$t" && chmod "$2" "$t" && mv -f -- "$t" "$1"' _ "$2" "${3:-644}"
+}
+
 selinux_fixup_path() {
   command -v restorecon &>/dev/null || return 0
   restorecon -RF "$1" 2>/dev/null || true

@@ -188,6 +188,34 @@ security_php_hide_version() {
   panel_log "PHP expose_php=Off applied where php.ini found"
 }
 
+# Every site's pool runs under the same PHP-FPM master and so shares ONE OPcache: without these,
+# site A could list every script path of every site (opcache_get_status), wipe or poison their
+# cached code (opcache_reset / opcache_compile_file), and be served a script another user cached.
+security_php_isolation() {
+  require_root
+  local body d ver written=0
+  body="; CECP Panel — OPcache isolation between sites (shared memory of one PHP-FPM master)
+opcache.validate_permission=1
+opcache.validate_root=1
+; OPcache API (status/reset/compile/invalidate) callable only from scripts under this path: none.
+opcache.restrict_api=/opt/cecp-panel/.no-opcache-api/"
+  for d in /etc/php.d /etc/opt/remi/php*/php.d; do
+    [[ -d "$d" ]] || continue
+    printf '%s\n' "$body" >"$d/98-cecp-isolation.ini"
+    written=1
+  done
+  for d in /etc/php/*/mods-available; do
+    [[ -d "$d" ]] || continue
+    printf '%s\n' "$body" >"$d/cecp-isolation.ini"
+    ver="$(grep -oE '[0-9]+\.[0-9]+' <<<"$d" || true)"
+    [[ -n "$ver" ]] && command -v phpenmod &>/dev/null && { phpenmod -v "$ver" cecp-isolation 2>/dev/null || true; }
+    written=1
+  done
+  (( written )) || { panel_log "WARN: no php.d directory found — OPcache isolation not written"; return 0; }
+  php_fpm_reload_all >/dev/null 2>&1 || true
+  panel_log "PHP: OPcache isolated between sites (validate_permission, validate_root, API restricted)"
+}
+
 # ---------------------------------------------------------------------------
 # Fail2Ban jails
 # ---------------------------------------------------------------------------
@@ -411,6 +439,7 @@ security_apply_production() {
   security_firewall_baseline
   security_nginx_hide_version
   security_php_hide_version
+  security_php_isolation
   security_https_snippet_install
   optimize_nginx_global
   cf_realip_update
@@ -473,6 +502,16 @@ security_self_check() {
     else
       _ck FAIL "$dom: uploaded .php files can execute — run: cecp-panel site rebuild-vhost $dom"
     fi
+    if grep -q 'disable_symlinks if_not_owner' "$vhost"; then _ck PASS "$dom: nginx ignores symlinks to other owners' files"
+    else _ck FAIL "$dom: nginx follows symlinks (a hacked site can publish other sites' files) — run: cecp-panel site rebuild-vhost --all"; fi
+    if [[ -f "/etc/cron.d/cecp-wp-$(domain_slug "$dom")" ]] && grep -q 'wp cron event run' "/etc/cron.d/cecp-wp-$(domain_slug "$dom")"; then
+      _ck WARN "$dom: wp-cron runs plugin code under the unrestricted PHP CLI — run: cecp-panel site rebuild-vhost --all"
+    fi
+    local su_chk
+    su_chk="$(site_json_get_or "$dom" site_user "")"
+    if [[ -n "$su_chk" ]] && ! grep -qx "$su_chk" /etc/cron.deny 2>/dev/null; then
+      _ck WARN "$dom: $su_chk may install its own crontab (backdoor persistence) — run: cecp-panel site rebuild-vhost --all"
+    fi
     if grep -qE 'cecp-headers(-noindex)?\.conf' "$vhost"; then _ck PASS "$dom: security headers on every response"
     else _ck WARN "$dom: old vhost (headers dropped on PHP/static) — run: cecp-panel site rebuild-vhost $dom"; fi
     local sock
@@ -497,6 +536,12 @@ security_self_check() {
     fi
   done
   shopt -u nullglob
+
+  if ls /etc/php.d/98-cecp-isolation.ini /etc/opt/remi/php*/php.d/98-cecp-isolation.ini /etc/php/*/mods-available/cecp-isolation.ini >/dev/null 2>&1; then
+    _ck PASS "OPcache isolated between sites"
+  else
+    _ck WARN "OPcache shared between sites without isolation — run: cecp-panel security php-isolation"
+  fi
 
   echo "--- files / secrets ---"
   [[ "$(stat -c %a "$ETC_DIR" 2>/dev/null)" == "700" ]] && _ck PASS "$ETC_DIR is 700" || _ck FAIL "$ETC_DIR not 700"

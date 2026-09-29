@@ -2,6 +2,17 @@
 
 ## 1.12.0-beta — rà soát bảo mật, tốc độ, dữ liệu backup và thao tác
 
+### Cách ly giữa các site — vá đường lây chéo (sau sự cố: một site bị hack kéo theo mọi site)
+- **Leo thang lên root qua symlink (nghiêm trọng)**: panel (root) tạo/`chown`/ghi file bên trong docroot — `mu-plugins`, `wp-config.php` — và đi theo symlink. Code độc của site A đặt `wp-content/mu-plugins → /etc` thì `media enable` chuyển quyền sở hữu `/etc` cho site A (chiếm root → mọi site). `wp-config.php → wp-config của site B` thì restore/duplicate/staging/redis ghi thông tin DB của A vào B (B chạy trên database do kẻ tấn công kiểm soát). Đã tái hiện cả hai. Giờ **root không bao giờ ghi trong docroot**: mọi thao tác chạy bằng user của site (`site_write_file`, `site_run_as`); mu-plugin của panel thuộc user site (root-owned trước đây không bảo vệ gì — site vẫn xoá/tạo lại được).
+- **nginx `disable_symlinks if_not_owner`**: site A tạo symlink tới file của site B (hoặc `/etc/passwd`) rồi tải về qua web — đã tái hiện (HTTP 200 kèm dữ liệu của B), giờ bị chặn.
+- **wp-cron chạy qua PHP-FPM của chính site** (loopback HTTP, 5 phút/lần) thay vì `wp cron event run` (PHP CLI không có `open_basedir`/`disable_functions` → plugin độc có shell đầy đủ mỗi 15 phút). `wp-cron.php` chỉ nhận loopback (chặn spam wp-cron từ ngoài).
+- **User site bị cấm `crontab`/`at`** (`/etc/cron.deny`, `/etc/at.deny`) — chặn cửa hậu tự cài lại.
+- **OPcache cô lập** (`security php-isolation`, nằm trong `apply-production`): `validate_permission`, `validate_root`, khoá API — trước đây mọi site dùng chung một OPcache: liệt kê/xoá/đầu độc code của nhau.
+- `site rebuild-vhost` giờ tự áp: ACL docroot (trước đây site cũ chưa chạy `harden-docroot` vẫn đọc chéo được `wp-config.php`), cấm crontab, dòng wp-cron mới. `security check` báo FAIL/WARN khi VPS chưa áp.
+- **`security scan [DOMAIN|--all] [--days N]`** (mới, chỉ đọc): PHP trong uploads, mẫu web shell/loader, file của user khác trong docroot (ghi chéo), symlink ra ngoài, mu-plugin lạ, `wp-config.php` trỏ database khác, checksum core/plugin wordpress.org, admin mới tạo; cấp server: UID 0 lạ, `ld.so.preload`, crontab/at của site, tiến trình lạ của site, file site trong /tmp, cron/systemd/SSH key đổi gần đây. Lệnh WordPress chạy với `--skip-plugins --skip-themes` (code độc không chạy).
+- **`security rotate-secrets DOMAIN|--all [--admins]`** (mới): mật khẩu DB (ghi lại wp-config), salts WordPress (đăng xuất mọi phiên), Redis ACL, khoá mật khẩu SFTP, mật khẩu mới cho mọi admin (chỉ in ra màn hình).
+- Runbook [docs/INCIDENT_RESPONSE.md](docs/INCIDENT_RESPONSE.md): khoanh vùng → dựng VPS mới hay làm sạch tại chỗ → làm sạch WordPress → đổi bí mật → ngăn tái nhiễm.
+
 ### Bảo mật
 - **Media optimize không còn chạy bằng root trên thư mục `uploads/`** (của site): trước đây một WordPress bị hack có thể đặt symlink (vd. `anh.webp -> /etc/shadow`) và job tối ưu ảnh hằng đêm (root) sẽ ghi đè file hệ thống qua symlink đó. Giờ script chạy bằng user của chính site (`runuser`), file cũ do root tạo được chuyển quyền trước (`chown -h`, không đi theo symlink).
 - **Chặn tải file backup qua web**: `wp-content/ai1wm-backups`, `updraft`, `backups-dup-*`, `backwpup-*`, `wpvividbackups`, `backuply`, `wp-migrate-db`, `wp-staging` và các đuôi `.wpress .wpstg .sql.gz .sql.zip .dump .orig .old .save ~`. Các plugin này chỉ tự bảo vệ bằng `.htaccess` — nginx bỏ qua `.htaccess`, nên ai đoán được tên file là tải được toàn bộ site + database.
@@ -49,7 +60,9 @@
 ### Nâng cấp từ 1.11
 ```bash
 cecp-panel update panel                  # hoặc deploy-safe.sh từ máy agency
-cecp-panel site rebuild-vhost --all      # áp rule chặn file backup + HTTPS catch-all
+cecp-panel security apply-production     # gồm OPcache cô lập giữa các site
+cecp-panel site rebuild-vhost --all      # rule chặn file backup, HTTPS catch-all, disable_symlinks, wp-cron qua PHP-FPM, cấm crontab site, ACL docroot
+cecp-panel security scan --all           # quét dấu hiệu nhiễm (xem docs/INCIDENT_RESPONSE.md nếu có FAIL)
 cecp-panel wp cron DOMAIN                # (từng site WordPress) rải lịch wp-cron
 cecp-panel ssl issue DOMAIN              # (site đã có SSL) chuyển URL WordPress sang https nếu còn http
 cecp-panel security check                # xem cảnh báo RAM; site rebuild-vhost --all ở trên đã áp số tiến trình mới + putenv

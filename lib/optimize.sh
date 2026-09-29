@@ -341,10 +341,14 @@ redis_site_acl() {
 # Write the Redis constants straight into wp-config.php (as root, keeping ownership): passing
 # the password to `wp config set` would expose it in the process list.
 redis_wp_config_write() {
-  local docroot="$1" user="$2" pass="$3" prefix="$4" host="$5" port="$6"
-  python3 - "$docroot/wp-config.php" "$user" "$pass" "$prefix" "$host" "$port" <<'PY'
-import re, sys
-path, user, pw, prefix, host, port = sys.argv[1:7]
+  local docroot="$1" user="$2" pass="$3" prefix="$4" host="$5" port="$6" owner
+  # As the owner of the docroot (never root through a planted symlink); the password goes
+  # through the environment, argv is visible to every local user.
+  owner="$(stat -c %U "$docroot")"
+  CECP_REDIS_PASS="$pass" site_run_as "$owner" python3 - "$docroot/wp-config.php" "$user" "$prefix" "$host" "$port" <<'PY'
+import os, re, sys
+path, user, prefix, host, port = sys.argv[1:6]
+pw = os.environ["CECP_REDIS_PASS"]
 src = open(path, encoding="utf-8").read()
 src = re.sub(r"^\s*define\(\s*['\"]WP_REDIS_(HOST|PORT|PASSWORD|PREFIX|SELECTIVE_FLUSH)['\"].*\n", "", src, flags=re.M)
 auth = f"['{user}', '{pw}']" if user else f"'{pw}'"

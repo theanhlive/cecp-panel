@@ -7,6 +7,7 @@ Redis, WordPress, Let's Encrypt, backup restic → Google Drive). CLI: `cecp-pan
 
 | Việc | Tài liệu bắt buộc đọc trước |
 |---|---|
+| **Website bị hack** / nghi nhiễm mã độc (quét, làm sạch, đổi mật khẩu, ngăn tái nhiễm) | [docs/INCIDENT_RESPONSE.md](docs/INCIDENT_RESPONSE.md) |
 | Trỏ domain qua **Cloudflare** (DNS, proxy, SSL mode, khoá IP gốc) | [docs/CLOUDFLARE_DNS.md](docs/CLOUDFLARE_DNS.md) |
 | Cài panel cho khách | [CUSTOMER_INSTALL.md](CUSTOMER_INSTALL.md) |
 | Nâng cấp panel trên VPS đang chạy | mục "Nâng cấp từ …" của phiên bản mới nhất trong [CHANGELOG.md](CHANGELOG.md) |
@@ -16,6 +17,7 @@ Redis, WordPress, Let's Encrypt, backup restic → Google Drive). CLI: `cecp-pan
 Quy tắc vận hành:
 - Không in/log/commit bí mật (Cloudflare token, mật khẩu DB/WordPress/SFTP, restic password).
   Panel đã chỉ hiện mật khẩu ra terminal, không ghi `panel.log` — giữ nguyên như vậy.
+- Sự cố bảo mật: chạy `cecp-panel security scan --all` và báo kết quả trước khi sửa/xoá bất cứ gì.
 - Lệnh phá huỷ (`site remove`, `backup restore --live`, `db import`, `site staging-push`,
   `security cf-only on --force`, `dns ssl-mode` trên zone có subdomain khác) cần chủ VPS đồng ý.
 - Sau mỗi thay đổi: `cecp-panel security check` và `cecp-panel status` để xác nhận.
