@@ -29,7 +29,7 @@ _cecp_panel() {
       cache) words="status auto-purge ttl purge purge-url" ;;
       backup) words="setup status policy run list verify prune prune-dry-run restore enable-cron configure config-get oauth-status" ;;
       security) words="fail2ban fail2ban-full firewall ssh ssh-key-only ssh-harden ssh-repair ssh-port mariadb-bind
-                       apply-production check unattended fix-perms harden-docroot cf-only scan scan-schedule scan-cron scan-ack rotate-secrets php-isolation" ;;
+                       apply-production check unattended fix-perms harden-docroot cf-only scan scan-schedule scan-cron scan-ack restore-clean rotate-secrets php-isolation" ;;
       system) words="info ensure-swap swap disk-clean clean-logs maintain tune enable-cron" ;;
       mysql) words="secure" ;;
       agent) words="install status" ;;
@@ -37,7 +37,7 @@ _cecp_panel() {
       db) words="export import shell info size slow-log slow-report" ;;
       optimize) words="site nginx redis redis-wp redis-acl mariadb opcache kernel purge purge-url stack bench report webp brotli" ;;
       media) words="enable disable status run run-all prune-originals enable-cron disable-cron" ;;
-      notify) words="setup status test health enable-cron disable-cron webhook" ;;
+      notify) words="setup status telegram zalo discord webhook off events test health enable-cron disable-cron" ;;
       monitor) words="run status enable disable" ;;
       modsec|modsecurity) words="status install enable disable blocking" ;;
       log|logs) words="panel audit nginx php mysql fail2ban notify" ;;
@@ -68,6 +68,8 @@ _cecp_panel() {
       "security scan") words="--all --days" ;;
       "security scan-schedule") words="--every --hour" ;;
       "security scan-cron") words="--force" ;;
+      "security restore-clean") words="--all --dry-run --yes" ;;
+      "notify events") words="--channel --min" ;;
       "security rotate-secrets") words="--all --admins" ;;
     esac
   elif (( COMP_CWORD == 3 )); then
@@ -78,9 +80,11 @@ _cecp_panel() {
       "db slow-log") words="on off status" ;;
       "security cf-only") words="on off status" ;;
       "security scan-schedule") words="on off status" ;;
+      "notify off"|"notify test") words="telegram zalo discord webhook" ;;
+      "notify events") words="edit set" ;;
       "system swap") words="1 2 4" ;;
       site\ *|ssl\ issue|ssl\ fix|ssl\ remove|ssl\ hsts|dns\ point|cf\ edge-cache|cf\ status|cache\ *|backup\ run|\
-      backup\ verify|backup\ restore|security\ harden-docroot|security\ scan|security\ rotate-secrets|wp\ *|db\ export|db\ import|db\ shell|db\ info|\
+      backup\ verify|backup\ restore|security\ harden-docroot|security\ scan|security\ rotate-secrets|security\ restore-clean|wp\ *|db\ export|db\ import|db\ shell|db\ info|\
       optimize\ site|optimize\ redis-wp|optimize\ redis-acl|optimize\ purge|optimize\ report|optimize\ bench|\
       optimize\ webp|media\ enable|media\ disable|media\ status|media\ run|media\ prune-originals|php\ set|php\ config|log\ nginx|logs\ nginx)
         words="$(_cecp_panel_domains)" ;;

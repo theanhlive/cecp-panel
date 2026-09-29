@@ -293,6 +293,16 @@ check "wrong secret does not validate" bash -c "! python3 $HERE/webhook_rx.py ch
 check "events.log records the event (640)" \
   bash -c "grep -q '\"event\":\"webhook_configured\"' /var/log/cecp-panel/events.log && [ \"\$(stat -c %a /var/log/cecp-panel/events.log)\" = 640 ]"
 check "webhook secret not written to panel.log" bash -c "! grep -qF '$WHSECRET' /var/log/cecp-panel/panel.log"
+check "notify events: per-channel filter saved" \
+  bash -c "cecp-panel notify events set security,uptime --channel zalo --min warning >/dev/null && cecp-panel notify events | grep -qE '^  zalo +.* warning +security,uptime$'"
+check "notify events rejects unknown categories and severities" \
+  bash -c "! cecp-panel notify events set spam && ! cecp-panel notify events set all --min loud"
+check "bot setup without a terminal requires the token in the environment (never argv)" \
+  bash -c "! cecp-panel notify telegram </dev/null 2>&1 | grep -q 'Dán' && cecp-panel notify telegram </dev/null 2>&1 | grep -q CECP_TELEGRAM_TOKEN"
+check "webhook still receives events with category filters set" \
+  bash -c "cecp-panel notify events set none && cecp-panel notify test webhook && sleep 1 && python3 $HERE/webhook_rx.py check $WH '$WHSECRET' test"
+cecp-panel notify events set all >/dev/null
+cecp-panel notify events set default --channel zalo >/dev/null
 
 echo "=== wp-login rate limit + protect-admin ==="
 settle

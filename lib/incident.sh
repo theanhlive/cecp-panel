@@ -333,7 +333,7 @@ PY
 }
 
 security_scan_schedule() {
-  local action="${1:-status}" every="" hour="" quiet n days minute=40 nice_cmd
+  local action="${1:-status}" every="" hour="" quiet n days minute=40 nice_cmd auto=""
   shift || true
   require_root
   case "$action" in
@@ -342,7 +342,9 @@ security_scan_schedule() {
         case "$1" in
           --every) every="${2:-}"; shift 2 || true ;;
           --hour) hour="${2:-}"; shift 2 || true ;;
-          *) panel_die "Usage: cecp-panel security scan-schedule on [--every 14|30] [--hour 0-23]" ;;
+          --auto-restore) auto=1; shift ;;
+          --no-auto-restore) auto=0; shift ;;
+          *) panel_die "Usage: cecp-panel security scan-schedule on [--every 14|30] [--hour 0-23] [--auto-restore|--no-auto-restore]" ;;
         esac
       done
       every="${every:-$(scan_state_get every 14)}"
@@ -366,9 +368,15 @@ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 ${minute} ${hour} * * * root ${nice_cmd} /usr/local/bin/cecp-panel security scan-cron >>${LOG_DIR}/security-scan.log 2>&1
 EOF
       chmod 644 "$SCAN_CRON"
-      scan_state_set every "$every" hour "$hour"
+      auto="${auto:-$(scan_state_get auto_restore 0)}"
+      scan_state_set every "$every" hour "$hour" auto_restore "$auto"
       panel_log "Periodic security scan ON: every ${every} days, at $(printf '%02d:%02d' "$hour" "$minute") ($quiet)"
-      panel_log "  Infection found → evidence backup + retention frozen + alert (cecp-panel notify setup). Run now: cecp-panel security scan-cron --force"
+      if [[ "$auto" == 1 ]]; then
+        panel_log "  Infection found → evidence backup, retention frozen, the infected site(s) RESTORED from their last verified-clean backup + secrets rotated, alert"
+      else
+        panel_log "  Infection found → evidence backup + retention frozen + alert. Auto-restore from the clean backup: add --auto-restore"
+      fi
+      panel_log "  Alerts: cecp-panel notify setup. Run now: cecp-panel security scan-cron --force"
       ;;
     off)
       rm -f "$SCAN_CRON"
@@ -383,6 +391,11 @@ EOF
         (( next < $(date +%s) )) && next="$(date +%s)"
         echo "Periodic security scan: ON — every ${every} day(s), checked daily at $(printf '%02d:40' "$(scan_state_get hour 5)")"
         echo "  next due:    $(date -d "@$next" '+%Y-%m-%d') (runs that night if the server is idle)"
+        if [[ "$(scan_state_get auto_restore 0)" == 1 ]]; then
+          echo "  on infection: restore infected sites from their last verified-clean backup (auto)"
+        else
+          echo "  on infection: alert + evidence backup only (manual: cecp-panel security restore-clean DOMAIN)"
+        fi
       else
         echo "Periodic security scan: OFF (cecp-panel security scan-schedule on)"
       fi
@@ -497,8 +510,28 @@ security_scan_cron() {
         fi
       done
     fi
+    local restored=""
+    if [[ "$(scan_state_get auto_restore 0)" == 1 ]] && scan_restic_ready; then
+      if [[ " $failed " == *" server "* ]]; then
+        restored=" Auto-restore SKIPPED: server-level indicators (possible root compromise) — rebuild the VPS (docs/INCIDENT_RESPONSE.md 2A)."
+      else
+        for d in $failed; do
+          if security_restore_clean_site "$d" 0 1 >>"$report" 2>&1; then
+            # Verify the restored copy.
+            if ( SCAN_FAILED=(); security_scan_site "$d" "$every" >>"$report" 2>&1; [[ -z "${SCAN_FAILED[*]}" ]] ); then
+              restored+=" $d: restored from clean backup, re-scan clean."
+            else
+              restored+=" $d: restored but the re-scan still FAILS — check by hand."
+            fi
+          else
+            restored+=" $d: NOT restored (no verified-clean snapshot or restore failed)."
+          fi
+        done
+      fi
+      result+=" |${restored}"
+    fi
     notify_event security_scan_infected critical \
-      "SECURITY SCAN: indicators of compromise on ${failed}. Backup retention frozen (clean snapshots kept), evidence snapshot taken. Report: $report — follow docs/INCIDENT_RESPONSE.md" \
+      "SECURITY SCAN: indicators of compromise on ${failed}. Backup retention frozen (clean snapshots kept), evidence snapshot taken.${restored} Report: $report — follow docs/INCIDENT_RESPONSE.md" \
       "" "{\"report\": \"$report\", \"sections\": \"$failed\"}" || true
   fi
   scan_state_set last_run_epoch "$now" last_run "$(date -u +%Y-%m-%dT%H:%M:%SZ)" last_result "$result" \
@@ -521,4 +554,64 @@ security_scan_ack() {
   fi
   scan_state_set last_result "acknowledged $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   panel_log "Scan alert acknowledged: backup retention resumes at the next backup"
+}
+
+# ---------------------------------------------------------------------------
+# cecp-panel security restore-clean DOMAIN|--all [--dry-run] [--yes]
+# Put a site back to its newest snapshot that a periodic scan verified clean (tag scan-clean),
+# then rotate the secrets the attacker may have read. The live restore takes its own safety
+# copy first (/var/lib/cecp-panel/restore/…/pre, 7 days) and rolls back if the site does not
+# answer, so orders/posts written since that snapshot are not lost for good.
+# ---------------------------------------------------------------------------
+security_restore_clean() {
+  local target="" dry=0 yes=0 f d rc=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry=1; shift ;;
+      --yes|-y) yes=1; shift ;;
+      -*) [[ "$1" == --all ]] && { target="--all"; shift; continue; }
+          panel_die "Usage: cecp-panel security restore-clean DOMAIN|--all [--dry-run] [--yes]" ;;
+      *) target="${1,,}"; shift ;;
+    esac
+  done
+  [[ -n "$target" ]] || panel_die "Usage: cecp-panel security restore-clean DOMAIN|--all [--dry-run] [--yes]"
+  require_root
+  scan_restic_ready || panel_die "Backups are not configured — there is no snapshot to restore from"
+  security_audit_log "security restore-clean $target dry=$dry"
+  if [[ "$target" == "--all" ]]; then
+    shopt -s nullglob
+    for f in "$SITES_DIR"/*.json; do
+      d="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["domain"])' "$f")"
+      security_restore_clean_site "$d" "$dry" "$yes" || rc=1
+    done
+    shopt -u nullglob
+  else
+    validate_domain "$target"
+    [[ -f "$(site_meta_path "$target")" ]] || panel_die "Site not found: $target"
+    security_restore_clean_site "$target" "$dry" "$yes" || rc=1
+  fi
+  return "$rc"
+}
+
+# Newest scan-clean snapshot id of DOMAIN (empty if none).
+scan_clean_snapshot() {
+  restic snapshots --json --tag "scan-clean,$1" 2>/dev/null | python3 -c '
+import json, sys
+s = sorted(json.load(sys.stdin) or [], key=lambda x: x["time"])
+print(s[-1]["id"] + " " + s[-1]["time"][:19] if s else "")'
+}
+
+security_restore_clean_site() {
+  local domain="$1" dry="$2" yes="$3" snap when
+  read -r snap when <<<"$(scan_clean_snapshot "$domain")"
+  if [[ -z "${snap:-}" ]]; then
+    panel_log "WARN: $domain has no verified-clean snapshot (tag scan-clean) — pick an older one by hand: cecp-panel backup list"
+    return 1
+  fi
+  panel_log "Restoring $domain from the verified-clean snapshot ${snap:0:8} (${when} UTC) ..."
+  # Subshell: a failed restore (panel_die inside) must not abort the other sites.
+  ( backup_restore_live "$domain" "$snap" "$dry" "$yes" ) || { panel_log "ERROR: restore of $domain failed (see $BACKUP_LOG)"; return 1; }
+  (( dry )) && return 0
+  ( security_rotate_site "$domain" 0 ) || panel_log "WARN: secret rotation after the restore of $domain failed"
+  notify_event security_restored warning "Restored $domain from verified-clean snapshot ${snap:0:8} (${when} UTC); DB/WordPress/Redis secrets rotated" "$domain" || true
 }

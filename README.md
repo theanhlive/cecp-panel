@@ -79,6 +79,7 @@ cecp-panel update panel
 
 ## Docs
 
+- [NOTIFICATIONS.md](docs/NOTIFICATIONS.md) — cảnh báo qua Telegram / Zalo Bot / Discord / n8n, chọn loại thông báo
 - [INCIDENT_RESPONSE.md](docs/INCIDENT_RESPONSE.md) — website bị hack: quét, làm sạch, đổi bí mật, ngăn lây chéo
 - [CLOUDFLARE_DNS.md](docs/CLOUDFLARE_DNS.md) — trỏ domain qua Cloudflare (DNS, SSL, khoá IP gốc) — runbook cho người & AI Agent ([AGENTS.md](AGENTS.md))
 - [MEDIA_OPTIMIZE.md](docs/MEDIA_OPTIMIZE.md) — per-site image optimize (opt-in)

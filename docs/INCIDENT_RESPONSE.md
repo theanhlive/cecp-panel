@@ -53,6 +53,21 @@ Khi kẻ tấn công đã lên root thì không có cách "dọn" nào chắc ch
 
 ---
 
+## 2B'. Có bản backup đã được xác nhận sạch → khôi phục nhanh
+
+Quét định kỳ (mục cuối) đánh dấu `scan-clean` bản backup mới nhất mỗi lần quét sạch. Khôi phục site
+về đúng bản đó (tự đổi mật khẩu DB/WordPress/Redis, khoá SFTP sau khi khôi phục):
+
+```bash
+cecp-panel security restore-clean DOMAIN --dry-run   # xem sẽ dùng snapshot nào (thời điểm)
+cecp-panel security restore-clean DOMAIN             # hỏi xác nhận (gõ lại tên domain)
+cecp-panel security restore-clean --all --yes        # mọi site
+```
+
+Dữ liệu phát sinh sau thời điểm bản sạch (đơn hàng, bài viết…) **không mất hẳn**: trước khi khôi phục,
+panel lưu bản hiện trạng ở `/var/lib/cecp-panel/restore/<site>-<giờ>/pre` (7 ngày) và bản backup
+"hiện trường" `scan-suspect`. Không dùng khi mục Server có FAIL (có thể mất root) → **2A**.
+
 ## 2B. Nhiễm trong phạm vi site → làm sạch tại chỗ
 
 ```bash
@@ -140,8 +155,9 @@ thì vẫn còn cửa hậu (plugin/theme chưa thay, admin lạ, cron…), ho�
 
 ```bash
 cecp-panel security scan-schedule on --every 14     # hoặc --every 30; tự chọn giờ VPS rảnh nhất
+cecp-panel security scan-schedule on --auto-restore # tuỳ chọn: tự khôi phục site nhiễm từ bản sạch
 cecp-panel security scan-schedule status
-cecp-panel notify setup                            # để nhận cảnh báo (Telegram/Discord/n8n)
+cecp-panel notify setup                            # để nhận cảnh báo (Telegram/Zalo/Discord/n8n — docs/NOTIFICATIONS.md)
 ```
 
 - **Giờ chạy:** tự chọn giờ ít truy cập nhất theo log nginx ~2 tuần gần nhất (tránh giờ backup và
@@ -153,6 +169,9 @@ cecp-panel notify setup                            # để nhận cảnh báo (T
 - **Phát hiện nhiễm (FAIL)** → ngay lập tức: chụp **backup hiện trường** các site bị nhiễm (nhãn
   `scan-suspect`, để điều tra); **đóng băng retention** — không xoá snapshot cũ nào (bản cũ = bản sạch);
   gửi cảnh báo `security_scan_infected` (critical). Xử lý theo runbook này rồi `cecp-panel security scan-ack`.
+- **`--auto-restore`**: sau bản hiện trường, **site bị nhiễm được tự khôi phục từ bản `scan-clean`**
+  gần nhất, đổi mật khẩu, rồi quét lại site đó; kết quả nằm trong cảnh báo. Không tự khôi phục khi mục
+  Server có FAIL (khôi phục site không cứu được một máy đã mất root) hay site chưa có bản `scan-clean`.
 - **Chỉ cảnh báo (WARN)** → gửi `security_scan_warning`, không đóng băng.
 - Báo cáo: `/var/log/cecp-panel/security-scan/scan-*.txt` (giữ 1 năm). Chạy ngay: `cecp-panel security scan-cron --force`.
 

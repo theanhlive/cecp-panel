@@ -195,7 +195,12 @@ menu_security() {
         read -r -p "on / off / status [status]: " a
         if [[ "${a:-status}" == on ]]; then
           read -r -p "Every how many days [14 / 30]: " d
-          security_scan_schedule on --every "${d:-14}"
+          read -r -p "Infected site → restore it from its last verified-clean backup automatically? (y/n) [n]: " a
+          if [[ "$a" =~ ^[yY] ]]; then
+            security_scan_schedule on --every "${d:-14}" --auto-restore
+          else
+            security_scan_schedule on --every "${d:-14}" --no-auto-restore
+          fi
         else
           security_scan_schedule "${a:-status}"
         fi
@@ -474,15 +479,20 @@ menu_backup() {
 menu_notify() {
   while true; do
     echo ""
-    echo "== Notify (Telegram / Discord) =="
-    echo " 1) Status  2) Setup  3) Test  4) Health check now"
-    echo " 5) Enable daily cron  6) Disable cron  7) Webhook (n8n) URL"
+    echo "== Thông báo (Telegram / Zalo / Discord / n8n) =="
+    echo " 1) Xem cấu hình     2) Cài đặt (wizard)   3) Gửi thử        4) Kiểm tra SSL/ổ đĩa ngay"
+    echo " 5) Bật kiểm tra hằng ngày   6) Tắt kiểm tra hằng ngày   7) Webhook (n8n) URL"
+    echo " 8) Telegram   9) Zalo Bot   10) Discord   11) Chọn loại thông báo"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
       1) notify_status ;;
       2) notify_setup ;;
       3) notify_test ;;
+      8) notify_setup_bot telegram ;;
+      9) notify_setup_bot zalo ;;
+      10) notify_setup_discord ;;
+      11) notify_events_edit ;;
       4) notify_health ;;
       5) notify_enable_cron ;;
       6) notify_disable_cron ;;

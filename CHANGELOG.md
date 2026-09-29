@@ -2,6 +2,15 @@
 
 ## 1.12.0-beta — rà soát bảo mật, tốc độ, dữ liệu backup và thao tác
 
+### Thông báo: Telegram, Zalo Bot, Discord — chọn loại thông báo
+- **Zalo Bot** (mới, API bot.zapps.vn) cùng Telegram, Discord, webhook n8n. `cecp-panel notify setup` (wizard) hoặc `notify telegram|zalo|discord`: dán token/URL ở **ô nhập ẩn** (không qua dòng lệnh), panel kiểm tra token (getMe), **tự tìm Chat ID** sau khi bạn nhắn cho bot một tin, gửi tin thử. Agent: `CECP_TELEGRAM_TOKEN`/`CECP_ZALO_TOKEN`/`CECP_DISCORD_WEBHOOK` qua môi trường.
+- **Chọn loại thông báo**: 6 nhóm (`security uptime backup ssl resources updates`) + mức tối thiểu (`info|warning|critical`), chung hoặc **riêng từng kênh**: `notify events edit` / `notify events set security,uptime --channel zalo --min warning`. Webhook n8n mặc định nhận tất cả.
+- Tin nhắn dễ đọc (🔴 NGHIÊM TRỌNG / 🟠 CẢNH BÁO / 🟢 THÔNG TIN, host, site, giờ); `notify test [KÊNH]` báo kết quả từng kênh; `notify off KÊNH`. Hướng dẫn: [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md).
+
+### Khôi phục website từ bản backup đã xác nhận sạch
+- **`security restore-clean DOMAIN|--all [--dry-run] [--yes]`** (mới): đưa site về bản backup mới nhất được quét định kỳ đánh dấu `scan-clean`, rồi đổi mật khẩu DB/WordPress/Redis và khoá SFTP. Bản hiện trạng trước khi khôi phục được giữ (7 ngày) để lấy lại đơn hàng/bài viết mới.
+- `security scan-schedule on --auto-restore`: khi quét định kỳ phát hiện nhiễm ở site (không phải cấp server), **tự khôi phục site đó từ bản sạch**, quét lại để xác nhận, báo kết quả trong cảnh báo.
+
 ### Quét bảo mật định kỳ + bảo vệ bản backup sạch
 - **`security scan-schedule on [--every 14|30] [--hour H] | off | status`** (mới): quét toàn VPS mỗi 14/30 ngày vào **giờ ít truy cập nhất** (tự tính từ log nginx ~2 tuần, tránh giờ backup/bảo trì), chỉ khi máy rảnh (load, không có backup chạy — không thì thử lại đêm sau), mức ưu tiên CPU/IO thấp nhất. Có trong menu Security.
 - Quét **sạch** → bản backup mới nhất của mỗi site gắn nhãn `scan-clean`, retention luôn giữ (2 bản sạch gần nhất/site).
@@ -69,7 +78,8 @@ cecp-panel update panel                  # hoặc deploy-safe.sh từ máy agenc
 cecp-panel security apply-production     # gồm OPcache cô lập giữa các site
 cecp-panel site rebuild-vhost --all      # rule chặn file backup, HTTPS catch-all, disable_symlinks, wp-cron qua PHP-FPM, cấm crontab site, ACL docroot
 cecp-panel security scan --all           # quét dấu hiệu nhiễm (xem docs/INCIDENT_RESPONSE.md nếu có FAIL)
-cecp-panel security scan-schedule on --every 14   # quét định kỳ vào giờ rảnh nhất
+cecp-panel security scan-schedule on --every 14   # quét định kỳ vào giờ rảnh nhất  (thêm --auto-restore để tự khôi phục site nhiễm từ bản sạch)
+cecp-panel notify setup                  # Telegram / Zalo / Discord + chọn loại thông báo
 cecp-panel backup prune-dry-run          # xem retention (đã sửa) sẽ xoá những snapshot nào
 cecp-panel backup prune                  # xác nhận một lần — ⚠ VPS đang/nghi bị hack: KHÔNG chạy trước khi đã khôi phục được bản sạch
 cecp-panel wp cron DOMAIN                # (từng site WordPress) rải lịch wp-cron
