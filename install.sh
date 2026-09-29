@@ -10,7 +10,7 @@
 #   ssh -i ~/.ssh/KEY root@VPS_IP 'bash -s' < scripts/cecp-panel/install.sh
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.11.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.12.0-beta}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/cecp-panel}"
 ETC_DIR="/etc/cecp-panel"
 VAR_LIB="/var/lib/cecp-panel"
@@ -65,7 +65,7 @@ install_packages_rhel() {
   dnf -y install nginx mariadb-server mariadb fail2ban firewalld \
     python3 python3-pip wget tar unzip policycoreutils-python-utils \
     php php-fpm php-mysqlnd php-cli php-gd php-xml php-mbstring php-json php-opcache \
-    certbot python3-certbot-nginx restic rclone "${extra[@]}"
+    certbot python3-certbot-nginx restic rclone bash-completion acl "${extra[@]}"
   if ! command -v wp &>/dev/null; then
     local wpbase="https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar" wptmp
     wptmp="$(mktemp -d)"
@@ -86,7 +86,7 @@ install_packages_debian() {
   apt-get install -y nginx mariadb-server mariadb-client fail2ban ufw \
     python3 python3-pip curl wget tar unzip \
     php-fpm php-mysql php-cli php-gd php-xml php-mbstring php-curl \
-    certbot python3-certbot-nginx restic rclone
+    certbot python3-certbot-nginx restic rclone bash-completion acl
   systemctl enable --now nginx mariadb fail2ban 2>/dev/null || true
 }
 
@@ -189,6 +189,8 @@ install_panel_files() {
   cp -a "${SCRIPT_DIR}/." "$INSTALL_ROOT/"
   chmod +x "$INSTALL_ROOT/cecp-panel" "$INSTALL_ROOT"/lib/*.sh 2>/dev/null || true
   install -m 0755 "$INSTALL_ROOT/cecp-panel" "$BIN_PATH"
+  # Tab completion: commands, flags and this server's domains.
+  install -D -m 0644 "$INSTALL_ROOT/templates/cecp-panel.bash-completion" /etc/bash_completion.d/cecp-panel 2>/dev/null || true
   cat >"$ETC_DIR/panel.json" <<EOF
 {
   "version": "$CECP_PANEL_VERSION",

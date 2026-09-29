@@ -30,6 +30,7 @@ tar czf "$OUT" -C "$(dirname "$ROOT")" \
   --exclude='cecp-panel/etc/credentials.env' \
   --exclude='cecp-panel/**/*.bak' \
   --exclude='cecp-panel/**/*~' \
+  --exclude='__pycache__' \
   cecp-panel
 # Portable "latest" copy (Windows Git bash may lack ln -sf)
 cp -f "$OUT" "$DIST/cecp-panel-latest.tar.gz"

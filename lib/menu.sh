@@ -154,6 +154,11 @@ menu_security() {
     echo "11) Auto security updates (dnf-automatic / unattended)"
     echo "12) Repair SFTP sshd drop-ins"
     echo "13) Fix permissions + redact old secrets in logs"
+    echo "14) Cloudflare-only web ports (hide origin IP) on/off/status"
+    echo "15) Scan all sites for malware / cross-site infection"
+    echo "16) After a hack: rotate secrets of a site (or --all)"
+    echo "17) Periodic scan (quietest hour, every 14/30 days): on/off/status"
+    echo "18) Infection handled: resume backup retention (scan-ack)"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -176,6 +181,31 @@ menu_security() {
       11) security_unattended_updates ;;
       12) security_ssh_repair ;;
       13) security_fix_permissions ;;
+      14)
+        read -r -p "on / off / status [status]: " a
+        security_cf_only "${a:-status}"
+        ;;
+      15) security_scan --all || true ;;
+      16)
+        read -r -p "Domain (or --all): " d
+        read -r -p "Also new passwords for every WordPress administrator? (y/n): " a
+        if [[ "$a" =~ ^[yY] ]]; then security_rotate_secrets "$d" --admins; else security_rotate_secrets "$d"; fi
+        ;;
+      17)
+        read -r -p "on / off / status [status]: " a
+        if [[ "${a:-status}" == on ]]; then
+          read -r -p "Every how many days [14 / 30]: " d
+          read -r -p "Infected site → restore it from its last verified-clean backup automatically? (y/n) [n]: " a
+          if [[ "$a" =~ ^[yY] ]]; then
+            security_scan_schedule on --every "${d:-14}" --auto-restore
+          else
+            security_scan_schedule on --every "${d:-14}" --no-auto-restore
+          fi
+        else
+          security_scan_schedule "${a:-status}"
+        fi
+        ;;
+      18) security_scan_ack ;;
       0) break ;;
     esac
   done
@@ -285,6 +315,7 @@ menu_media() {
     echo " 5) Dry-run"
     echo " 6) Enable global daily cron"
     echo " 7) Disable global daily cron"
+    echo " 8) Free disk: delete originals WordPress kept (dry run first)"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -312,6 +343,13 @@ menu_media() {
         ;;
       6) media_enable_cron ;;
       7) media_disable_cron ;;
+      8)
+        read -r -p "Domain: " d
+        [[ -z "$d" ]] && continue
+        media_prune_originals "$d"
+        read -r -p "Delete them now? (yes): " ok
+        [[ "$ok" == "yes" ]] && media_prune_originals "$d" --yes
+        ;;
       0) break ;;
     esac
   done
@@ -421,7 +459,7 @@ menu_backup() {
       4) backup_list ;;
       5) backup_policy_show ;;
       6) backup_enable_cron ;;
-      7) backup_apply_retention ;;
+      7) backup_apply_retention --confirm ;;
       8) read -r -p "Domain [--all]: " d; backup_verify "${d:---all}" ;;
       9)
         read -r -p "Domain: " d
@@ -441,15 +479,20 @@ menu_backup() {
 menu_notify() {
   while true; do
     echo ""
-    echo "== Notify (Telegram / Discord) =="
-    echo " 1) Status  2) Setup  3) Test  4) Health check now"
-    echo " 5) Enable daily cron  6) Disable cron  7) Webhook (n8n) URL"
+    echo "== Thông báo (Telegram / Zalo / Discord / n8n) =="
+    echo " 1) Xem cấu hình     2) Cài đặt (wizard)   3) Gửi thử        4) Kiểm tra SSL/ổ đĩa ngay"
+    echo " 5) Bật kiểm tra hằng ngày   6) Tắt kiểm tra hằng ngày   7) Webhook (n8n) URL"
+    echo " 8) Telegram   9) Zalo Bot   10) Discord   11) Chọn loại thông báo"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
       1) notify_status ;;
       2) notify_setup ;;
       3) notify_test ;;
+      8) notify_setup_bot telegram ;;
+      9) notify_setup_bot zalo ;;
+      10) notify_setup_discord ;;
+      11) notify_events_edit ;;
       4) notify_health ;;
       5) notify_enable_cron ;;
       6) notify_disable_cron ;;
@@ -515,6 +558,21 @@ menu_modsec() {
   done
 }
 
+# Run a menu action in a subshell: a panel_die (typo in a domain, a failed step) used to exit
+# the whole interactive menu back to the shell. errexit stays on inside the action; it is only
+# lifted in the parent, so a failure comes back here as a status code.
+menu_try() {
+  local rc
+  set +e
+  ( set -e; "$@" )
+  rc=$?
+  set -e
+  if (( rc != 0 )); then
+    echo -e "${C_RED:-}  ✗ Lỗi (mã $rc) — xem thông báo phía trên. Đã quay lại menu.${C_RESET:-}"
+  fi
+  return 0
+}
+
 menu_main() {
   while true; do
     menu_banner
@@ -542,37 +600,37 @@ menu_main() {
     read -r -p "Choice [0]: " choice
     choice="${choice:-0}"
     case "$choice" in
-      1) menu_domain ;;
-      2) menu_ssl ;;
-      3) menu_dns ;;
-      4) menu_backup ;;
-      5) menu_security ;;
-      6) menu_wordpress ;;
-      7) menu_perf ;;
-      8) menu_system ;;
-      9) mysql_secure_basics ;;
-      10) menu_php ;;
-      11) menu_update ;;
-      12) agent_install; agent_status ;;
-      13) show_status ;;
-      14) menu_notify ;;
-      15) menu_cf ;;
-      16) menu_modsec ;;
+      1) menu_try menu_domain ;;
+      2) menu_try menu_ssl ;;
+      3) menu_try menu_dns ;;
+      4) menu_try menu_backup ;;
+      5) menu_try menu_security ;;
+      6) menu_try menu_wordpress ;;
+      7) menu_try menu_perf ;;
+      8) menu_try menu_system ;;
+      9) menu_try mysql_secure_basics ;;
+      10) menu_try menu_php ;;
+      11) menu_try menu_update ;;
+      12) menu_try agent_install; menu_try agent_status ;;
+      13) menu_try show_status ;;
+      14) menu_try menu_notify ;;
+      15) menu_try menu_cf ;;
+      16) menu_try menu_modsec ;;
       17)
         read -r -p "log kind [panel|nginx|php|mysql|fail2ban]: " k
         read -r -p "domain (nginx only, empty=global): " d
-        log_view "${k:-panel}" "$d" 80
+        menu_try log_view "${k:-panel}" "$d" 80
         ;;
       18)
         read -r -p "status / run / enable / disable [status]: " a
         case "${a:-status}" in
-          run) monitor_run ;;
-          enable) monitor_enable ;;
-          disable) monitor_disable ;;
-          *) monitor_status ;;
+          run) menu_try monitor_run ;;
+          enable) menu_try monitor_enable ;;
+          disable) menu_try monitor_disable ;;
+          *) menu_try monitor_status ;;
         esac
         ;;
-      19) menu_agency ;;
+      19) menu_try menu_agency ;;
       0) exit 0 ;;
       *) echo "Unknown option" ;;
     esac

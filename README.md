@@ -1,4 +1,4 @@
-# CECP Panel v1.10.0-beta
+# CECP Panel v1.12.0-beta
 
 Standalone VPS panel (LarVPS-style). **One install** = full stack + menu.
 
@@ -20,6 +20,8 @@ cecp-panel security apply-production
 cecp-panel optimize stack
 cecp-panel onboard   # Cloudflare + Google Drive (tuỳ chọn)
 ```
+
+Gõ lệnh nhanh: phím **Tab** gợi ý lệnh, cờ và domain (`cecp-panel ssl issue <Tab>`), có hiệu lực ở phiên SSH mới.
 
 ## Agency (từ Mac/Windows CECP)
 
@@ -77,6 +79,9 @@ cecp-panel update panel
 
 ## Docs
 
+- [NOTIFICATIONS.md](docs/NOTIFICATIONS.md) — cảnh báo qua Telegram / Zalo Bot / Discord / n8n, chọn loại thông báo
+- [INCIDENT_RESPONSE.md](docs/INCIDENT_RESPONSE.md) — website bị hack: quét, làm sạch, đổi bí mật, ngăn lây chéo
+- [CLOUDFLARE_DNS.md](docs/CLOUDFLARE_DNS.md) — trỏ domain qua Cloudflare (DNS, SSL, khoá IP gốc) — runbook cho người & AI Agent ([AGENTS.md](AGENTS.md))
 - [MEDIA_OPTIMIZE.md](docs/MEDIA_OPTIMIZE.md) — per-site image optimize (opt-in)
 - [VPS_BACKUP_GDRIVE.md](../../docs/infrastructure/VPS_BACKUP_GDRIVE.md)
 - [CECP_PANEL_PRODUCT_PRIORITIES.md](../../docs/products/CECP_PANEL_PRODUCT_PRIORITIES.md)

@@ -8,11 +8,45 @@ Tối ưu ảnh **tùy chọn theo website**. Site tĩnh / ít update: **không 
 - Không cài mu-plugin cho đến khi `media enable`
 - Cron global chỉ xử lý site có `media_optimize.enabled=true` **và** `cron=true`
 
+## Chế độ lưu ảnh (`--format`, 1.12+)
+
+| `--format` | Ảnh upload mới | File gốc | Khi nào dùng |
+|---|---|---|---|
+| **`webp`** (mặc định) | Mọi định dạng (JPG, PNG, WebP, BMP; HEIC/HEIF iPhone và TIFF khi server có PHP Imagick) → **một file WebP duy nhất**, xoay đúng chiều theo EXIF, thu về tối đa `max_width`×`max_height` (không bao giờ phóng to → không vỡ/nhoè), các size thumbnail cũng là WebP | **Không giữ** — xoá ngay sau khi chuyển; WordPress không còn tạo cặp `-scaled`/`-rotated` + bản gốc | Hầu hết site (mọi trình duyệt từ 2020 đều hỗ trợ WebP) |
+| `avif` | Như trên nhưng AVIF (nhỏ hơn WebP ~20-30%) — cần WordPress ≥ 6.5 và PHP có AVIF, không có thì tự dùng WebP | Không giữ | Chỉ khi chấp nhận Safari < 16.4 không xem được ảnh |
+| `original` | Giữ định dạng, nén lại + file `.webp/.avif` đi kèm (nginx tự chọn theo trình duyệt) | Giữ | Hành vi cũ; site bật trước 1.12 vẫn ở chế độ này cho tới khi chạy lại `media enable` |
+
+Chất lượng: ảnh chụp dùng `--quality` (mặc định 80, WebP 80 ≈ JPEG 90 về mắt thường); ảnh nguồn PNG
+(logo, ảnh chụp màn hình, ảnh có chữ) tự dùng +10 để nét chữ không nhoè. Nếu bản nén **không nhỏ hơn**
+bản upload (ảnh đã tối ưu sẵn) và không cần resize/xoay thì giữ nguyên bản upload. GIF (ảnh động), SVG,
+WebP/PNG động không bị đụng tới.
+
+Ví dụ thực tế (test trên WordPress): ảnh điện thoại JPEG 4000×3000 819 KB → WebP 1440×1920 **72 KB**
+(đã xoay dọc); BMP scan 5,7 MB → **61 KB**; logo PNG trong suốt vẫn trong suốt.
+
+Ảnh rất lớn (> ~25 megapixel) mà server chỉ có GD: tăng RAM PHP của site
+`cecp-panel php config DOMAIN memory_limit=512M` (`media enable` cài Imagick nếu có sẵn gói và cảnh báo khi cần).
+`cecp-panel media status DOMAIN` liệt kê định dạng server đọc/chuyển được.
+
+### Dọn file gốc của thư viện cũ
+
+WordPress (từ 5.3) giữ bản gốc full-size của mọi ảnh lớn/xoay (file không có `-scaled` bên cạnh file
+`-scaled`) — thường là phần nặng nhất của `uploads/`, chỉ dùng để tạo lại thumbnail.
+
+```bash
+cecp-panel media prune-originals example.com          # chạy thử: đếm + dung lượng sẽ giải phóng
+cecp-panel media prune-originals example.com --yes    # xoá, bản -scaled trở thành file chính
+```
+
+Nên có backup mới (`cecp-panel backup run DOMAIN`) trước khi chạy `--yes`.
+
 ## Lệnh
 
 ```bash
 # Bật (WordPress only)
-cecp-panel media enable example.com
+cecp-panel media enable example.com                    # --format webp: 1 file WebP/ảnh, không giữ gốc
+cecp-panel media enable example.com --format original  # hành vi cũ (giữ JPG/PNG + sidecar)
+cecp-panel media enable example.com --max-width 2560   # màn hình lớn/retina toàn khung
 cecp-panel media enable example.com --max-width 1920 --quality 80
 cecp-panel media enable example.com --no-cron          # chỉ on-upload
 cecp-panel media enable example.com --no-upload        # chỉ cron batch

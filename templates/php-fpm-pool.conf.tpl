@@ -27,6 +27,8 @@ php_admin_value[max_input_time] = {{MAX_INPUT_TIME}}
 php_admin_value[max_input_vars] = {{MAX_INPUT_VARS}}
 php_admin_flag[log_errors] = on
 php_admin_flag[expose_php] = off
-php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen,parse_ini_file,show_source,pcntl_exec,pcntl_fork
+; putenv: with it, putenv("LD_PRELOAD=evil.so") + mail() (which runs sendmail) executes any code
+; despite exec/system being disabled. Re-enable for a plugin that needs it: php config DOMAIN allow_putenv=on
+php_admin_value[disable_functions] = {{DISABLE_FUNCTIONS}}
 ; OPcache/JIT sizes are server-wide (shared memory allocated when the FPM master starts);
 ; per-pool values had no effect. Tune with: cecp-panel optimize opcache

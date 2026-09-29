@@ -9,6 +9,8 @@ BACKUP_STAGING="$VAR_LIB/backup-staging"
 BACKUP_LOG="$LOG_DIR/backup.log"
 BACKUP_STATE="$VAR_LIB/backup-state.json"
 RESTORE_DIR="$VAR_LIB/restore"
+SCAN_FREEZE_FLAG="$VAR_LIB/scan-retention-freeze"
+RETENTION_V2_FLAG="$VAR_LIB/retention-grouping-v2.confirmed"
 
 # RESTIC_REPOSITORY may also be a local path or sftp:… (second copy, or no Google Drive at all).
 backup_repo_is_rclone() { [[ "${RESTIC_REPOSITORY:-}" == rclone:* ]]; }
@@ -265,7 +267,10 @@ backup_stage_site() {
     return 1
   fi
   rm -f "$cnf"
-  if ! tar -C "$(dirname "$docroot")" -czf "$stage/files/public_html.tar.gz" "$(basename "$docroot")" 2>>"$BACKUP_LOG"; then
+  # Uncompressed on purpose: restic deduplicates (and, repository v2, compresses) by content, but
+  # gzip reshuffles the whole stream after the first changed byte — with .tar.gz every daily
+  # backup re-uploaded almost the entire site to Google Drive. Restores read both formats.
+  if ! tar -C "$(dirname "$docroot")" -cf "$stage/files/public_html.tar" "$(basename "$docroot")" 2>>"$BACKUP_LOG"; then
     rm -rf "$stage"
     echo "$(backup_now) $domain: tar of $docroot failed" >>"$BACKUP_LOG"
     return 1
@@ -363,15 +368,36 @@ EOF
 }
 
 backup_apply_retention() {
-  local dry=0
+  local dry=0 confirm=0
   [[ "${1:-}" == "--dry-run" ]] && dry=1
+  [[ "${1:-}" == "--confirm" ]] && confirm=1
+  # Retention used restic's default grouping (host + paths). Every backup stages into a new
+  # timestamped directory, so every snapshot was its own group and NOTHING was ever forgotten:
+  # repositories only grew. Grouping by host + tags (the site) fixes it — and the first run
+  # would delete a large backlog at once, possibly the only clean copies of a hacked site. So the
+  # automatic run stays a dry run (reported) until the operator confirms once: backup prune.
+  if (( ! dry && ! confirm )) && [[ ! -f "$RETENTION_V2_FLAG" ]]; then
+    dry=1
+    panel_log "WARN: backup retention not applied yet with the corrected grouping — dry run below. Review, then run once: cecp-panel backup prune"
+    notify_event backup_retention_confirm warning "Backup retention needs one confirmation (cecp-panel backup prune): old snapshots were never pruned before 1.12" || true
+  fi
   backup_load_config
   backup_ensure_tools
   export RESTIC_PASSWORD_FILE="$RESTIC_PASS_FILE"
+  # A security scan found an infection: every older snapshot may be the last clean copy, so
+  # nothing is forgotten until the operator confirms (cecp-panel security scan-ack).
+  if [[ -f "$SCAN_FREEZE_FLAG" && "$dry" -eq 0 ]]; then
+    panel_log "WARN: retention paused — security scan found indicators on $(<"$SCAN_FREEZE_FLAG"); old snapshots kept (clear with: cecp-panel security scan-ack)"
+    return 0
+  fi
   local -a forget_args=(
+    --group-by "host,tags"
     --keep-daily "$RESTIC_KEEP_DAILY"
     --keep-weekly "$RESTIC_KEEP_WEEKLY"
     --keep-monthly "$RESTIC_KEEP_MONTHLY"
+    # Snapshots a periodic security scan vouched for / kept as evidence (security scan-schedule).
+    --keep-tag scan-clean
+    --keep-tag scan-suspect
   )
   if [[ "${RESTIC_KEEP_YEARLY:-0}" -gt 0 ]]; then
     forget_args+=(--keep-yearly "$RESTIC_KEEP_YEARLY")
@@ -387,6 +413,9 @@ backup_apply_retention() {
     panel_log "WARN: retention (restic forget) exited with code $rc"
     notify_event backup_retention_failed warning "Backup retention/prune failed (exit $rc) on $RESTIC_REPOSITORY"
     return 1
+  fi
+  if (( confirm && ! dry )); then
+    date -u +%Y-%m-%dT%H:%M:%SZ >"$RETENTION_V2_FLAG"
   fi
 }
 
@@ -472,6 +501,16 @@ backup_find_stage() {
   find "$1" -type f -name site.json -path '*backup-staging*' -printf '%h\n' 2>/dev/null | head -1
 }
 
+# File archive of a stage: public_html.tar (1.12+) or public_html.tar.gz (older snapshots).
+backup_stage_archive() {
+  local f
+  for f in "$1/files/public_html.tar" "$1/files/public_html.tar.gz"; do
+    [[ -f "$f" ]] && { echo "$f"; return 0; }
+  done
+  echo "$1/files/public_html.tar"
+  return 1
+}
+
 # cecp-panel backup restore DOMAIN SNAPSHOT_ID|latest [--live [--dry-run] [--yes]] [--target DIR] [--repo REPO]
 # Legacy positional form still works: backup restore DOMAIN SNAPSHOT_ID [TARGET_DIR] [RESTIC_REPO]
 backup_restore() {
@@ -540,7 +579,8 @@ backup_restore_apply() {
   old="${docroot}.pre-restore-${stamp}"
   rm -rf "$new.tmp" "$new"
   mkdir -p "$new.tmp"
-  tar -C "$new.tmp" -xzf "$archive" || { rm -rf "$new.tmp"; return 1; }
+  # -xf, not -xzf: GNU tar detects the compression itself (.tar backups, .tar.gz safety copies).
+  tar -C "$new.tmp" -xf "$archive" || { rm -rf "$new.tmp"; return 1; }
   mv "$new.tmp/$(basename "$docroot")" "$new" && rmdir "$new.tmp" || return 1
   # Files: swap directories (same filesystem → near-atomic)
   mv "$docroot" "$old" && mv "$new" "$docroot" || return 1
@@ -554,9 +594,9 @@ backup_restore_apply() {
     chcon -R -t httpd_sys_content_t "$docroot" 2>/dev/null || true
   fi
   site_wp_config_sync "$domain"
-  # Database: recreate empty, then import (grants live in mysql.db and survive the drop)
-  mysql -e "DROP DATABASE IF EXISTS \`${db_name}\`; CREATE DATABASE \`${db_name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" || return 1
-  mysql "$db_name" <"$sql" 2>>"$BACKUP_LOG" || return 1
+  # Database: recreate empty, then import AS THE SITE'S DB USER (db_import_file) — a dump is
+  # site-controlled data; imported as root, a tampered one could GRANT itself the server.
+  db_import_file "$domain" "$sql" 2>>"$BACKUP_LOG" || return 1
   rm -rf "$old"
   # OPcache would keep serving the previous code for up to revalidate_freq (60 s) and make
   # the health check lie; a graceful reload resets it.
@@ -572,7 +612,7 @@ backup_restore_apply() {
 backup_restore_live() {
   local domain="$1" snapshot_id="$2" dry="$3" yes="$4"
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site $domain does not exist here — create it first: cecp-panel site add $domain"
-  local stamp work stage tables snap_time code
+  local stamp work stage archive tables snap_time code
   stamp="$(date +%Y%m%d_%H%M%S)"
   work="$RESTORE_DIR/$(domain_slug "$domain")-${stamp}"
   (umask 077; mkdir -p "$work")
@@ -582,14 +622,15 @@ backup_restore_live() {
     || { rm -rf "$work"; panel_die "Snapshot $snapshot_id (tag $domain) could not be restored (see $BACKUP_LOG)"; }
   stage="$(backup_find_stage "$work/snap")"
   [[ -n "$stage" && -s "$stage/database.sql" ]] || { rm -rf "$work"; panel_die "Snapshot has no CECP site backup (database.sql missing)"; }
-  tar -tzf "$stage/files/public_html.tar.gz" >/dev/null 2>&1 || { rm -rf "$work"; panel_die "File archive in snapshot is unreadable"; }
+  archive="$(backup_stage_archive "$stage")" && tar -tf "$archive" >/dev/null 2>&1 \
+    || { rm -rf "$work"; panel_die "File archive in snapshot is unreadable"; }
   tables="$(grep -c '^CREATE TABLE' "$stage/database.sql" || true)"
   snap_time="$(restic snapshots "$snapshot_id" --tag "$domain" --json 2>/dev/null \
     | python3 -c 'import json,sys; s=json.load(sys.stdin); print(s[-1]["time"][:19] if s else "?")' 2>/dev/null || echo "?")"
   echo "=== Live restore plan: $domain ==="
   echo "  snapshot:  $snapshot_id (taken $snap_time UTC)"
   echo "  database:  $(site_json_get "$domain" db_name) ← ${tables} tables"
-  echo "  files:     $(site_json_get "$domain" docroot) ← $(du -h "$stage/files/public_html.tar.gz" | cut -f1) archive"
+  echo "  files:     $(site_json_get "$domain" docroot) ← $(du -h "$archive" | cut -f1) archive"
   echo "  safety:    current files + DB saved to $work/pre (automatic rollback on failure)"
   if (( dry )); then
     rm -rf "$work"
@@ -606,7 +647,7 @@ backup_restore_live() {
   panel_log "Saving current state of $domain ..."
   backup_restore_safety_copy "$domain" "$work/pre" || { rm -rf "$work"; panel_die "Could not save the current site — live restore aborted, nothing changed"; }
   panel_log "Restoring $domain from $snapshot_id ..."
-  if backup_restore_apply "$domain" "$stage/database.sql" "$stage/files/public_html.tar.gz" "$stamp"; then
+  if backup_restore_apply "$domain" "$stage/database.sql" "$archive" "$stamp"; then
     sleep 1
     if code="$(site_http_check "$domain")"; then
       rm -rf "$work/snap"
@@ -654,6 +695,23 @@ backup_verify() {
   return "$rc"
 }
 
+# Test-import a dump into a throw-away database as a throw-away user that can only touch it
+# (never as root: the dump is data the site controls). The user is dropped again right away.
+backup_verify_import() {
+  local vdb="$1" sql="$2" vpass cnf rc=0
+  vpass="$(rand_alnum 24)"
+  mysql <<SQL || return 1
+CREATE DATABASE \`${vdb}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER '${vdb}'@'localhost' IDENTIFIED BY '${vpass}';
+GRANT ALL PRIVILEGES ON \`${vdb}\`.* TO '${vdb}'@'localhost';
+SQL
+  cnf="$(mysql_client_cnf "$vdb" "$vpass")"
+  sed -E 's/DEFINER=`[^`]+`@`[^`]+`//g' "$sql" | mysql --defaults-extra-file="$cnf" "$vdb" 2>>"$BACKUP_LOG" || rc=1
+  rm -f "$cnf"
+  mysql -e "DROP USER IF EXISTS '${vdb}'@'localhost'" || true
+  return "$rc"
+}
+
 backup_verify_site() {
   local domain="$1" tmp stage vdb n=0 err=""
   validate_domain "$domain"
@@ -664,11 +722,11 @@ backup_verify_site() {
     stage="$(backup_find_stage "$tmp")"
     if [[ -z "$stage" || ! -s "$stage/database.sql" ]]; then
       err="snapshot has no database dump"
-    elif ! tar -tzf "$stage/files/public_html.tar.gz" >/dev/null 2>&1; then
+    elif ! tar -tf "$(backup_stage_archive "$stage")" >/dev/null 2>&1; then
       err="file archive is unreadable"
     else
       vdb="cecp_verify_$(rand_alnum 8 | tr '[:upper:]' '[:lower:]')"
-      if mysql -e "CREATE DATABASE \`${vdb}\`" && mysql "$vdb" <"$stage/database.sql" 2>>"$BACKUP_LOG"; then
+      if backup_verify_import "$vdb" "$stage/database.sql"; then
         n="$(mysql -Nse "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${vdb}'")"
         (( n > 0 )) || err="database dump contains no tables"
       else

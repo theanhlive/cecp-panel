@@ -1,5 +1,95 @@
 # Changelog
 
+## 1.12.0-beta — rà soát bảo mật, tốc độ, dữ liệu backup và thao tác
+
+### Thông báo: Telegram, Zalo Bot, Discord — chọn loại thông báo
+- **Zalo Bot** (mới, API bot.zapps.vn) cùng Telegram, Discord, webhook n8n. `cecp-panel notify setup` (wizard) hoặc `notify telegram|zalo|discord`: dán token/URL ở **ô nhập ẩn** (không qua dòng lệnh), panel kiểm tra token (getMe), **tự tìm Chat ID** sau khi bạn nhắn cho bot một tin, gửi tin thử. Agent: `CECP_TELEGRAM_TOKEN`/`CECP_ZALO_TOKEN`/`CECP_DISCORD_WEBHOOK` qua môi trường.
+- **Chọn loại thông báo**: 6 nhóm (`security uptime backup ssl resources updates`) + mức tối thiểu (`info|warning|critical`), chung hoặc **riêng từng kênh**: `notify events edit` / `notify events set security,uptime --channel zalo --min warning`. Webhook n8n mặc định nhận tất cả.
+- Tin nhắn dễ đọc (🔴 NGHIÊM TRỌNG / 🟠 CẢNH BÁO / 🟢 THÔNG TIN, host, site, giờ); `notify test [KÊNH]` báo kết quả từng kênh; `notify off KÊNH`. Hướng dẫn: [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md).
+
+### Khôi phục website từ bản backup đã xác nhận sạch
+- **`security restore-clean DOMAIN|--all [--dry-run] [--yes]`** (mới): đưa site về bản backup mới nhất được quét định kỳ đánh dấu `scan-clean`, rồi đổi mật khẩu DB/WordPress/Redis và khoá SFTP. Bản hiện trạng trước khi khôi phục được giữ (7 ngày) để lấy lại đơn hàng/bài viết mới.
+- `security scan-schedule on --auto-restore`: khi quét định kỳ phát hiện nhiễm ở site (không phải cấp server), **tự khôi phục site đó từ bản sạch**, quét lại để xác nhận, báo kết quả trong cảnh báo.
+
+### Quét bảo mật định kỳ + bảo vệ bản backup sạch
+- **`security scan-schedule on [--every 14|30] [--hour H] | off | status`** (mới): quét toàn VPS mỗi 14/30 ngày vào **giờ ít truy cập nhất** (tự tính từ log nginx ~2 tuần, tránh giờ backup/bảo trì), chỉ khi máy rảnh (load, không có backup chạy — không thì thử lại đêm sau), mức ưu tiên CPU/IO thấp nhất. Có trong menu Security.
+- Quét **sạch** → bản backup mới nhất của mỗi site gắn nhãn `scan-clean`, retention luôn giữ (2 bản sạch gần nhất/site).
+- Phát hiện **nhiễm** → backup hiện trường (`scan-suspect`), **đóng băng retention** (không xoá snapshot cũ = bản sạch), cảnh báo critical; `security scan-ack` sau khi xử lý. `security scan-cron --force` để chạy ngay. Báo cáo ở `/var/log/cecp-panel/security-scan/`.
+- **Sửa lỗi retention backup (có từ trước)**: `restic forget` gom snapshot theo đường dẫn, mà mỗi lần backup dùng một thư mục tạm có ngày giờ khác nhau ⇒ mỗi snapshot là một nhóm riêng ⇒ **không bản nào bị xoá bao giờ**, repository (Google Drive) chỉ phình ra. Giờ gom theo host + site (`--group-by host,tags`). Vì lần áp đầu có thể xoá nhiều bản cũ một lúc, retention tự động **chỉ chạy thử** (ghi log + cảnh báo) cho tới khi bạn xác nhận một lần bằng `cecp-panel backup prune`.
+
+### Cách ly giữa các site — vá đường lây chéo (sau sự cố: một site bị hack kéo theo mọi site)
+- **Leo thang lên root qua symlink (nghiêm trọng)**: panel (root) tạo/`chown`/ghi file bên trong docroot — `mu-plugins`, `wp-config.php` — và đi theo symlink. Code độc của site A đặt `wp-content/mu-plugins → /etc` thì `media enable` chuyển quyền sở hữu `/etc` cho site A (chiếm root → mọi site). `wp-config.php → wp-config của site B` thì restore/duplicate/staging/redis ghi thông tin DB của A vào B (B chạy trên database do kẻ tấn công kiểm soát). Đã tái hiện cả hai. Giờ **root không bao giờ ghi trong docroot**: mọi thao tác chạy bằng user của site (`site_write_file`, `site_run_as`); mu-plugin của panel thuộc user site (root-owned trước đây không bảo vệ gì — site vẫn xoá/tạo lại được).
+- **nginx `disable_symlinks if_not_owner`**: site A tạo symlink tới file của site B (hoặc `/etc/passwd`) rồi tải về qua web — đã tái hiện (HTTP 200 kèm dữ liệu của B), giờ bị chặn.
+- **wp-cron chạy qua PHP-FPM của chính site** (loopback HTTP, 5 phút/lần) thay vì `wp cron event run` (PHP CLI không có `open_basedir`/`disable_functions` → plugin độc có shell đầy đủ mỗi 15 phút). `wp-cron.php` chỉ nhận loopback (chặn spam wp-cron từ ngoài).
+- **User site bị cấm `crontab`/`at`** (`/etc/cron.deny`, `/etc/at.deny`) — chặn cửa hậu tự cài lại.
+- **OPcache cô lập** (`security php-isolation`, nằm trong `apply-production`): `validate_permission`, `validate_root`, khoá API — trước đây mọi site dùng chung một OPcache: liệt kê/xoá/đầu độc code của nhau.
+- `site rebuild-vhost` giờ tự áp: ACL docroot (trước đây site cũ chưa chạy `harden-docroot` vẫn đọc chéo được `wp-config.php`), cấm crontab, dòng wp-cron mới. `security check` báo FAIL/WARN khi VPS chưa áp.
+- **`security scan [DOMAIN|--all] [--days N]`** (mới, chỉ đọc): PHP trong uploads, mẫu web shell/loader, file của user khác trong docroot (ghi chéo), symlink ra ngoài, mu-plugin lạ, `wp-config.php` trỏ database khác, checksum core/plugin wordpress.org, admin mới tạo; cấp server: UID 0 lạ, `ld.so.preload`, crontab/at của site, tiến trình lạ của site, file site trong /tmp, cron/systemd/SSH key đổi gần đây. Lệnh WordPress chạy với `--skip-plugins --skip-themes` (code độc không chạy).
+- **`security rotate-secrets DOMAIN|--all [--admins]`** (mới): mật khẩu DB (ghi lại wp-config), salts WordPress (đăng xuất mọi phiên), Redis ACL, khoá mật khẩu SFTP, mật khẩu mới cho mọi admin (chỉ in ra màn hình).
+- Runbook [docs/INCIDENT_RESPONSE.md](docs/INCIDENT_RESPONSE.md): khoanh vùng → dựng VPS mới hay làm sạch tại chỗ → làm sạch WordPress → đổi bí mật → ngăn tái nhiễm.
+
+### Bảo mật
+- **Media optimize không còn chạy bằng root trên thư mục `uploads/`** (của site): trước đây một WordPress bị hack có thể đặt symlink (vd. `anh.webp -> /etc/shadow`) và job tối ưu ảnh hằng đêm (root) sẽ ghi đè file hệ thống qua symlink đó. Giờ script chạy bằng user của chính site (`runuser`), file cũ do root tạo được chuyển quyền trước (`chown -h`, không đi theo symlink).
+- **Chặn tải file backup qua web**: `wp-content/ai1wm-backups`, `updraft`, `backups-dup-*`, `backwpup-*`, `wpvividbackups`, `backuply`, `wp-migrate-db`, `wp-staging` và các đuôi `.wpress .wpstg .sql.gz .sql.zip .dump .orig .old .save ~`. Các plugin này chỉ tự bảo vệ bằng `.htaccess` — nginx bỏ qua `.htaccess`, nên ai đoán được tên file là tải được toàn bộ site + database.
+- **HTTPS catch-all** (`00-cecp-default-ssl.conf`, nginx ≥ 1.19.4): hostname lạ hoặc truy cập thẳng bằng IP trên cổng 443 bị từ chối bắt tay TLS, thay vì nhận chứng chỉ + nội dung của site đầu tiên. Chặn việc quét chứng chỉ để tìm ra IP gốc sau Cloudflare. Tự bỏ qua nếu nginx cũ hoặc đã có `default_server` 443 khác.
+- `system.env` được nạp qua `secure_source` (như mọi file env khác); `optimize redis` nhận ra Redis có sẵn trên Ubuntu (`redis-server`) để không cấu hình đè.
+
+- **`cecp-panel security cf-only on|off|status`** (mới, tự chọn bật): cổng 80/443 chỉ nhận kết nối từ dải IP Cloudflare (firewalld ipset / ufw), SSH không đổi. Kẻ tấn công biết IP gốc không còn vượt qua được WAF/chống DDoS của Cloudflare. Trước khi bật, panel kiểm tra mọi site đều đã proxy qua Cloudflare (mây cam) — site nào chưa sẽ bị liệt kê và lệnh dừng lại (`--force` để bỏ qua). Danh sách IP tự cập nhật theo cron `cf realip` hằng tuần.
+- **Chặn `putenv`** trong PHP (`disable_functions`): cặp `putenv("LD_PRELOAD=…")` + `mail()` là cách phổ biến để chạy lệnh hệ thống dù `exec/system` đã bị cấm. Plugin nào cần: `cecp-panel php config DOMAIN allow_putenv=on`.
+- **Restore/verify backup không import database bằng root nữa**: restore dùng user DB của chính site (như `db import`), verify dùng một user tạm chỉ có quyền trên database tạm rồi xoá ngay. Trước đây một bản dump bị sửa độc (`CREATE USER … GRANT ALL ON *.*`) chạy với quyền root MariaDB.
+
+### RAM
+- `pm.max_children` tự động giờ tính trên **RAM còn lại** sau buffer pool MariaDB + `maxmemory` Redis + ~300 MB cho hệ điều hành (tối thiểu ¼ RAM), chia cho số site, 2..32. Trước đây PHP được cấp 50% RAM (tối thiểu 4 tiến trình/site) *cộng thêm* MariaDB 30% + Redis 10% → VPS 1 GB nhiều site dễ hết RAM, OOM killer tắt MariaDB. Ví dụ VPS 1 GB, 1 site: 8 → 5 tiến trình.
+- `security check` cảnh báo khi tổng tiến trình PHP tối đa (kể cả giá trị đặt tay) vượt ngân sách RAM; `system info` hiện ngân sách này.
+
+### DNS Cloudflare
+- `dns point` / `dns add` tìm **đúng zone** của domain (dò từ tên đầy đủ lên dần, mọi zone token quản lý). Trước đây `dns point shop.khachhang.vn` tạo nhầm `shop.<CF_DEFAULT_ZONE>`, còn domain gốc `khachhang.vn` bị hiểu zone là `vn`. `dns ssl-mode MODE DOMAIN` nhận cả subdomain.
+- Tài liệu mới [docs/CLOUDFLARE_DNS.md](docs/CLOUDFLARE_DNS.md): quy trình chuẩn trỏ domain qua Cloudflare (token, thứ tự cấp SSL → trỏ DNS → SSL mode strict, subdomain/www, khoá IP gốc, kiểm tra, bảng lỗi 521/522/525/526); `AGENTS.md` + `CLAUDE.md` để AI Agent tự đọc.
+
+### WordPress + SSL
+- `FORCE_SSL_ADMIN` chỉ bật khi site **đã có chứng chỉ**: trước đây site mới (`site add --wp`, chưa `ssl issue`) bị chuyển wp-admin sang `https://` không tồn tại → không vào được trang quản trị.
+- `ssl issue` giờ chuyển `home`/`siteurl` của WordPress sang `https://` (và `ssl remove` chuyển về `http://`) — chỉ khi URL đúng là `http(s)://DOMAIN`, không đụng URL tuỳ chỉnh/thư mục con. Trước đây mọi link nội bộ đều phải đi qua redirect 301.
+- Site con dùng wildcard của domain cha được cài WordPress với `https://` ngay từ đầu.
+
+### Tốc độ / dữ liệu
+- **Backup không nén `public_html` trước khi đưa cho restic** (`public_html.tar` thay cho `.tar.gz`): restic khử trùng lặp theo nội dung (và tự nén với repository v2), còn gzip làm thay đổi toàn bộ luồng dữ liệu → trước đây **mỗi ngày upload lại gần như toàn bộ site lên Google Drive**. Giờ chỉ phần thay đổi được upload. Restore/verify đọc được cả snapshot cũ (`.tar.gz`). Lưu ý: thư mục staging tạm thời cần dung lượng bằng kích thước site (không nén). Repository tạo bằng restic < 0.14 (v1, không nén): `restic migrate upgrade_repo_v2`.
+- Bảo trì hằng tuần (`system maintain`) **không còn xoá sạch page cache nginx và cache của restic** mỗi lần chạy (site chậm cho tới khi cache đầy lại; backup kế tiếp phải tải lại index từ Google Drive) — chỉ xoá khi ổ đĩa vượt ngưỡng `DISK_CLEAN_MIN_USE_PCT`; bình thường chỉ `restic cache --cleanup`.
+- `cache purge DOMAIN` đọc 4 KB đầu mỗi file cache (dòng `KEY:`) thay vì `grep` toàn bộ nội dung (tới 1 GB) — nhanh hơn nhiều khi auto-purge "xoá hết" chạy thường xuyên.
+- wp-cron của mỗi site chạy ở một phút riêng trong chu kỳ 15 phút (trước đây mọi site cùng khởi động WordPress lúc :00/:15/:30/:45 → đỉnh CPU/RAM). Áp dụng cho site cũ: `cecp-panel wp cron DOMAIN`.
+- gzip thêm font (`ttf/otf/eot`) và favicon.
+
+### Tối ưu ảnh
+- **Upload bất kỳ định dạng → một file WebP tối ưu, không giữ file gốc** (`media enable DOMAIN`, mặc định `--format webp`): JPG/PNG/WebP/BMP (HEIC/HEIF iPhone, TIFF khi có PHP Imagick) được xoay đúng chiều, thu về tối đa 1920px (không phóng to), lưu **một** file WebP; file upload bị xoá, WordPress không còn giữ cặp `-scaled` + bản gốc, thumbnail cũng là WebP. Ảnh PNG (chữ/logo) nén chất lượng cao hơn; ảnh đã tối ưu sẵn giữ nguyên. Thử thực tế: ảnh điện thoại 819 KB → 72 KB, BMP 5,7 MB → 61 KB. `--format avif` (WordPress ≥ 6.5) hoặc `--format original` (hành vi cũ). Site bật trước đây giữ chế độ cũ cho tới khi chạy lại `media enable`.
+- `media prune-originals DOMAIN [--yes]` (mới): xoá bản gốc full-size WordPress đã giữ cho thư viện cũ (chạy thử mặc định, báo dung lượng giải phóng). Có trong menu Media.
+- `media status DOMAIN` liệt kê định dạng server đọc/chuyển được; `media enable` cài PHP Imagick (nếu có gói) và cảnh báo khi RAM PHP không đủ cho ảnh rất lớn.
+- Ảnh PNG trong suốt (logo, dạng palette) **không còn bị nền đen** trong bản WebP/AVIF.
+- Giữ ICC color profile khi nén lại JPEG/WebP (ảnh chụp từ điện thoại không bị nhạt màu).
+- Không ghi đè ảnh gốc nếu bản nén lại không nhỏ hơn (trừ khi resize); xoá sidecar WebP/AVIF nếu nó **lớn hơn** ảnh gốc (nginx ưu tiên sidecar → trước đây có thể phục vụ file to hơn).
+- mu-plugin: ảnh vừa upload không bị nén lossy lần thứ hai ở bước tạo metadata.
+
+### Thao tác
+- **Menu tương tác không còn bị thoát ra shell khi một thao tác lỗi** (gõ sai domain, bước nào đó thất bại) — báo lỗi rồi quay lại menu.
+- **Tự động gợi ý bằng phím Tab** (`/etc/bash_completion.d/cecp-panel`): lệnh, lệnh con, cờ (`--wp`, `--dns`…) và domain của các site trên VPS. Có hiệu lực ở phiên SSH mới.
+- Cài thêm `bash-completion` và `acl` ngay khi cài panel.
+
+### Nâng cấp từ 1.11
+```bash
+cecp-panel update panel                  # hoặc deploy-safe.sh từ máy agency
+cecp-panel security apply-production     # gồm OPcache cô lập giữa các site
+cecp-panel site rebuild-vhost --all      # rule chặn file backup, HTTPS catch-all, disable_symlinks, wp-cron qua PHP-FPM, cấm crontab site, ACL docroot
+cecp-panel security scan --all           # quét dấu hiệu nhiễm (xem docs/INCIDENT_RESPONSE.md nếu có FAIL)
+cecp-panel security scan-schedule on --every 14   # quét định kỳ vào giờ rảnh nhất  (thêm --auto-restore để tự khôi phục site nhiễm từ bản sạch)
+cecp-panel notify setup                  # Telegram / Zalo / Discord + chọn loại thông báo
+cecp-panel backup prune-dry-run          # xem retention (đã sửa) sẽ xoá những snapshot nào
+cecp-panel backup prune                  # xác nhận một lần — ⚠ VPS đang/nghi bị hack: KHÔNG chạy trước khi đã khôi phục được bản sạch
+cecp-panel wp cron DOMAIN                # (từng site WordPress) rải lịch wp-cron
+cecp-panel ssl issue DOMAIN              # (site đã có SSL) chuyển URL WordPress sang https nếu còn http
+cecp-panel security check                # xem cảnh báo RAM; site rebuild-vhost --all ở trên đã áp số tiến trình mới + putenv
+cecp-panel media enable DOMAIN            # (site đang bật media) chuyển sang lưu 1 file WebP, không giữ gốc
+cecp-panel media prune-originals DOMAIN   # xem dung lượng bản gốc cũ có thể xoá (thêm --yes để xoá)
+cecp-panel security cf-only status       # (tuỳ chọn) nếu mọi site qua Cloudflare: cecp-panel security cf-only on
+```
+
 ## 1.11.0-beta — vá lỗ hổng đọc chéo giữa các site (world-readable docroot)
 
 ### Vấn đề
