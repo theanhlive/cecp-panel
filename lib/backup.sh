@@ -9,6 +9,8 @@ BACKUP_STAGING="$VAR_LIB/backup-staging"
 BACKUP_LOG="$LOG_DIR/backup.log"
 BACKUP_STATE="$VAR_LIB/backup-state.json"
 RESTORE_DIR="$VAR_LIB/restore"
+SCAN_FREEZE_FLAG="$VAR_LIB/scan-retention-freeze"
+RETENTION_V2_FLAG="$VAR_LIB/retention-grouping-v2.confirmed"
 
 # RESTIC_REPOSITORY may also be a local path or sftp:… (second copy, or no Google Drive at all).
 backup_repo_is_rclone() { [[ "${RESTIC_REPOSITORY:-}" == rclone:* ]]; }
@@ -366,15 +368,36 @@ EOF
 }
 
 backup_apply_retention() {
-  local dry=0
+  local dry=0 confirm=0
   [[ "${1:-}" == "--dry-run" ]] && dry=1
+  [[ "${1:-}" == "--confirm" ]] && confirm=1
+  # Retention used restic's default grouping (host + paths). Every backup stages into a new
+  # timestamped directory, so every snapshot was its own group and NOTHING was ever forgotten:
+  # repositories only grew. Grouping by host + tags (the site) fixes it — and the first run
+  # would delete a large backlog at once, possibly the only clean copies of a hacked site. So the
+  # automatic run stays a dry run (reported) until the operator confirms once: backup prune.
+  if (( ! dry && ! confirm )) && [[ ! -f "$RETENTION_V2_FLAG" ]]; then
+    dry=1
+    panel_log "WARN: backup retention not applied yet with the corrected grouping — dry run below. Review, then run once: cecp-panel backup prune"
+    notify_event backup_retention_confirm warning "Backup retention needs one confirmation (cecp-panel backup prune): old snapshots were never pruned before 1.12" || true
+  fi
   backup_load_config
   backup_ensure_tools
   export RESTIC_PASSWORD_FILE="$RESTIC_PASS_FILE"
+  # A security scan found an infection: every older snapshot may be the last clean copy, so
+  # nothing is forgotten until the operator confirms (cecp-panel security scan-ack).
+  if [[ -f "$SCAN_FREEZE_FLAG" && "$dry" -eq 0 ]]; then
+    panel_log "WARN: retention paused — security scan found indicators on $(<"$SCAN_FREEZE_FLAG"); old snapshots kept (clear with: cecp-panel security scan-ack)"
+    return 0
+  fi
   local -a forget_args=(
+    --group-by "host,tags"
     --keep-daily "$RESTIC_KEEP_DAILY"
     --keep-weekly "$RESTIC_KEEP_WEEKLY"
     --keep-monthly "$RESTIC_KEEP_MONTHLY"
+    # Snapshots a periodic security scan vouched for / kept as evidence (security scan-schedule).
+    --keep-tag scan-clean
+    --keep-tag scan-suspect
   )
   if [[ "${RESTIC_KEEP_YEARLY:-0}" -gt 0 ]]; then
     forget_args+=(--keep-yearly "$RESTIC_KEEP_YEARLY")
@@ -390,6 +413,9 @@ backup_apply_retention() {
     panel_log "WARN: retention (restic forget) exited with code $rc"
     notify_event backup_retention_failed warning "Backup retention/prune failed (exit $rc) on $RESTIC_REPOSITORY"
     return 1
+  fi
+  if (( confirm && ! dry )); then
+    date -u +%Y-%m-%dT%H:%M:%SZ >"$RETENTION_V2_FLAG"
   fi
 }
 

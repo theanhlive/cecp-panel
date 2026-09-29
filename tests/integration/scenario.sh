@@ -807,6 +807,18 @@ check "rotate: new DB password in meta and wp-config.php, old one no longer logs
 check "rotate: site still serves" serves_wp
 check "rotate: admin password not written to panel.log" bash -c "! grep -q 'new password' /var/log/cecp-panel/panel.log"
 
+echo "=== Periodic security scan ==="
+check "scan-schedule on picks an hour and writes the daily cron" \
+  bash -c "cecp-panel security scan-schedule on --every 14 && grep -qE '^40 [0-9]{1,2} \* \* \* root .*security scan-cron' /etc/cron.d/cecp-security-scan"
+check "scan-cron is a no-op when not due" bash -c "cecp-panel security scan-cron --force >/dev/null 2>&1; n=\$(ls /var/log/cecp-panel/security-scan | wc -l); cecp-panel security scan-cron && [ \"\$(ls /var/log/cecp-panel/security-scan | wc -l)\" = \"\$n\" ]"
+runuser -u "$SU" -- bash -c "printf '<?php eval(base64_decode(\$_POST[1]));' >$DOCROOT/wp-content/uploads/shell2.php"
+check "infection found → retention frozen, status says so" \
+  bash -c "cecp-panel security scan-cron --force && test -f /var/lib/cecp-panel/scan-retention-freeze && cecp-panel security scan-schedule status | grep -q 'RETENTION FROZEN'"
+check "frozen retention forgets nothing" bash -c "cecp-panel backup prune 2>&1 | grep -q 'retention paused'"
+rm -f "$DOCROOT/wp-content/uploads/shell2.php"
+check "scan-ack resumes retention" bash -c "cecp-panel security scan-ack && ! test -f /var/lib/cecp-panel/scan-retention-freeze"
+check "scan-schedule off" bash -c "cecp-panel security scan-schedule off && ! test -e /etc/cron.d/cecp-security-scan"
+
 echo "=== site remove ==="
 check "site remove $D2" cecp-panel site remove "$D2"
 check "site files removed with the site" test ! -e "/home/$SU2"

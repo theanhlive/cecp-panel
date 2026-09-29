@@ -75,6 +75,9 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel security harden-docroot [DOMAIN|--all]   # nginx ACL, removes world-read (cross-site read protection)
   cecp-panel security cf-only on [--force]|off|status  # ports 80/443 from Cloudflare only (hide origin)
   cecp-panel security scan [DOMAIN|--all] [--days 7]   # web shells, cross-site writes, backdoors (read-only)
+  cecp-panel security scan-schedule on [--every 14|30] [--hour H] | off | status   # periodic scan at the quietest hour
+  cecp-panel security scan-cron [--force]   # run the periodic scan now (--force: ignore interval/load)
+  cecp-panel security scan-ack               # infection handled: resume backup retention
   cecp-panel security rotate-secrets DOMAIN|--all [--admins]   # after a hack: new DB/Redis/SFTP/WP secrets
   cecp-panel security php-isolation                    # OPcache isolation between sites (part of apply-production)
   cecp-panel system info|ensure-swap|swap|disk-clean|maintain|tune
@@ -263,7 +266,7 @@ case "$cmd" in
         [[ -n "${6:-}" ]] || panel_die "Usage: cecp-panel backup configure HOUR MINUTE DOW KEEP_DAILY KEEP_WEEKLY KEEP_MONTHLY [KEEP_YEARLY]"
         backup_configure "$1" "$2" "$3" "$4" "$5" "$6" "${7:-0}"
         ;;
-      prune|forget) backup_apply_retention ;;
+      prune|forget) backup_apply_retention --confirm ;;
       prune-dry-run) backup_apply_retention --dry-run ;;
       restore) backup_restore "$@" ;;
       verify) backup_verify "${1:---all}" ;;
@@ -294,6 +297,9 @@ case "$cmd" in
       fix-perms) require_root; security_fix_permissions ;;
       cf-only) security_cf_only "$@" ;;
       scan) security_scan "$@" ;;
+      scan-schedule) security_scan_schedule "$@" ;;
+      scan-cron) security_scan_cron "$@" ;;
+      scan-ack) security_scan_ack ;;
       rotate-secrets) security_rotate_secrets "$@" ;;
       php-isolation) require_root; security_php_isolation ;;
       harden-docroot)

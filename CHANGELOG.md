@@ -2,6 +2,12 @@
 
 ## 1.12.0-beta — rà soát bảo mật, tốc độ, dữ liệu backup và thao tác
 
+### Quét bảo mật định kỳ + bảo vệ bản backup sạch
+- **`security scan-schedule on [--every 14|30] [--hour H] | off | status`** (mới): quét toàn VPS mỗi 14/30 ngày vào **giờ ít truy cập nhất** (tự tính từ log nginx ~2 tuần, tránh giờ backup/bảo trì), chỉ khi máy rảnh (load, không có backup chạy — không thì thử lại đêm sau), mức ưu tiên CPU/IO thấp nhất. Có trong menu Security.
+- Quét **sạch** → bản backup mới nhất của mỗi site gắn nhãn `scan-clean`, retention luôn giữ (2 bản sạch gần nhất/site).
+- Phát hiện **nhiễm** → backup hiện trường (`scan-suspect`), **đóng băng retention** (không xoá snapshot cũ = bản sạch), cảnh báo critical; `security scan-ack` sau khi xử lý. `security scan-cron --force` để chạy ngay. Báo cáo ở `/var/log/cecp-panel/security-scan/`.
+- **Sửa lỗi retention backup (có từ trước)**: `restic forget` gom snapshot theo đường dẫn, mà mỗi lần backup dùng một thư mục tạm có ngày giờ khác nhau ⇒ mỗi snapshot là một nhóm riêng ⇒ **không bản nào bị xoá bao giờ**, repository (Google Drive) chỉ phình ra. Giờ gom theo host + site (`--group-by host,tags`). Vì lần áp đầu có thể xoá nhiều bản cũ một lúc, retention tự động **chỉ chạy thử** (ghi log + cảnh báo) cho tới khi bạn xác nhận một lần bằng `cecp-panel backup prune`.
+
 ### Cách ly giữa các site — vá đường lây chéo (sau sự cố: một site bị hack kéo theo mọi site)
 - **Leo thang lên root qua symlink (nghiêm trọng)**: panel (root) tạo/`chown`/ghi file bên trong docroot — `mu-plugins`, `wp-config.php` — và đi theo symlink. Code độc của site A đặt `wp-content/mu-plugins → /etc` thì `media enable` chuyển quyền sở hữu `/etc` cho site A (chiếm root → mọi site). `wp-config.php → wp-config của site B` thì restore/duplicate/staging/redis ghi thông tin DB của A vào B (B chạy trên database do kẻ tấn công kiểm soát). Đã tái hiện cả hai. Giờ **root không bao giờ ghi trong docroot**: mọi thao tác chạy bằng user của site (`site_write_file`, `site_run_as`); mu-plugin của panel thuộc user site (root-owned trước đây không bảo vệ gì — site vẫn xoá/tạo lại được).
 - **nginx `disable_symlinks if_not_owner`**: site A tạo symlink tới file của site B (hoặc `/etc/passwd`) rồi tải về qua web — đã tái hiện (HTTP 200 kèm dữ liệu của B), giờ bị chặn.
@@ -63,6 +69,9 @@ cecp-panel update panel                  # hoặc deploy-safe.sh từ máy agenc
 cecp-panel security apply-production     # gồm OPcache cô lập giữa các site
 cecp-panel site rebuild-vhost --all      # rule chặn file backup, HTTPS catch-all, disable_symlinks, wp-cron qua PHP-FPM, cấm crontab site, ACL docroot
 cecp-panel security scan --all           # quét dấu hiệu nhiễm (xem docs/INCIDENT_RESPONSE.md nếu có FAIL)
+cecp-panel security scan-schedule on --every 14   # quét định kỳ vào giờ rảnh nhất
+cecp-panel backup prune-dry-run          # xem retention (đã sửa) sẽ xoá những snapshot nào
+cecp-panel backup prune                  # xác nhận một lần — ⚠ VPS đang/nghi bị hack: KHÔNG chạy trước khi đã khôi phục được bản sạch
 cecp-panel wp cron DOMAIN                # (từng site WordPress) rải lịch wp-cron
 cecp-panel ssl issue DOMAIN              # (site đã có SSL) chuyển URL WordPress sang https nếu còn http
 cecp-panel security check                # xem cảnh báo RAM; site rebuild-vhost --all ở trên đã áp số tiến trình mới + putenv

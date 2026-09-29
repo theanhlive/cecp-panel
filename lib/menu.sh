@@ -157,6 +157,8 @@ menu_security() {
     echo "14) Cloudflare-only web ports (hide origin IP) on/off/status"
     echo "15) Scan all sites for malware / cross-site infection"
     echo "16) After a hack: rotate secrets of a site (or --all)"
+    echo "17) Periodic scan (quietest hour, every 14/30 days): on/off/status"
+    echo "18) Infection handled: resume backup retention (scan-ack)"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -189,6 +191,16 @@ menu_security() {
         read -r -p "Also new passwords for every WordPress administrator? (y/n): " a
         if [[ "$a" =~ ^[yY] ]]; then security_rotate_secrets "$d" --admins; else security_rotate_secrets "$d"; fi
         ;;
+      17)
+        read -r -p "on / off / status [status]: " a
+        if [[ "${a:-status}" == on ]]; then
+          read -r -p "Every how many days [14 / 30]: " d
+          security_scan_schedule on --every "${d:-14}"
+        else
+          security_scan_schedule "${a:-status}"
+        fi
+        ;;
+      18) security_scan_ack ;;
       0) break ;;
     esac
   done
@@ -442,7 +454,7 @@ menu_backup() {
       4) backup_list ;;
       5) backup_policy_show ;;
       6) backup_enable_cron ;;
-      7) backup_apply_retention ;;
+      7) backup_apply_retention --confirm ;;
       8) read -r -p "Domain [--all]: " d; backup_verify "${d:---all}" ;;
       9)
         read -r -p "Domain: " d

@@ -31,6 +31,7 @@ Chặn thiệt hại ngay trong lúc xử lý (không mất dữ liệu):
 cecp-panel site protect-admin DOMAIN on          # khoá wp-admin bằng mật khẩu (mỗi site bị nhiễm)
 cecp-panel site auth DOMAIN on                   # hoặc khoá CẢ site (khách thấy hộp mật khẩu) nếu đang phát tán mã độc
 cecp-panel backup run --all                      # chụp lại hiện trạng để điều tra, KHÔNG dùng để restore
+touch /var/lib/cecp-panel/scan-retention-freeze  # KHÔNG để retention xoá các bản backup cũ (có thể là bản sạch duy nhất)
 ```
 
 ---
@@ -126,12 +127,34 @@ cecp-panel security cf-only status                  # nếu mọi site qua Cloud
 cecp-panel modsec install && cecp-panel modsec enable   # WAF (tuỳ chọn, xem trước ở chế độ DetectionOnly)
 cecp-panel monitor enable
 cecp-panel backup enable-cron                       # có snapshot sạch để quay về lần sau
+cecp-panel security scan-schedule on --every 14     # quét định kỳ, giữ bản backup sạch (mục dưới)
+cecp-panel security scan-ack                        # xong sự cố: cho retention chạy lại
 ```
 
 Theo dõi trong 2 tuần sau: `cecp-panel security scan --all --days 1` mỗi ngày. Nếu file độc quay lại
 thì vẫn còn cửa hậu (plugin/theme chưa thay, admin lạ, cron…), hoặc đã mất root: chuyển sang **2A**.
 
 ---
+
+## Quét định kỳ — phát hiện sớm, giữ bản backup sạch
+
+```bash
+cecp-panel security scan-schedule on --every 14     # hoặc --every 30; tự chọn giờ VPS rảnh nhất
+cecp-panel security scan-schedule status
+cecp-panel notify setup                            # để nhận cảnh báo (Telegram/Discord/n8n)
+```
+
+- **Giờ chạy:** tự chọn giờ ít truy cập nhất theo log nginx ~2 tuần gần nhất (tránh giờ backup và
+  bảo trì), hoặc `--hour H`. Cron kiểm tra mỗi đêm vào giờ đó nhưng **chỉ quét khi tới hạn** (14/30 ngày)
+  **và máy đang rảnh** (load < 70% số nhân, không có backup đang chạy); không thì thử lại đêm sau.
+  Chạy với `nice`/`ionice` mức thấp nhất.
+- **Sạch** → bản backup mới nhất của từng site được gắn nhãn `scan-clean` và **được giữ** dù
+  retention (2 bản sạch gần nhất mỗi site): luôn có một điểm khôi phục đã kiểm tra.
+- **Phát hiện nhiễm (FAIL)** → ngay lập tức: chụp **backup hiện trường** các site bị nhiễm (nhãn
+  `scan-suspect`, để điều tra); **đóng băng retention** — không xoá snapshot cũ nào (bản cũ = bản sạch);
+  gửi cảnh báo `security_scan_infected` (critical). Xử lý theo runbook này rồi `cecp-panel security scan-ack`.
+- **Chỉ cảnh báo (WARN)** → gửi `security_scan_warning`, không đóng băng.
+- Báo cáo: `/var/log/cecp-panel/security-scan/scan-*.txt` (giữ 1 năm). Chạy ngay: `cecp-panel security scan-cron --force`.
 
 ## Các lớp cách ly giữa các site (1.12+)
 

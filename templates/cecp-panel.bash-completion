@@ -29,7 +29,7 @@ _cecp_panel() {
       cache) words="status auto-purge ttl purge purge-url" ;;
       backup) words="setup status policy run list verify prune prune-dry-run restore enable-cron configure config-get oauth-status" ;;
       security) words="fail2ban fail2ban-full firewall ssh ssh-key-only ssh-harden ssh-repair ssh-port mariadb-bind
-                       apply-production check unattended fix-perms harden-docroot cf-only scan rotate-secrets php-isolation" ;;
+                       apply-production check unattended fix-perms harden-docroot cf-only scan scan-schedule scan-cron scan-ack rotate-secrets php-isolation" ;;
       system) words="info ensure-swap swap disk-clean clean-logs maintain tune enable-cron" ;;
       mysql) words="secure" ;;
       agent) words="install status" ;;
@@ -66,6 +66,8 @@ _cecp_panel() {
       "php config") words="--reset" ;;
       "security cf-only") words="--force" ;;
       "security scan") words="--all --days" ;;
+      "security scan-schedule") words="--every --hour" ;;
+      "security scan-cron") words="--force" ;;
       "security rotate-secrets") words="--all --admins" ;;
     esac
   elif (( COMP_CWORD == 3 )); then
@@ -75,6 +77,7 @@ _cecp_panel() {
       "update component") words="nginx mariadb php certbot restic rclone fail2ban os all" ;;
       "db slow-log") words="on off status" ;;
       "security cf-only") words="on off status" ;;
+      "security scan-schedule") words="on off status" ;;
       "system swap") words="1 2 4" ;;
       site\ *|ssl\ issue|ssl\ fix|ssl\ remove|ssl\ hsts|dns\ point|cf\ edge-cache|cf\ status|cache\ *|backup\ run|\
       backup\ verify|backup\ restore|security\ harden-docroot|security\ scan|security\ rotate-secrets|wp\ *|db\ export|db\ import|db\ shell|db\ info|\
