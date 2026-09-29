@@ -33,6 +33,9 @@
 - gzip thêm font (`ttf/otf/eot`) và favicon.
 
 ### Tối ưu ảnh
+- **Upload bất kỳ định dạng → một file WebP tối ưu, không giữ file gốc** (`media enable DOMAIN`, mặc định `--format webp`): JPG/PNG/WebP/BMP (HEIC/HEIF iPhone, TIFF khi có PHP Imagick) được xoay đúng chiều, thu về tối đa 1920px (không phóng to), lưu **một** file WebP; file upload bị xoá, WordPress không còn giữ cặp `-scaled` + bản gốc, thumbnail cũng là WebP. Ảnh PNG (chữ/logo) nén chất lượng cao hơn; ảnh đã tối ưu sẵn giữ nguyên. Thử thực tế: ảnh điện thoại 819 KB → 72 KB, BMP 5,7 MB → 61 KB. `--format avif` (WordPress ≥ 6.5) hoặc `--format original` (hành vi cũ). Site bật trước đây giữ chế độ cũ cho tới khi chạy lại `media enable`.
+- `media prune-originals DOMAIN [--yes]` (mới): xoá bản gốc full-size WordPress đã giữ cho thư viện cũ (chạy thử mặc định, báo dung lượng giải phóng). Có trong menu Media.
+- `media status DOMAIN` liệt kê định dạng server đọc/chuyển được; `media enable` cài PHP Imagick (nếu có gói) và cảnh báo khi RAM PHP không đủ cho ảnh rất lớn.
 - Ảnh PNG trong suốt (logo, dạng palette) **không còn bị nền đen** trong bản WebP/AVIF.
 - Giữ ICC color profile khi nén lại JPEG/WebP (ảnh chụp từ điện thoại không bị nhạt màu).
 - Không ghi đè ảnh gốc nếu bản nén lại không nhỏ hơn (trừ khi resize); xoá sidecar WebP/AVIF nếu nó **lớn hơn** ảnh gốc (nginx ưu tiên sidecar → trước đây có thể phục vụ file to hơn).
@@ -50,6 +53,8 @@ cecp-panel site rebuild-vhost --all      # áp rule chặn file backup + HTTPS c
 cecp-panel wp cron DOMAIN                # (từng site WordPress) rải lịch wp-cron
 cecp-panel ssl issue DOMAIN              # (site đã có SSL) chuyển URL WordPress sang https nếu còn http
 cecp-panel security check                # xem cảnh báo RAM; site rebuild-vhost --all ở trên đã áp số tiến trình mới + putenv
+cecp-panel media enable DOMAIN            # (site đang bật media) chuyển sang lưu 1 file WebP, không giữ gốc
+cecp-panel media prune-originals DOMAIN   # xem dung lượng bản gốc cũ có thể xoá (thêm --yes để xoá)
 cecp-panel security cf-only status       # (tuỳ chọn) nếu mọi site qua Cloudflare: cecp-panel security cf-only on
 ```
 

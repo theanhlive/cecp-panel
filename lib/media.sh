@@ -75,6 +75,17 @@ PY
 
 media_ensure_tools() {
   require_root
+  # PHP Imagick lets WordPress read HEIC/HEIF (iPhone) and TIFF uploads and resize very large
+  # photos outside PHP's memory_limit (GD decodes the whole bitmap into it). Best effort: the
+  # package name differs per distro/repo; GD still handles JPEG/PNG/WebP/BMP.
+  if ! php -m 2>/dev/null | grep -qi '^imagick$'; then
+    if [[ -f /etc/almalinux-release || -f /etc/rocky-release || -f /etc/redhat-release ]]; then
+      dnf -y install php-pecl-imagick-im7 2>/dev/null || dnf -y install php-pecl-imagick 2>/dev/null || true
+    else
+      apt-get install -y php-imagick 2>/dev/null || true
+    fi
+    php -m 2>/dev/null | grep -qi '^imagick$' && php_fpm_reload_all >/dev/null 2>&1 || true
+  fi
   # Prefer ImageMagick convert; also try php-gd for WP editor + webp
   if ! command -v convert >/dev/null 2>&1 && ! command -v magick >/dev/null 2>&1; then
     if [[ -f /etc/almalinux-release || -f /etc/rocky-release || -f /etc/redhat-release ]]; then
@@ -124,6 +135,8 @@ with open(path, encoding="utf-8") as f:
 cfg = data.get("media_optimize") or {}
 payload = {
     "enabled": bool(cfg.get("enabled")),
+    # Sites enabled before "format" existed keep their behaviour until re-enabled.
+    "format": cfg.get("format", "original"),
     "on_upload": bool(cfg.get("on_upload", True)),
     "max_width": int(cfg.get("max_width", 1920)),
     "max_height": int(cfg.get("max_height", 1920)),
@@ -168,6 +181,7 @@ media_enable() {
   local cron=true
   local webp=true
   local avif=false
+  local format=webp
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -186,10 +200,13 @@ media_enable() {
       --no-webp) webp=false; shift ;;
       --webp) webp=true; shift ;;
       --avif) avif=true; shift ;;
+      --format) format="${2:-}"; shift 2 || panel_die "--format needs webp|avif|original" ;;
+      --format=*) format="${1#--format=}"; shift ;;
       --no-avif) avif=false; shift ;;
-      *) panel_die "Unknown flag: $1 (media enable DOMAIN [--max-width N] [--quality N] [--no-upload] [--no-cron] [--no-webp] [--avif])" ;;
+      *) panel_die "Unknown flag: $1 (media enable DOMAIN [--format webp|avif|original] [--max-width N] [--quality N] [--no-upload] [--no-cron] [--no-webp] [--avif])" ;;
     esac
   done
+  [[ "$format" =~ ^(webp|avif|original)$ ]] || panel_die "--format must be webp, avif or original"
   [[ "$max_w" =~ ^[0-9]{2,5}$ && "$max_h" =~ ^[0-9]{2,5}$ ]] || panel_die "--max-width/--max-height must be numbers"
   [[ "$quality" =~ ^[0-9]{2}$ ]] || panel_die "--quality must be 10-99"
   [[ "$skip_kb" =~ ^[0-9]{1,6}$ && "$batch" =~ ^[0-9]{1,5}$ ]] || panel_die "--skip-under-kb/--batch must be numbers"
@@ -212,10 +229,11 @@ print(json.dumps({
   "batch_limit": int(sys.argv[8]),
   "enabled_at": sys.argv[9],
   "avif": sys.argv[10] == "true",
+  "format": sys.argv[11],
   "last_run_at": None,
   "last_run_stats": {},
 }))
-' "$on_upload" "$cron" "$webp" "$max_w" "$max_h" "$quality" "$skip_kb" "$batch" "$enabled_at" "$avif")"
+' "$on_upload" "$cron" "$webp" "$max_w" "$max_h" "$quality" "$skip_kb" "$batch" "$enabled_at" "$avif" "$format")"
 
   media_cfg_set "$domain" "$json" >/dev/null
   media_install_mu_plugin "$domain"
@@ -227,7 +245,15 @@ print(json.dumps({
   fi
 
   panel_log "Media optimize ENABLED for $domain"
-  panel_log "  on_upload=$on_upload cron=$cron webp=$webp max=${max_w}x${max_h} quality=$quality"
+  panel_log "  format=$format on_upload=$on_upload cron=$cron webp=$webp max=${max_w}x${max_h} quality=$quality"
+  if [[ "$format" != original ]]; then
+    panel_log "  New uploads (any format) → one ${format^^} file, max ${max_w}x${max_h}, original not kept."
+    panel_log "  Existing library: cecp-panel media run $domain (WebP copies) | media prune-originals $domain (free disk)"
+  fi
+  if ! php -m 2>/dev/null | grep -qi '^imagick$' \
+     && (( $(php_cfg_mb "$(php_cfg_get "$domain" memory_limit)") < 512 )); then
+    panel_log "  WARN: no PHP Imagick — photos above ~25 megapixels need more PHP memory: cecp-panel php config $domain memory_limit=512M"
+  fi
   panel_log "  Run backlog now: cecp-panel media run $domain"
   media_status "$domain"
 }
@@ -322,6 +348,91 @@ PY
   fi
   if [[ -f "$mudir/cecp-media-optimize.json" ]]; then
     echo "  config: $mudir/cecp-media-optimize.json"
+  fi
+  [[ "$(media_is_wordpress "$domain")" == "True" ]] || return 0
+  echo ""
+  echo "Image formats this site's PHP can process (read → convert):"
+  wp_site_exec "$domain" eval '
+    $e = _wp_image_editor_choose(); echo "  editor: ", $e ?: "none", "\n";
+    foreach (["image/jpeg","image/png","image/webp","image/avif","image/heic","image/tiff","image/bmp"] as $m)
+      printf("  %-11s %s\n", substr($m, 6), wp_image_editor_supports(["mime_type" => $m]) ? "yes" : "no");
+  ' 2>/dev/null | sed 's/^  bmp .*no$/  bmp         yes (decoded with GD)/' || echo "  (WordPress not reachable)"
+}
+
+# cecp-panel media prune-originals DOMAIN [--yes]
+# WordPress keeps the full-size original of every photo it had to shrink or rotate ("-scaled" /
+# "-rotated" + original): usually the biggest files of the library, only used to regenerate
+# thumbnails. This deletes those originals (and their sidecars) and makes the scaled copy the
+# attachment's own file. Dry run by default: prints what would be freed.
+media_prune_originals() {
+  local domain yes=0 dry=1 out
+  domain="$(media_require_site "${1:-}")"
+  shift || true
+  [[ "${1:-}" == "--yes" ]] && yes=1
+  require_root
+  [[ "$(media_is_wordpress "$domain")" == "True" ]] || panel_die "prune-originals requires WordPress: $domain"
+  if (( yes )); then
+    dry=0
+    site_lock "$domain"
+  fi
+  out="$(wp_site_exec "$domain" eval-file - "$dry" <<'PHP'
+<?php
+global $wpdb;
+$dry = ($args[0] ?? '1') === '1';
+$count = 0; $bytes = 0; $page = 1;
+do {
+    $ids = get_posts(['post_type' => 'attachment', 'post_status' => 'inherit', 'post_mime_type' => 'image',
+                      'fields' => 'ids', 'posts_per_page' => 500, 'paged' => $page++, 'orderby' => 'ID', 'order' => 'ASC',
+                      'no_found_rows' => true, 'suppress_filters' => true]);
+    foreach ($ids as $id) {
+        $meta = wp_get_attachment_metadata($id);
+        if (empty($meta['original_image'])) {
+            continue;
+        }
+        $file = get_attached_file($id, true);
+        $orig = path_join(dirname($file), $meta['original_image']);
+        if (!$file || $orig === $file || !is_file($orig)) {
+            continue;
+        }
+        $victims = [$orig, $orig . '.cecp-opt'];
+        // photo.webp / photo.avif sidecars of photo.jpg — unless another attachment IS that file.
+        $upl = wp_get_upload_dir();
+        foreach (['webp', 'avif'] as $x) {
+            $side = preg_replace('/\.[^.\/]+$/', '.' . $x, $orig);
+            $rel = ltrim(str_replace(trailingslashit($upl['basedir']), '', $side), '/');
+            $owner = $wpdb->get_var($wpdb->prepare(
+                "SELECT post_id FROM $wpdb->postmeta WHERE meta_key = '_wp_attached_file' AND meta_value = %s LIMIT 1", $rel));
+            if (!$owner && $side !== $orig) {
+                $victims[] = $side;
+            }
+        }
+        foreach ($victims as $v) {
+            if (is_file($v)) {
+                $bytes += filesize($v);
+                if (!$dry) {
+                    @unlink($v);
+                }
+            }
+        }
+        if (!$dry) {
+            unset($meta['original_image']);
+            wp_update_attachment_metadata($id, $meta);
+        }
+        $count++;
+    }
+} while ($ids);
+printf("%d %d
+", $count, $bytes);
+PHP
+)" || panel_die "prune-originals failed for $domain"
+  local n b
+  read -r n b <<<"$(tail -1 <<<"$out")"
+  [[ "$n" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] || panel_die "prune-originals: unexpected output: $out"
+  if (( dry )); then
+    echo "Dry run: $n original image(s) kept by WordPress, $(numfmt --to=iec --suffix=B "$b") can be freed."
+    (( n == 0 )) || echo "Delete them (thumbnails can no longer be regenerated from the full original): cecp-panel media prune-originals $domain --yes"
+  else
+    panel_log "prune-originals $domain: $n original(s) deleted, $(numfmt --to=iec --suffix=B "$b") freed"
   fi
 }
 

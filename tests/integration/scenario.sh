@@ -472,6 +472,25 @@ settle
 check "AVIF sidecar served to browsers that accept AVIF" img_is /wp-content/uploads/neg.jpg 'image/avif,image/webp,*/*' image/avif SIDECAR-AVIF
 check "WebP still served to WebP-only browsers" img_is /wp-content/uploads/neg.jpg 'image/webp,*/*' image/webp SIDECAR-WEBP
 
+echo "=== On-upload: any format in, one right-sized WebP out, original not kept ==="
+check "media enable (default --format webp)" \
+  bash -c "cecp-panel media enable $D --no-cron && grep -q '\"format\": \"webp\"' $DOCROOT/wp-content/mu-plugins/cecp-media-optimize.json"
+php -r '$i = imagecreatetruecolor(3000, 2000); imagefill($i, 0, 0, imagecolorallocate($i, 10, 120, 200)); imagejpeg($i, "/tmp/big.jpg", 95);
+        $b = imagecreatetruecolor(800, 600); imagebmp($b, "/tmp/scan.bmp");'
+chmod 644 /tmp/big.jpg /tmp/scan.bmp
+upload_is_webp() {  # upload_is_webp FILE STEM — stored as STEM.webp, <= 1920 px, nothing else left behind
+  local id f
+  id="$(wp_d media import "$1" --porcelain)" || return 1
+  f="$(wp_d eval "echo get_attached_file($id);")"
+  echo "$f"
+  [[ "$f" == */"$2".webp ]] && [ -z "$(ls "$(dirname "$f")/$2".{jpg,bmp} "$(dirname "$f")/$2"-scaled.* 2>/dev/null)" ] &&
+    php -r '[$w, $h] = getimagesize($argv[1]); exit(max($w, $h) <= 1920 ? 0 : 1);' "$f"
+}
+check "3000px JPEG upload → one WebP <= 1920px, no original / -scaled copy" upload_is_webp /tmp/big.jpg big
+check "BMP upload → WebP" upload_is_webp /tmp/scan.bmp scan
+check "media prune-originals dry run" bash -c "cecp-panel media prune-originals $D | grep -q 'Dry run'"
+check "media status lists supported formats" bash -c "cecp-panel media status $D | grep -qE '^  webp +yes'"
+
 echo "=== Page cache: TTL + auto-purge on content change ==="
 check "cache ttl 1h" bash -c "cecp-panel cache ttl $D 1h && grep -q 'fastcgi_cache_valid 200 301 302 1h;' /etc/nginx/conf.d/cecp-$SLUG.conf"
 check "cache ttl rejects bad values" bash -c "! cecp-panel cache ttl $D 5x && ! cecp-panel cache ttl $D 2d && ! cecp-panel cache ttl $D '1h;'"

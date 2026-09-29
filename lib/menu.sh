@@ -290,6 +290,7 @@ menu_media() {
     echo " 5) Dry-run"
     echo " 6) Enable global daily cron"
     echo " 7) Disable global daily cron"
+    echo " 8) Free disk: delete originals WordPress kept (dry run first)"
     echo " 0) Back"
     read -r -p "Choice: " c
     case "$c" in
@@ -317,6 +318,13 @@ menu_media() {
         ;;
       6) media_enable_cron ;;
       7) media_disable_cron ;;
+      8)
+        read -r -p "Domain: " d
+        [[ -z "$d" ]] && continue
+        media_prune_originals "$d"
+        read -r -p "Delete them now? (yes): " ok
+        [[ "$ok" == "yes" ]] && media_prune_originals "$d" --yes
+        ;;
       0) break ;;
     esac
   done

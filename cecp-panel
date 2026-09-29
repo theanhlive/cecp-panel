@@ -89,8 +89,10 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel db export DOMAIN [FILE] | import DOMAIN FILE [--replace-url OLD] [--yes] | shell|info DOMAIN
     db size | slow-log on [SECONDS]|off|status | slow-report [TOP]
   cecp-panel optimize site|nginx|redis|redis-wp|redis-acl|mariadb|opcache|kernel|purge|purge-url|stack|bench|report|webp|brotli
-  cecp-panel media enable|disable|status|run|run-all|enable-cron|disable-cron
-    media enable DOMAIN [--max-width 1920] [--quality 80] [--no-upload] [--no-cron] [--no-webp] [--avif]
+  cecp-panel media enable|disable|status|run|run-all|prune-originals|enable-cron|disable-cron
+    media enable DOMAIN [--format webp|avif|original] [--max-width 1920] [--quality 80] [--no-upload] [--no-cron] [--no-webp] [--avif]
+      --format webp (default): every upload, any format → one right-sized WebP, original not kept
+    media prune-originals DOMAIN [--yes]       # delete full-size originals WordPress kept (dry run without --yes)
     media run DOMAIN [--dry-run] [--limit N]   # only if enabled for that site
   cecp-panel notify setup|status|test|health|enable-cron|disable-cron|webhook URL|off
   cecp-panel monitor run|status|enable|disable
@@ -397,9 +399,10 @@ case "$cmd" in
         media_run "$@"
         ;;
       run-all) media_run_all ;;
+      prune-originals) media_prune_originals "$@" ;;
       enable-cron) media_enable_cron ;;
       disable-cron) media_disable_cron ;;
-      *) panel_die "Usage: cecp-panel media enable|disable|status|run|run-all|enable-cron|disable-cron" ;;
+      *) panel_die "Usage: cecp-panel media enable|disable|status|run|run-all|prune-originals|enable-cron|disable-cron" ;;
     esac
     ;;
   notify)
