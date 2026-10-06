@@ -76,7 +76,11 @@ wp_harden_site() {
   panel_log "Hardening WordPress: $domain"
   wp_site_exec "$domain" config set DISALLOW_FILE_EDIT true --raw
   wp_site_exec "$domain" config set WP_AUTO_UPDATE_CORE "'minor'"
-  wp_site_exec "$domain" config set FORCE_SSL_ADMIN true --raw 2>/dev/null || true
+  # Only with a certificate: on a plain-HTTP site it redirects wp-admin to an https:// that does
+  # not exist (admin locked out until `ssl issue`, which turns it on — ssl_wp_sync_scheme).
+  if site_cert_dir "$domain" >/dev/null; then
+    wp_site_exec "$domain" config set FORCE_SSL_ADMIN true --raw 2>/dev/null || true
+  fi
   wp_site_exec "$domain" plugin delete hello akismet 2>/dev/null || true
   wp_site_exec "$domain" rewrite structure '/%postname%/' --hard
   wp_site_exec "$domain" rewrite flush --hard
@@ -102,12 +106,30 @@ wp_install_system_cron() {
   install -d -m 755 "$LOG_DIR/wp-cron"
   [[ -f "$cron_log" ]] || install -m 640 /dev/null "$cron_log"
   chown "${site_user}:${site_user}" "$cron_log"
-  cat >/etc/cron.d/cecp-wp-${slug} <<EOF
-*/15 * * * * ${site_user} cd ${docroot} && /usr/local/bin/wp cron event run --due-now >>${cron_log} 2>&1
-EOF
-  chmod 644 /etc/cron.d/cecp-wp-${slug}
+  wp_cron_write "$domain"
   wp_site_exec "$domain" config set DISABLE_WP_CRON true --raw
-  panel_log "System cron for WP $domain (every 15 min)"
+  # wp-cron.php now answers the loopback call only (site_cron_access).
+  site_render_vhost "$domain"
+  nginx_test_and_reload || panel_die "nginx rejected the vhost for $domain (config rolled back)"
+  panel_log "System cron for WP $domain (every 5 min, through the site's PHP-FPM pool)"
+}
+
+# The cron line itself (also refreshed by `site rebuild-vhost`). WordPress' scheduled tasks run
+# through a loopback request to wp-cron.php — i.e. inside the site's own PHP-FPM pool with its
+# open_basedir and disable_functions. Before, `wp cron event run` ran plugin code under the PHP
+# CLI, where exec()/system() work and open_basedir does not apply: a backdoored plugin got a
+# full shell every 15 minutes. -L follows the redirect to HTTPS; --resolve keeps it on this server.
+wp_cron_write() {
+  local domain="$1" site_user slug minute cron_log
+  site_user="$(wp_site_meta "$domain" "site_user")"
+  slug="$(domain_slug "$domain")"
+  cron_log="$LOG_DIR/wp-cron/wp-cron-${slug}.log"
+  # Each site its own minute in the 5-minute cycle: no CPU spike from every site at once.
+  minute=$(( $(cksum <<<"$slug" | cut -d' ' -f1) % 5 ))
+  cat >"/etc/cron.d/cecp-wp-${slug}" <<EOF
+${minute}-59/5 * * * * ${site_user} curl -sSkL -m 600 -o /dev/null -w "\%{http_code} \%{time_total}s\n" --resolve ${domain}:80:127.0.0.1 --resolve ${domain}:443:127.0.0.1 http://${domain}/wp-cron.php >>${cron_log} 2>&1
+EOF
+  chmod 644 "/etc/cron.d/cecp-wp-${slug}"
 }
 
 wp_optimize_site() {

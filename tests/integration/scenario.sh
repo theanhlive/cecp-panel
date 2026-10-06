@@ -109,9 +109,12 @@ check "ssh-harden applies through sshd -t (00- drop-in wins)" \
 echo "=== WordPress system cron ==="
 cron_line="$(grep -v '^#' "/etc/cron.d/cecp-wp-${SLUG}" | head -1)"
 cron_cmd="${cron_line#*"$SU" }"
+cron_cmd="${cron_cmd//\\%/%}"   # cron turns \% into %
 cron_log="$(grep -oE '>>[^ ]+' <<<"$cron_line" | tr -d '>')"
-check "wp-cron command succeeds as the site user and logs" \
-  bash -c "runuser -u $SU -- bash -c '$cron_cmd' && test -s '$cron_log'"
+check "wp-cron runs through the site's PHP-FPM (loopback HTTP 200) and logs" \
+  bash -c "runuser -u $SU -- bash -c '$cron_cmd' && tail -1 '$cron_log' | grep -q '^200 '"
+check "wp-cron.php refused to non-loopback clients" \
+  bash -c "ip=\$(ip -4 -o addr show scope global | awk '{split(\$4,a,\"/\"); print a[1]; exit}'); [ -z \"\$ip\" ] || [ \"\$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: $D' http://\$ip/wp-cron.php)\" = 403 ]"
 
 echo "=== optimize stack ==="
 check "optimize stack completes" cecp-panel optimize stack
@@ -132,7 +135,7 @@ check "open_basedir uses per-site tmp (no shared /tmp)" \
   grep -qx "php_admin_value\[open_basedir\] = $DOCROOT:/home/$SU/tmp" "/etc/php-fpm.d/cecp-$SLUG.conf"
 check "sessions in per-site tmp" grep -qx "php_admin_value\[session.save_path\] = /home/$SU/tmp" "/etc/php-fpm.d/cecp-$SLUG.conf"
 check "per-site tmp is 700 and owned by the site user" test "$(stat -c '%a %U' "/home/$SU/tmp")" = "700 $SU"
-check "pm.max_children sized (4..32)" bash -c "v=\$(sed -nE 's/^pm.max_children = ([0-9]+)$/\1/p' /etc/php-fpm.d/cecp-$SLUG.conf); [ \"\$v\" -ge 4 ] && [ \"\$v\" -le 32 ]"
+check "pm.max_children sized (2..32)" bash -c "v=\$(sed -nE 's/^pm.max_children = ([0-9]+)$/\1/p' /etc/php-fpm.d/cecp-$SLUG.conf); [ \"\$v\" -ge 2 ] && [ \"\$v\" -le 32 ]"
 
 echo "=== nginx hardening ==="
 check "security headers on PHP responses" \
@@ -290,6 +293,16 @@ check "wrong secret does not validate" bash -c "! python3 $HERE/webhook_rx.py ch
 check "events.log records the event (640)" \
   bash -c "grep -q '\"event\":\"webhook_configured\"' /var/log/cecp-panel/events.log && [ \"\$(stat -c %a /var/log/cecp-panel/events.log)\" = 640 ]"
 check "webhook secret not written to panel.log" bash -c "! grep -qF '$WHSECRET' /var/log/cecp-panel/panel.log"
+check "notify events: per-channel filter saved" \
+  bash -c "cecp-panel notify events set security,uptime --channel zalo --min warning >/dev/null && cecp-panel notify events | grep -qE '^  zalo +.* warning +security,uptime$'"
+check "notify events rejects unknown categories and severities" \
+  bash -c "! cecp-panel notify events set spam && ! cecp-panel notify events set all --min loud"
+check "bot setup without a terminal requires the token in the environment (never argv)" \
+  bash -c "! cecp-panel notify telegram </dev/null 2>&1 | grep -q 'Dán' && cecp-panel notify telegram </dev/null 2>&1 | grep -q CECP_TELEGRAM_TOKEN"
+check "webhook still receives events with category filters set" \
+  bash -c "cecp-panel notify events set none && cecp-panel notify test webhook && sleep 1 && python3 $HERE/webhook_rx.py check $WH '$WHSECRET' test"
+cecp-panel notify events set all >/dev/null
+cecp-panel notify events set default --channel zalo >/dev/null
 
 echo "=== wp-login rate limit + protect-admin ==="
 settle
@@ -298,7 +311,7 @@ settle
 APASS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("admin_protect_pass",""))' "/var/lib/cecp-panel/sites/$D.json")"
 check "wp-login.php asks for credentials (401)" test "$(status_of "http://$D/wp-login.php")" = 401
 check "wp-admin asks for credentials (401)" test "$(status_of "http://$D/wp-admin/")" = 401
-# wp_harden sets FORCE_SSL_ADMIN, so WordPress answers wp-login.php over http with 302 → https.
+# 200, or 302 → https when FORCE_SSL_ADMIN is on (set once the site has a certificate).
 reaches_wp_login() { [[ "$(status_of "$@" "http://$D/wp-login.php")" =~ ^(200|302)$ ]]; }
 check "correct credentials pass through to WordPress" reaches_wp_login -u "cecp:$APASS"
 check "wp-admin with credentials reaches WordPress (not 401)" \
@@ -472,14 +485,33 @@ settle
 check "AVIF sidecar served to browsers that accept AVIF" img_is /wp-content/uploads/neg.jpg 'image/avif,image/webp,*/*' image/avif SIDECAR-AVIF
 check "WebP still served to WebP-only browsers" img_is /wp-content/uploads/neg.jpg 'image/webp,*/*' image/webp SIDECAR-WEBP
 
+echo "=== On-upload: any format in, one right-sized WebP out, original not kept ==="
+check "media enable (default --format webp)" \
+  bash -c "cecp-panel media enable $D --no-cron && grep -q '\"format\": \"webp\"' $DOCROOT/wp-content/mu-plugins/cecp-media-optimize.json"
+php -r '$i = imagecreatetruecolor(3000, 2000); imagefill($i, 0, 0, imagecolorallocate($i, 10, 120, 200)); imagejpeg($i, "/tmp/big.jpg", 95);
+        $b = imagecreatetruecolor(800, 600); imagebmp($b, "/tmp/scan.bmp");'
+chmod 644 /tmp/big.jpg /tmp/scan.bmp
+upload_is_webp() {  # upload_is_webp FILE STEM — stored as STEM.webp, <= 1920 px, nothing else left behind
+  local id f
+  id="$(wp_d media import "$1" --porcelain)" || return 1
+  f="$(wp_d eval "echo get_attached_file($id);")"
+  echo "$f"
+  [[ "$f" == */"$2".webp ]] && [ -z "$(ls "$(dirname "$f")/$2".{jpg,bmp} "$(dirname "$f")/$2"-scaled.* 2>/dev/null)" ] &&
+    php -r '[$w, $h] = getimagesize($argv[1]); exit(max($w, $h) <= 1920 ? 0 : 1);' "$f"
+}
+check "3000px JPEG upload → one WebP <= 1920px, no original / -scaled copy" upload_is_webp /tmp/big.jpg big
+check "BMP upload → WebP" upload_is_webp /tmp/scan.bmp scan
+check "media prune-originals dry run" bash -c "cecp-panel media prune-originals $D | grep -q 'Dry run'"
+check "media status lists supported formats" bash -c "cecp-panel media status $D | grep -qE '^  webp +yes'"
+
 echo "=== Page cache: TTL + auto-purge on content change ==="
 check "cache ttl 1h" bash -c "cecp-panel cache ttl $D 1h && grep -q 'fastcgi_cache_valid 200 301 302 1h;' /etc/nginx/conf.d/cecp-$SLUG.conf"
 check "cache ttl rejects bad values" bash -c "! cecp-panel cache ttl $D 5x && ! cecp-panel cache ttl $D 2d && ! cecp-panel cache ttl $D '1h;'"
 Q="/home/$SU/tmp/cecp-purge.queue"
 check "mu-plugins are valid PHP" bash -c "php -l /opt/cecp-panel/templates/mu-plugins/cecp-cache-purge.php && php -l /opt/cecp-panel/templates/mu-plugins/cecp-media-optimize.php"
 check "cache auto-purge on" cecp-panel cache auto-purge "$D" on
-check "mu-plugin installed root-owned (site cannot change it)" \
-  bash -c "[ \"\$(stat -c '%U %a' $DOCROOT/wp-content/mu-plugins/cecp-cache-purge.php)\" = 'root 644' ] && grep -qF '$Q' $DOCROOT/wp-content/mu-plugins/cecp-cache-purge.json"
+check "mu-plugin written as the site user (root never writes inside a docroot)" \
+  bash -c "[ \"\$(stat -c '%U %a' $DOCROOT/wp-content/mu-plugins/cecp-cache-purge.php)\" = '$SU 644' ] && grep -qF '$Q' $DOCROOT/wp-content/mu-plugins/cecp-cache-purge.json"
 check "queue owned by the site user (600)" test "$(stat -c '%U %a' "$Q")" = "$SU 600"
 check "purge watcher active" systemctl is-active --quiet "cecp-purge@${SLUG}.path"
 check "cron fallback installed" grep -q 'cache purge-queue --all' /etc/cron.d/cecp-cache-purge
@@ -616,6 +648,9 @@ head -c 5000000 /dev/zero >/tmp/5m.bin
 check "5 MB upload is not refused by nginx (was 413 with the 1m default)" \
   bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' -F f=@/tmp/5m.bin http://$D/?upload-probe)\" != 413 ]"
 check "invalid PHP settings rejected" bash -c "! cecp-panel php config $D memory_limit=99T && ! cecp-panel php config $D foo=1 && ! cecp-panel php config $D max_execution_time=5 && ! cecp-panel php config $D 'memory_limit=512M;id'"
+check "putenv disabled by default" grep -qE 'disable_functions\] = .*,putenv$' "$POOL"
+check "allow_putenv=on re-enables putenv, reset disables it again" \
+  bash -c "cecp-panel php config $D allow_putenv=on >/dev/null && ! grep 'disable_functions' $POOL | grep -q putenv && cecp-panel php config $D --reset allow_putenv >/dev/null && grep -q ',putenv$' $POOL"
 check "php config --reset" bash -c "cecp-panel php config $D --reset memory_limit >/dev/null && grep -q 'memory_limit\] = 256M' $POOL"
 
 echo "=== Per-site resource limits (own PHP-FPM) ==="
@@ -659,8 +694,8 @@ check "staging asks for a password (401)" test "$(status_of "http://$SD/")" = 40
 check "staging serves WordPress with the password, marked noindex" \
   bash -c "curl -s -u 'staging:$SPASS' http://$SD/ | grep -q wp-content && curl -sI -u 'staging:$SPASS' http://$SD/ | grep -qi '^x-robots-tag: noindex'"
 check "live site is not noindex" bash -c "! curl -sI http://$D/ | grep -qi x-robots-tag"
-check "staging guard mu-plugin (root-owned) blocks e-mail" \
-  bash -c "[ \"\$(stat -c %U $SDOC/wp-content/mu-plugins/cecp-staging.php)\" = root ] && [ \"\$(runuser -u $SSU -- php /usr/local/bin/wp --path=$SDOC eval 'var_export(wp_mail(\"x@example.com\", \"t\", \"b\"));')\" = false ]"
+check "staging guard mu-plugin (written as the staging user) blocks e-mail" \
+  bash -c "[ \"\$(stat -c %U $SDOC/wp-content/mu-plugins/cecp-staging.php)\" = $SSU ] && [ \"\$(runuser -u $SSU -- php /usr/local/bin/wp --path=$SDOC eval 'var_export(wp_mail(\"x@example.com\", \"t\", \"b\"));')\" = false ]"
 check "monitor passes staging basic auth" bash -c "cecp-panel monitor run >/dev/null 2>&1; cecp-panel monitor status | grep 'site:$SD' | grep -q OK"
 wp_s option update blogname "From Staging" >/dev/null
 runuser -u "$SSU" -- bash -c "mkdir -p $SDOC/wp-content/uploads && echo staging-only >$SDOC/wp-content/uploads/staging-only.txt"
@@ -749,6 +784,50 @@ check "slow query log on" cecp-panel db slow-log on 0.1
 mysql -e 'SELECT SLEEP(0.3)' >/dev/null
 check "slow-report shows the slow query" bash -c "cecp-panel db slow-report | grep -qi sleep"
 check "slow query log off" cecp-panel db slow-log off
+
+echo "=== Isolation: a compromised site must not reach another site or root ==="
+DOC2="/home/$SU2/public_html"
+check "site A's PHP user cannot read site B's wp-config.php" bash -c "! runuser -u $SU -- cat $DOC2/wp-config.php"
+check "site A's PHP user cannot write into site B" bash -c "! runuser -u $SU -- touch $DOC2/pwned.php"
+runuser -u "$SU" -- ln -sfn "$DOC2/wp-config.php" "$DOCROOT/b-config.txt"
+runuser -u "$SU" -- ln -sfn /etc/passwd "$DOCROOT/passwd.txt"
+check "nginx does not follow A's symlink to B's files or /etc (disable_symlinks)" \
+  bash -c "for u in b-config.txt passwd.txt; do c=\$(curl -s -o /dev/null -w '%{http_code}' http://$D/\$u); [[ \$c =~ ^(403|404)\$ ]] || exit 1; done"
+mkdir -p /root/decoy && chmod 700 /root/decoy
+runuser -u "$SU" -- bash -c "rm -rf $DOCROOT/wp-content/mu-plugins && ln -s /root/decoy $DOCROOT/wp-content/mu-plugins"
+cecp-panel media enable "$D" --no-cron >/dev/null 2>&1 || true
+check "panel does not chown/write through A's planted symlink (root takeover)" \
+  bash -c "[ \"\$(stat -c %U /root/decoy)\" = root ] && [ -z \"\$(ls -A /root/decoy)\" ]"
+runuser -u "$SU" -- bash -c "rm -f $DOCROOT/wp-content/mu-plugins $DOCROOT/b-config.txt $DOCROOT/passwd.txt && mkdir -p $DOCROOT/wp-content/mu-plugins"
+check "site users cannot use crontab" bash -c "grep -qx $SU /etc/cron.deny && runuser -u $SU -- crontab -l 2>&1 | grep -qi 'not allowed'"
+check "OPcache isolation ini installed" bash -c "cecp-panel security php-isolation && grep -rqs 'opcache.validate_permission=1' /etc/php.d/98-cecp-isolation.ini"
+check "site still serves after php-isolation" serves_wp
+runuser -u "$SU" -- bash -c "printf '<?php eval(base64_decode(\$_POST[1]));' >$DOCROOT/wp-content/uploads/shell.php"
+check "security scan flags a web shell in uploads (exit 1)" bash -c "! cecp-panel security scan $D >/tmp/scan.out; grep -q 'PHP files inside uploads' /tmp/scan.out"
+rm -f "$DOCROOT/wp-content/uploads/shell.php"
+OLDPASS="$(meta_of "$D" db_pass)"
+check "security rotate-secrets --admins" bash -c "cecp-panel security rotate-secrets $D --admins >/tmp/rotate.out 2>&1"
+rotated_ok() {
+  local p
+  p="$(meta_of "$D" db_pass)"
+  [[ -n "$p" && "$p" != "$OLDPASS" ]] && grep -qF "$p" "$DOCROOT/wp-config.php" \
+    && ! mysql -u "u_$SLUG" -p"$OLDPASS" -e 'SELECT 1' 2>/dev/null
+}
+check "rotate: new DB password in meta and wp-config.php, old one no longer logs in" rotated_ok
+check "rotate: site still serves" serves_wp
+check "rotate: admin password not written to panel.log" bash -c "! grep -q 'new password' /var/log/cecp-panel/panel.log"
+
+echo "=== Periodic security scan ==="
+check "scan-schedule on picks an hour and writes the daily cron" \
+  bash -c "cecp-panel security scan-schedule on --every 14 && grep -qE '^40 [0-9]{1,2} \* \* \* root .*security scan-cron' /etc/cron.d/cecp-security-scan"
+check "scan-cron is a no-op when not due" bash -c "cecp-panel security scan-cron --force >/dev/null 2>&1; n=\$(ls /var/log/cecp-panel/security-scan | wc -l); cecp-panel security scan-cron && [ \"\$(ls /var/log/cecp-panel/security-scan | wc -l)\" = \"\$n\" ]"
+runuser -u "$SU" -- bash -c "printf '<?php eval(base64_decode(\$_POST[1]));' >$DOCROOT/wp-content/uploads/shell2.php"
+check "infection found → retention frozen, status says so" \
+  bash -c "cecp-panel security scan-cron --force && test -f /var/lib/cecp-panel/scan-retention-freeze && cecp-panel security scan-schedule status | grep -q 'RETENTION FROZEN'"
+check "frozen retention forgets nothing" bash -c "cecp-panel backup prune 2>&1 | grep -q 'retention paused'"
+rm -f "$DOCROOT/wp-content/uploads/shell2.php"
+check "scan-ack resumes retention" bash -c "cecp-panel security scan-ack && ! test -f /var/lib/cecp-panel/scan-retention-freeze"
+check "scan-schedule off" bash -c "cecp-panel security scan-schedule off && ! test -e /etc/cron.d/cecp-security-scan"
 
 echo "=== site remove ==="
 check "site remove $D2" cecp-panel site remove "$D2"

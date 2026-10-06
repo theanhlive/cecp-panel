@@ -188,6 +188,34 @@ security_php_hide_version() {
   panel_log "PHP expose_php=Off applied where php.ini found"
 }
 
+# Every site's pool runs under the same PHP-FPM master and so shares ONE OPcache: without these,
+# site A could list every script path of every site (opcache_get_status), wipe or poison their
+# cached code (opcache_reset / opcache_compile_file), and be served a script another user cached.
+security_php_isolation() {
+  require_root
+  local body d ver written=0
+  body="; CECP Panel — OPcache isolation between sites (shared memory of one PHP-FPM master)
+opcache.validate_permission=1
+opcache.validate_root=1
+; OPcache API (status/reset/compile/invalidate) callable only from scripts under this path: none.
+opcache.restrict_api=/opt/cecp-panel/.no-opcache-api/"
+  for d in /etc/php.d /etc/opt/remi/php*/php.d; do
+    [[ -d "$d" ]] || continue
+    printf '%s\n' "$body" >"$d/98-cecp-isolation.ini"
+    written=1
+  done
+  for d in /etc/php/*/mods-available; do
+    [[ -d "$d" ]] || continue
+    printf '%s\n' "$body" >"$d/cecp-isolation.ini"
+    ver="$(grep -oE '[0-9]+\.[0-9]+' <<<"$d" || true)"
+    [[ -n "$ver" ]] && command -v phpenmod &>/dev/null && { phpenmod -v "$ver" cecp-isolation 2>/dev/null || true; }
+    written=1
+  done
+  (( written )) || { panel_log "WARN: no php.d directory found — OPcache isolation not written"; return 0; }
+  php_fpm_reload_all >/dev/null 2>&1 || true
+  panel_log "PHP: OPcache isolated between sites (validate_permission, validate_root, API restricted)"
+}
+
 # ---------------------------------------------------------------------------
 # Fail2Ban jails
 # ---------------------------------------------------------------------------
@@ -411,6 +439,7 @@ security_apply_production() {
   security_firewall_baseline
   security_nginx_hide_version
   security_php_hide_version
+  security_php_isolation
   security_https_snippet_install
   optimize_nginx_global
   cf_realip_update
@@ -473,6 +502,16 @@ security_self_check() {
     else
       _ck FAIL "$dom: uploaded .php files can execute — run: cecp-panel site rebuild-vhost $dom"
     fi
+    if grep -q 'disable_symlinks if_not_owner' "$vhost"; then _ck PASS "$dom: nginx ignores symlinks to other owners' files"
+    else _ck FAIL "$dom: nginx follows symlinks (a hacked site can publish other sites' files) — run: cecp-panel site rebuild-vhost --all"; fi
+    if [[ -f "/etc/cron.d/cecp-wp-$(domain_slug "$dom")" ]] && grep -q 'wp cron event run' "/etc/cron.d/cecp-wp-$(domain_slug "$dom")"; then
+      _ck WARN "$dom: wp-cron runs plugin code under the unrestricted PHP CLI — run: cecp-panel site rebuild-vhost --all"
+    fi
+    local su_chk
+    su_chk="$(site_json_get_or "$dom" site_user "")"
+    if [[ -n "$su_chk" ]] && ! grep -qx "$su_chk" /etc/cron.deny 2>/dev/null; then
+      _ck WARN "$dom: $su_chk may install its own crontab (backdoor persistence) — run: cecp-panel site rebuild-vhost --all"
+    fi
     if grep -qE 'cecp-headers(-noindex)?\.conf' "$vhost"; then _ck PASS "$dom: security headers on every response"
     else _ck WARN "$dom: old vhost (headers dropped on PHP/static) — run: cecp-panel site rebuild-vhost $dom"; fi
     local sock
@@ -497,6 +536,12 @@ security_self_check() {
     fi
   done
   shopt -u nullglob
+
+  if ls /etc/php.d/98-cecp-isolation.ini /etc/opt/remi/php*/php.d/98-cecp-isolation.ini /etc/php/*/mods-available/cecp-isolation.ini >/dev/null 2>&1; then
+    _ck PASS "OPcache isolated between sites"
+  else
+    _ck WARN "OPcache shared between sites without isolation — run: cecp-panel security php-isolation"
+  fi
 
   echo "--- files / secrets ---"
   [[ "$(stat -c %a "$ETC_DIR" 2>/dev/null)" == "700" ]] && _ck PASS "$ETC_DIR is 700" || _ck FAIL "$ETC_DIR not 700"
@@ -525,6 +570,19 @@ except (OSError, ValueError):
 print(" ".join(k for k, v in sorted(d.items()) if v.get("last_error") or v.get("last_verify_error")))
 ' "$BACKUP_STATE")"
   [[ -z "$bad_backups" ]] || _ck WARN "backup/verify errors for: $bad_backups (cecp-panel backup status)"
+  # Worst case: every site busy at once. Custom pm_max_children values count as set.
+  local php_need=0 php_budget c
+  php_budget="$(php_ram_budget_mb)"
+  shopt -s nullglob
+  for f in "$SITES_DIR"/*.json; do
+    dom="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["domain"])' "$f")"
+    c="$(php_cfg_get "$dom" pm_max_children)"
+    [[ "$c" == auto ]] && c="$(php_pool_max_children)"
+    php_need=$(( php_need + c * 60 ))
+  done
+  shopt -u nullglob
+  if (( php_need <= php_budget * 3 / 2 )); then _ck PASS "PHP-FPM worst case ~${php_need}MB fits the RAM budget (${php_budget}MB)"
+  else _ck WARN "PHP-FPM worst case ~${php_need}MB > RAM budget ${php_budget}MB — OOM risk under load (cecp-panel site rebuild-vhost --all, or lower php config pm_max_children)"; fi
   if [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == "bbr" ]]; then _ck PASS "TCP BBR active"
   else _ck WARN "TCP BBR not active (cecp-panel optimize kernel)"; fi
   if command -v mysql &>/dev/null; then
@@ -562,4 +620,158 @@ EOF
     dpkg-reconfigure -f noninteractive unattended-upgrades 2>/dev/null || true
     panel_log "unattended-upgrades enabled"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Origin lock-down: HTTP/HTTPS only from Cloudflare (cecp-panel security cf-only on|off|status)
+# Behind Cloudflare, anyone who learns the origin IP can skip the WAF/DDoS protection and hit
+# nginx directly. With this on, ports 80/443 accept Cloudflare's ranges only (SSH untouched;
+# loopback health checks unaffected). Every site must be proxied (orange cloud) — a grey-cloud
+# site, and Let's Encrypt HTTP-01 for it, would stop working — so "on" checks that first.
+# ---------------------------------------------------------------------------
+CF_ONLY_FLAG="$VAR_LIB/cf-only.enabled"
+
+# Domains whose DNS does not resolve to Cloudflare (i.e. not proxied), one per line.
+security_cf_only_unproxied() {
+  local f
+  shopt -s nullglob
+  for f in "$SITES_DIR"/*.json; do
+    python3 - "$f" "$CF_IPS_FILE" <<'PY'
+import ipaddress, json, socket, sys
+dom = json.load(open(sys.argv[1]))["domain"]
+nets = [ipaddress.ip_network(l.strip()) for l in open(sys.argv[2]) if l.strip() and not l.startswith("#")]
+try:
+    addrs = {ai[4][0] for ai in socket.getaddrinfo(dom, 443, proto=socket.IPPROTO_TCP)}
+except OSError:
+    addrs = set()
+if not addrs or not all(any(ipaddress.ip_address(a) in n for n in nets) for a in addrs):
+    print(dom)
+PY
+  done
+  shopt -u nullglob
+}
+
+security_cf_only_firewalld_apply() {
+  local fam set zone svc old new
+  zone="$(firewall-cmd --get-default-zone)"
+  old="$(mktemp)"
+  new="$(mktemp)"
+  for fam in 4 6; do
+    set="cecp-cf${fam}"
+    if ! firewall-cmd --permanent --get-ipsets | tr ' ' '\n' | grep -qx "$set"; then
+      firewall-cmd --permanent --new-ipset="$set" --type=hash:net --option=family="$([[ $fam == 4 ]] && echo inet || echo inet6)" >/dev/null
+    fi
+    # Sync entries with the current Cloudflare list (the weekly `cf realip` refresh calls this).
+    firewall-cmd --permanent --ipset="$set" --get-entries | grep . >"$old" || true
+    if [[ "$fam" == 4 ]]; then
+      grep -vE '^\s*(#|$)' "$CF_IPS_FILE" | grep -v ':' >"$new" || true
+    else
+      grep -vE '^\s*(#|$)' "$CF_IPS_FILE" | grep ':' >"$new" || true
+    fi
+    [[ -s "$old" ]] && firewall-cmd --permanent --ipset="$set" --remove-entries-from-file="$old" >/dev/null
+    [[ -s "$new" ]] && firewall-cmd --permanent --ipset="$set" --add-entries-from-file="$new" >/dev/null
+    for svc in http https; do
+      firewall-cmd --permanent --zone="$zone" --add-rich-rule="rule family=\"ipv${fam}\" source ipset=\"${set}\" service name=\"${svc}\" accept" >/dev/null
+    done
+  done
+  rm -f "$old" "$new"
+  firewall-cmd --permanent --zone="$zone" --remove-service=http --remove-service=https >/dev/null 2>&1 || true
+  firewall-cmd --reload >/dev/null
+}
+
+security_cf_only_firewalld_remove() {
+  local fam svc zone
+  zone="$(firewall-cmd --get-default-zone)"
+  firewall-cmd --permanent --zone="$zone" --add-service=http --add-service=https >/dev/null
+  for fam in 4 6; do
+    for svc in http https; do
+      firewall-cmd --permanent --zone="$zone" --remove-rich-rule="rule family=\"ipv${fam}\" source ipset=\"cecp-cf${fam}\" service name=\"${svc}\" accept" >/dev/null 2>&1 || true
+    done
+    firewall-cmd --permanent --delete-ipset="cecp-cf${fam}" >/dev/null 2>&1 || true
+  done
+  firewall-cmd --reload >/dev/null
+}
+
+security_cf_only_ufw_clear() {
+  local n
+  # Highest number first: deleting a rule renumbers the ones after it.
+  for n in $(ufw status numbered | sed -nE 's/^\[ *([0-9]+)\].*# cecp-cf[[:space:]]*$/\1/p' | sort -rn); do
+    ufw --force delete "$n" >/dev/null
+  done
+}
+
+security_cf_only_ufw_apply() {
+  local cidr
+  security_cf_only_ufw_clear
+  while read -r cidr; do
+    ufw allow proto tcp from "$cidr" to any port 80,443 comment cecp-cf >/dev/null
+  done < <(grep -vE '^\s*(#|$)' "$CF_IPS_FILE")
+  ufw delete allow 'Nginx Full' >/dev/null 2>&1 || true
+  ufw status 2>/dev/null | grep -q '^Status: active' \
+    || panel_log "WARN: ufw is inactive — these rules only apply once it is enabled (ufw allow OpenSSH; ufw enable)"
+}
+
+# Re-apply after the Cloudflare IP list changes (called by cf_realip_update).
+security_cf_only_refresh() {
+  [[ -f "$CF_ONLY_FLAG" ]] || return 0
+  if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
+    security_cf_only_firewalld_apply
+  elif command -v ufw &>/dev/null; then
+    security_cf_only_ufw_apply
+  fi
+  panel_log "cf-only: firewall synced with the current Cloudflare ranges"
+}
+
+# cecp-panel security cf-only on [--force] | off | status
+security_cf_only() {
+  local action="${1:-status}" force=0 bad
+  [[ "${2:-}" == "--force" ]] && force=1
+  require_root
+  case "$action" in
+    on)
+      security_audit_log "security cf-only on"
+      [[ -f "$CF_IPS_FILE" ]] || cf_realip_render "$PANEL_ROOT/templates/cloudflare-ips.txt"
+      bad="$(security_cf_only_unproxied)"
+      if [[ -n "$bad" ]] && (( ! force )); then
+        panel_log "These sites do not resolve to Cloudflare (not proxied / grey cloud) and would go OFFLINE:"
+        sed 's/^/    /' <<<"$bad"
+        panel_die "Proxy them in Cloudflare first (cecp-panel dns point DOMAIN), or re-run with --force"
+      fi
+      if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
+        security_cf_only_firewalld_apply
+      elif command -v ufw &>/dev/null; then
+        security_cf_only_ufw_apply
+      else
+        panel_die "No firewalld/ufw found"
+      fi
+      install -d -m 755 "$VAR_LIB"
+      date -u +%Y-%m-%dT%H:%M:%SZ >"$CF_ONLY_FLAG"
+      panel_log "cf-only ON: ports 80/443 accept Cloudflare only (SSH unchanged). Undo: cecp-panel security cf-only off"
+      ;;
+    off)
+      security_audit_log "security cf-only off"
+      if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
+        security_cf_only_firewalld_remove
+      elif command -v ufw &>/dev/null; then
+        security_cf_only_ufw_clear
+        ufw allow 'Nginx Full' >/dev/null 2>&1 || true
+      fi
+      rm -f "$CF_ONLY_FLAG"
+      panel_log "cf-only OFF: ports 80/443 open to everyone again"
+      ;;
+    status)
+      if [[ -f "$CF_ONLY_FLAG" ]]; then
+        echo "cf-only: ON since $(<"$CF_ONLY_FLAG") — 80/443 from Cloudflare only"
+      else
+        echo "cf-only: off — 80/443 open to everyone (origin IP reachable without Cloudflare)"
+      fi
+      bad="$(security_cf_only_unproxied)"
+      if [[ -n "$bad" ]]; then
+        echo "Not proxied through Cloudflare:"; sed 's/^/  /' <<<"$bad"
+      else
+        echo "All sites resolve to Cloudflare."
+      fi
+      ;;
+    *) panel_die "Usage: cecp-panel security cf-only on [--force] | off | status" ;;
+  esac
 }

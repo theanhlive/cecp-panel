@@ -75,6 +75,17 @@ PY
 
 media_ensure_tools() {
   require_root
+  # PHP Imagick lets WordPress read HEIC/HEIF (iPhone) and TIFF uploads and resize very large
+  # photos outside PHP's memory_limit (GD decodes the whole bitmap into it). Best effort: the
+  # package name differs per distro/repo; GD still handles JPEG/PNG/WebP/BMP.
+  if ! php -m 2>/dev/null | grep -qi '^imagick$'; then
+    if [[ -f /etc/almalinux-release || -f /etc/rocky-release || -f /etc/redhat-release ]]; then
+      dnf -y install php-pecl-imagick-im7 2>/dev/null || dnf -y install php-pecl-imagick 2>/dev/null || true
+    else
+      apt-get install -y php-imagick 2>/dev/null || true
+    fi
+    php -m 2>/dev/null | grep -qi '^imagick$' && php_fpm_reload_all >/dev/null 2>&1 || true
+  fi
   # Prefer ImageMagick convert; also try php-gd for WP editor + webp
   if ! command -v convert >/dev/null 2>&1 && ! command -v magick >/dev/null 2>&1; then
     if [[ -f /etc/almalinux-release || -f /etc/rocky-release || -f /etc/redhat-release ]]; then
@@ -101,11 +112,10 @@ media_install_mu_plugin() {
   docroot="$(media_docroot "$domain")"
   site_user="$(media_site_user "$domain")"
   mudir="$(media_mu_plugin_dir "$docroot")"
-  mkdir -p "$mudir"
   local src="$PANEL_ROOT/templates/mu-plugins/cecp-media-optimize.php"
   [[ -f "$src" ]] || panel_die "Missing template: $src"
-  install -m 644 "$src" "$mudir/cecp-media-optimize.php"
-  chown "${site_user}:${site_user}" "$mudir" "$mudir/cecp-media-optimize.php" 2>/dev/null || true
+  # As the site user (see site_write_file): a root chown of a planted symlink gave away /etc.
+  site_write_file "$site_user" "$mudir/cecp-media-optimize.php" 644 <"$src"
 }
 
 media_write_mu_config() {
@@ -114,16 +124,17 @@ media_write_mu_config() {
   docroot="$(media_docroot "$domain")"
   site_user="$(media_site_user "$domain")"
   mudir="$(media_mu_plugin_dir "$docroot")"
-  mkdir -p "$mudir"
-  python3 - "$domain" "$mudir/cecp-media-optimize.json" <<'PY'
+  python3 - "$domain" <<'PY' | site_write_file "$site_user" "$mudir/cecp-media-optimize.json" 644
 import json, sys
-domain, out = sys.argv[1].lower(), sys.argv[2]
+domain = sys.argv[1].lower()
 path = f"/var/lib/cecp-panel/sites/{domain}.json"
 with open(path, encoding="utf-8") as f:
     data = json.load(f)
 cfg = data.get("media_optimize") or {}
 payload = {
     "enabled": bool(cfg.get("enabled")),
+    # Sites enabled before "format" existed keep their behaviour until re-enabled.
+    "format": cfg.get("format", "original"),
     "on_upload": bool(cfg.get("on_upload", True)),
     "max_width": int(cfg.get("max_width", 1920)),
     "max_height": int(cfg.get("max_height", 1920)),
@@ -132,13 +143,9 @@ payload = {
     "avif": bool(cfg.get("avif", False)),
     "skip_under_kb": int(cfg.get("skip_under_kb", 200)),
 }
-with open(out, "w", encoding="utf-8") as f:
-    json.dump(payload, f, indent=2)
-    f.write("\n")
-print(out)
+json.dump(payload, sys.stdout, indent=2)
+sys.stdout.write("\n")
 PY
-  chown "${site_user}:${site_user}" "$mudir/cecp-media-optimize.json" 2>/dev/null || true
-  chmod 644 "$mudir/cecp-media-optimize.json" 2>/dev/null || true
 }
 
 media_remove_mu_plugin() {
@@ -146,7 +153,7 @@ media_remove_mu_plugin() {
   local docroot mudir
   docroot="$(media_docroot "$domain")"
   mudir="$(media_mu_plugin_dir "$docroot")"
-  rm -f "$mudir/cecp-media-optimize.php" "$mudir/cecp-media-optimize.json" 2>/dev/null || true
+  site_run_as "$(media_site_user "$domain")" rm -f -- "$mudir/cecp-media-optimize.php" "$mudir/cecp-media-optimize.json" 2>/dev/null || true
 }
 
 media_enable() {
@@ -168,6 +175,7 @@ media_enable() {
   local cron=true
   local webp=true
   local avif=false
+  local format=webp
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -186,10 +194,13 @@ media_enable() {
       --no-webp) webp=false; shift ;;
       --webp) webp=true; shift ;;
       --avif) avif=true; shift ;;
+      --format) format="${2:-}"; shift 2 || panel_die "--format needs webp|avif|original" ;;
+      --format=*) format="${1#--format=}"; shift ;;
       --no-avif) avif=false; shift ;;
-      *) panel_die "Unknown flag: $1 (media enable DOMAIN [--max-width N] [--quality N] [--no-upload] [--no-cron] [--no-webp] [--avif])" ;;
+      *) panel_die "Unknown flag: $1 (media enable DOMAIN [--format webp|avif|original] [--max-width N] [--quality N] [--no-upload] [--no-cron] [--no-webp] [--avif])" ;;
     esac
   done
+  [[ "$format" =~ ^(webp|avif|original)$ ]] || panel_die "--format must be webp, avif or original"
   [[ "$max_w" =~ ^[0-9]{2,5}$ && "$max_h" =~ ^[0-9]{2,5}$ ]] || panel_die "--max-width/--max-height must be numbers"
   [[ "$quality" =~ ^[0-9]{2}$ ]] || panel_die "--quality must be 10-99"
   [[ "$skip_kb" =~ ^[0-9]{1,6}$ && "$batch" =~ ^[0-9]{1,5}$ ]] || panel_die "--skip-under-kb/--batch must be numbers"
@@ -212,10 +223,11 @@ print(json.dumps({
   "batch_limit": int(sys.argv[8]),
   "enabled_at": sys.argv[9],
   "avif": sys.argv[10] == "true",
+  "format": sys.argv[11],
   "last_run_at": None,
   "last_run_stats": {},
 }))
-' "$on_upload" "$cron" "$webp" "$max_w" "$max_h" "$quality" "$skip_kb" "$batch" "$enabled_at" "$avif")"
+' "$on_upload" "$cron" "$webp" "$max_w" "$max_h" "$quality" "$skip_kb" "$batch" "$enabled_at" "$avif" "$format")"
 
   media_cfg_set "$domain" "$json" >/dev/null
   media_install_mu_plugin "$domain"
@@ -227,7 +239,15 @@ print(json.dumps({
   fi
 
   panel_log "Media optimize ENABLED for $domain"
-  panel_log "  on_upload=$on_upload cron=$cron webp=$webp max=${max_w}x${max_h} quality=$quality"
+  panel_log "  format=$format on_upload=$on_upload cron=$cron webp=$webp max=${max_w}x${max_h} quality=$quality"
+  if [[ "$format" != original ]]; then
+    panel_log "  New uploads (any format) → one ${format^^} file, max ${max_w}x${max_h}, original not kept."
+    panel_log "  Existing library: cecp-panel media run $domain (WebP copies) | media prune-originals $domain (free disk)"
+  fi
+  if ! php -m 2>/dev/null | grep -qi '^imagick$' \
+     && (( $(php_cfg_mb "$(php_cfg_get "$domain" memory_limit)") < 512 )); then
+    panel_log "  WARN: no PHP Imagick — photos above ~25 megapixels need more PHP memory: cecp-panel php config $domain memory_limit=512M"
+  fi
   panel_log "  Run backlog now: cecp-panel media run $domain"
   media_status "$domain"
 }
@@ -323,11 +343,101 @@ PY
   if [[ -f "$mudir/cecp-media-optimize.json" ]]; then
     echo "  config: $mudir/cecp-media-optimize.json"
   fi
+  [[ "$(media_is_wordpress "$domain")" == "True" ]] || return 0
+  echo ""
+  echo "Image formats this site's PHP can process (read → convert):"
+  wp_site_exec "$domain" eval '
+    $e = _wp_image_editor_choose(); echo "  editor: ", $e ?: "none", "\n";
+    foreach (["image/jpeg","image/png","image/webp","image/avif","image/heic","image/tiff","image/bmp"] as $m)
+      printf("  %-11s %s\n", substr($m, 6), wp_image_editor_supports(["mime_type" => $m]) ? "yes" : "no");
+  ' 2>/dev/null | sed 's/^  bmp .*no$/  bmp         yes (decoded with GD)/' || echo "  (WordPress not reachable)"
 }
 
+# cecp-panel media prune-originals DOMAIN [--yes]
+# WordPress keeps the full-size original of every photo it had to shrink or rotate ("-scaled" /
+# "-rotated" + original): usually the biggest files of the library, only used to regenerate
+# thumbnails. This deletes those originals (and their sidecars) and makes the scaled copy the
+# attachment's own file. Dry run by default: prints what would be freed.
+media_prune_originals() {
+  local domain yes=0 dry=1 out
+  domain="$(media_require_site "${1:-}")"
+  shift || true
+  [[ "${1:-}" == "--yes" ]] && yes=1
+  require_root
+  [[ "$(media_is_wordpress "$domain")" == "True" ]] || panel_die "prune-originals requires WordPress: $domain"
+  if (( yes )); then
+    dry=0
+    site_lock "$domain"
+  fi
+  out="$(wp_site_exec "$domain" eval-file - "$dry" <<'PHP'
+<?php
+global $wpdb;
+$dry = ($args[0] ?? '1') === '1';
+$count = 0; $bytes = 0; $page = 1;
+do {
+    $ids = get_posts(['post_type' => 'attachment', 'post_status' => 'inherit', 'post_mime_type' => 'image',
+                      'fields' => 'ids', 'posts_per_page' => 500, 'paged' => $page++, 'orderby' => 'ID', 'order' => 'ASC',
+                      'no_found_rows' => true, 'suppress_filters' => true]);
+    foreach ($ids as $id) {
+        $meta = wp_get_attachment_metadata($id);
+        if (empty($meta['original_image'])) {
+            continue;
+        }
+        $file = get_attached_file($id, true);
+        $orig = path_join(dirname($file), $meta['original_image']);
+        if (!$file || $orig === $file || !is_file($orig)) {
+            continue;
+        }
+        $victims = [$orig, $orig . '.cecp-opt'];
+        // photo.webp / photo.avif sidecars of photo.jpg — unless another attachment IS that file.
+        $upl = wp_get_upload_dir();
+        foreach (['webp', 'avif'] as $x) {
+            $side = preg_replace('/\.[^.\/]+$/', '.' . $x, $orig);
+            $rel = ltrim(str_replace(trailingslashit($upl['basedir']), '', $side), '/');
+            $owner = $wpdb->get_var($wpdb->prepare(
+                "SELECT post_id FROM $wpdb->postmeta WHERE meta_key = '_wp_attached_file' AND meta_value = %s LIMIT 1", $rel));
+            if (!$owner && $side !== $orig) {
+                $victims[] = $side;
+            }
+        }
+        foreach ($victims as $v) {
+            if (is_file($v)) {
+                $bytes += filesize($v);
+                if (!$dry) {
+                    @unlink($v);
+                }
+            }
+        }
+        if (!$dry) {
+            unset($meta['original_image']);
+            wp_update_attachment_metadata($id, $meta);
+        }
+        $count++;
+    }
+} while ($ids);
+printf("%d %d
+", $count, $bytes);
+PHP
+)" || panel_die "prune-originals failed for $domain"
+  local n b
+  read -r n b <<<"$(tail -1 <<<"$out")"
+  [[ "$n" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ ]] || panel_die "prune-originals: unexpected output: $out"
+  if (( dry )); then
+    echo "Dry run: $n original image(s) kept by WordPress, $(numfmt --to=iec --suffix=B "$b") can be freed."
+    (( n == 0 )) || echo "Delete them (thumbnails can no longer be regenerated from the full original): cecp-panel media prune-originals $domain --yes"
+  else
+    panel_log "prune-originals $domain: $n original(s) deleted, $(numfmt --to=iec --suffix=B "$b") freed"
+  fi
+}
+
+# Runs as the SITE user, never root: uploads/ is writable by the site, so a compromised
+# WordPress could plant symlinks (photo.webp -> /etc/shadow) and a root process writing the
+# WebP/AVIF sidecars or .cecp-opt markers would overwrite system files through them.
 media_run_python() {
-  # Args: DOCROOT MAX_W MAX_H QUALITY SKIP_KB BATCH WEBP DRY_RUN [AVIF]
-  python3 - "$@" <<'PY'
+  # Args: SITE_USER DOCROOT MAX_W MAX_H QUALITY SKIP_KB BATCH WEBP DRY_RUN [AVIF]
+  local site_user="$1"
+  shift
+  (cd / && runuser -u "$site_user" -- python3 - "$@") <<'PY'
 import os, sys, time, json
 from pathlib import Path
 
@@ -422,6 +532,23 @@ if avif and not (pil_avif or im_avif):
     stats["avif_note"] = "no AVIF encoder (Pillow>=11.2 or ImageMagick with libheif); only WebP written"
 
 
+def to_rgb_or_rgba(im):
+    """RGB/RGBA for WebP/AVIF, keeping transparency (palette PNG logos lost it: black background)."""
+    if im.mode in ("RGB", "RGBA"):
+        return im
+    alpha = im.mode in ("LA", "PA", "RGBa", "La") or "transparency" in im.info
+    return im.convert("RGBA" if alpha else "RGB")
+
+def drop_if_not_smaller(sidecar: Path, original: Path):
+    """A sidecar at least as big as the original only costs bandwidth: nginx would prefer it."""
+    try:
+        if sidecar.is_file() and sidecar.stat().st_size >= original.stat().st_size:
+            sidecar.unlink()
+            return False
+    except OSError:
+        return False
+    return sidecar.is_file()
+
 def write_avif(path: Path):
     """photo.jpg -> photo.avif (same name the nginx negotiation looks for). Best effort."""
     if not avif:
@@ -430,9 +557,7 @@ def write_avif(path: Path):
     try:
         if pil_avif:
             with Image.open(path) as im:
-                im = ImageOps.exif_transpose(im)
-                if im.mode not in ("RGB", "RGBA"):
-                    im = im.convert("RGBA" if "A" in im.mode else "RGB")
+                im = to_rgb_or_rgba(ImageOps.exif_transpose(im))
                 im.save(out, "AVIF", quality=max(30, quality - 20))
         elif im_avif:
             subprocess.run([im_bin, str(path), "-quality", str(max(30, quality - 20)), str(out)],
@@ -441,19 +566,19 @@ def write_avif(path: Path):
             return False
     except Exception:
         return False
-    if out.is_file() and out.stat().st_size >= path.stat().st_size:
-        out.unlink()  # AVIF that is not smaller only costs bandwidth-negotiation complexity
-        return False
-    return out.is_file()
+    return drop_if_not_smaller(out, path)
 
 def optimize_pil(path: Path):
     before = path.stat().st_size
     if before < skip_under:
         return "skip", before, before, False
     with Image.open(path) as im:
+        # Stripping the colour profile shifts colours (Display P3 photos from phones look dull).
+        icc = im.info.get("icc_profile")
         im = ImageOps.exif_transpose(im)
         w, h = im.size
-        if w > max_w or h > max_h:
+        resized = w > max_w or h > max_h
+        if resized:
             resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
             im.thumbnail((max_w, max_h), resample)
         ext = path.suffix.lower()
@@ -468,22 +593,27 @@ def optimize_pil(path: Path):
             save_kw = dict(format="PNG", optimize=True)
         else:
             return "skip", before, before, False
+        if icc:
+            save_kw["icc_profile"] = icc
         if dry:
             return "dry", before, before, False
         tmp = path.with_suffix(path.suffix + ".cecp-tmp")
         im.save(tmp, **save_kw)
-        tmp.replace(path)
+        # Re-encoding an already optimised file at the same size often makes it BIGGER (and
+        # always a bit worse): keep the original unless the new one is smaller.
+        if resized or tmp.stat().st_size < before:
+            tmp.replace(path)
+        else:
+            tmp.unlink()
         after = path.stat().st_size
         webp_ok = False
         if webp and ext in (".jpg", ".jpeg", ".png"):
             webp_path = path.with_suffix(".webp")
             try:
-                im2 = Image.open(path)
-                im2 = ImageOps.exif_transpose(im2)
-                if im2.mode not in ("RGB", "RGBA"):
-                    im2 = im2.convert("RGB")
-                im2.save(webp_path, "WEBP", quality=quality, method=4)
-                webp_ok = True
+                with Image.open(path) as im2:
+                    im2 = to_rgb_or_rgba(ImageOps.exif_transpose(im2))
+                    im2.save(webp_path, "WEBP", quality=quality, method=4, **({"icc_profile": icc} if icc else {}))
+                webp_ok = drop_if_not_smaller(webp_path, path)
             except Exception:
                 webp_ok = False
         if write_avif(path):
@@ -508,8 +638,10 @@ def optimize_im(path: Path):
         cmd += ["-quality", str(quality), str(tmp)]
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if tmp.is_file() and tmp.stat().st_size > 0:
+        if tmp.is_file() and 0 < tmp.stat().st_size < before:
             tmp.replace(path)
+        elif tmp.is_file() and tmp.stat().st_size > 0:
+            tmp.unlink()  # not smaller: keep the original (see optimize_pil)
         else:
             tmp.unlink(missing_ok=True)
             return "err", before, before, False
@@ -525,7 +657,7 @@ def optimize_im(path: Path):
                 [im_bin, str(path), "-quality", str(quality), str(webp_path)],
                 check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            webp_ok = webp_path.is_file()
+            webp_ok = drop_if_not_smaller(webp_path, path)
         except Exception:
             webp_ok = False
     if write_avif(path):
@@ -615,9 +747,17 @@ media_run() {
     fi
   }
 
+  local site_user
+  site_user="$(media_site_user "$domain")"
+  # Files left root-owned by runs of older versions (which ran as root) would not be writable
+  # by the site user now. -h/find -P: never follow the site's symlinks.
+  if [[ -d "$docroot/wp-content/uploads" ]]; then
+    find "$docroot/wp-content/uploads" ! -user "$site_user" -exec chown -h "${site_user}:${site_user}" {} + 2>/dev/null || true
+  fi
+
   panel_log "Media run $domain dry=$dry batch=$batch max=${max_w}x${max_h} q=$quality webp=$webp"
   local out
-  out="$(media_run_python "$docroot" "$max_w" "$max_h" "$quality" "$skip_kb" "$batch" "$webp" "$dry" "${avif:-false}")"
+  out="$(media_run_python "$site_user" "$docroot" "$max_w" "$max_h" "$quality" "$skip_kb" "$batch" "$webp" "$dry" "${avif:-false}")"
   echo "$out" | python3 -m json.tool 2>/dev/null || echo "$out"
 
   if [[ "$dry" != "true" ]]; then
@@ -641,12 +781,6 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
     f.write("\n")
 PY
-    # Fix ownership of any new webp/markers under uploads
-    local site_user
-    site_user="$(media_site_user "$domain")"
-    if [[ -d "$docroot/wp-content/uploads" ]]; then
-      chown -R "${site_user}:${site_user}" "$docroot/wp-content/uploads" 2>/dev/null || true
-    fi
   fi
   panel_log "Media run done: $domain"
 }

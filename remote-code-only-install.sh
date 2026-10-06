@@ -2,7 +2,7 @@
 # Runs ON the VPS after tarball is at /tmp/cecp-panel-deploy/cecp-panel.tar.gz
 # Code-only install: no apply-production, no optimize stack, no nginx reload.
 set -euo pipefail
-VERSION="${1:-1.11.0-beta}"
+VERSION="${1:-1.12.0-beta}"
 STAMP="${2:-$(date -u +%Y%m%d_%H%M%S)}"
 BK="/var/lib/cecp-panel/backups/panel-${STAMP}"
 TARBALL="/tmp/cecp-panel-deploy/cecp-panel.tar.gz"
@@ -30,6 +30,8 @@ fi
 
 chmod +x /opt/cecp-panel/cecp-panel /opt/cecp-panel/lib/*.sh 2>/dev/null || true
 install -m 0755 /opt/cecp-panel/cecp-panel /usr/local/bin/cecp-panel
+[[ -f /opt/cecp-panel/templates/cecp-panel.bash-completion ]] \
+  && install -D -m 0644 /opt/cecp-panel/templates/cecp-panel.bash-completion /etc/bash_completion.d/cecp-panel 2>/dev/null || true
 
 # Update panel.json without fragile argv/heredoc edge cases
 python3 - "$VERSION" <<'PY'

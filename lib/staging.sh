@@ -38,8 +38,7 @@ site_staging() {
   if [[ "$(wp_site_is_wordpress "$dst")" == "True" ]]; then
     local mudir
     mudir="$(site_json_get "$dst" docroot)/wp-content/mu-plugins"
-    install -d -o "$(site_json_get "$dst" site_user)" -g "$(site_json_get "$dst" site_user)" -m 755 "$mudir"
-    install -m 644 -o root -g root "$PANEL_ROOT/templates/mu-plugins/cecp-staging.php" "$mudir/cecp-staging.php"
+    site_write_file "$(site_json_get "$dst" site_user)" "$mudir/cecp-staging.php" 644 <"$PANEL_ROOT/templates/mu-plugins/cecp-staging.php"
     wp_site_exec "$dst" config set WP_ENVIRONMENT_TYPE staging --type=constant >/dev/null
     wp_site_exec "$dst" option update blog_public 0 >/dev/null 2>&1 || true  # "error" when already 0
   fi
@@ -155,10 +154,12 @@ staging_push_fixup() {
   local live="$1" stg="$2" work="$3" files="$4" db="$5" blog_public="$6" docroot scheme=http
   docroot="$(site_json_get "$live" docroot)"
   if (( files )); then
-    tar -xzf "$work/pre/public_html.tar.gz" -O "$(basename "$docroot")/wp-config.php" >"$docroot/wp-config.php" 2>/dev/null \
+    # Through the site user: a root ">" into the docroot would follow a planted symlink.
+    tar -xzf "$work/pre/public_html.tar.gz" -O "$(basename "$docroot")/wp-config.php" 2>/dev/null \
+      | site_write_file "$(site_json_get "$live" site_user)" "$docroot/wp-config.php" 640 \
       || panel_log "WARN: could not restore the live wp-config.php (kept the staging one with live DB credentials)"
     site_wp_config_sync "$live"
-    rm -f "$docroot/wp-content/mu-plugins/cecp-staging.php"
+    site_run_as "$(site_json_get "$live" site_user)" rm -f -- "$docroot/wp-content/mu-plugins/cecp-staging.php"
     if [[ "$(site_json_get_or "$live" cache_autopurge false)" == "True" ]]; then
       cache_auto_purge "$live" on >/dev/null
     fi

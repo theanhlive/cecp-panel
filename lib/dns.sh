@@ -35,22 +35,35 @@ print(r[0]['id'] if r else '')
 " 
 }
 
+# Cloudflare zone that holds FQDN: the longest active zone suffix (shop.khachhang.vn → the
+# khachhang.vn zone, also for multi-part TLDs like .com.vn). Fails if the token sees none.
+dns_find_zone() {
+  local cand="${1,,}" zid
+  while [[ "$cand" == *.* ]]; do
+    zid="$(dns_zone_id "$cand" 2>/dev/null || true)"
+    [[ -n "$zid" ]] && { echo "$cand"; return 0; }
+    cand="${cand#*.}"
+  done
+  return 1
+}
+
 dns_add_a() {
   local name="${1,,}" ip="$2" proxied="${3:-true}"
   require_root
   validate_dns_name "$name"
   validate_ipv4 "$ip"
   dns_load_credentials
-  local zone="$CF_DEFAULT_ZONE" sub fqdn
+  # Full name (apex or subdomain of any zone the token manages) or a short label of CF_DEFAULT_ZONE.
+  # Before, "shop.other.vn" was cut down to "shop" of the default zone, and an apex resolved to
+  # the TLD as its zone — records landed in the wrong place.
+  local zone fqdn
   if [[ "$name" == *.* ]]; then
-    fqdn="${name,,}"
-    zone="${fqdn#*.}"
-    sub="${fqdn%%.${zone}}"
-    [[ "$sub" == "$fqdn" ]] && panel_die "Cannot parse domain: $name"
+    fqdn="$name"
   else
-    sub="$name"
-    fqdn="${sub}.${zone}"
+    fqdn="${name}.${CF_DEFAULT_ZONE}"
   fi
+  zone="$(dns_find_zone "$fqdn")" \
+    || panel_die "No active Cloudflare zone for $fqdn — add the domain to Cloudflare (nameservers switched) and give the API token access to it"
   local zid
   zid="$(dns_zone_id "$zone")"
   [[ -n "$zid" ]] || panel_die "Zone not found: $zone"
@@ -103,8 +116,7 @@ dns_point_site() {
     ip="$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || panel_local_ipv4)"
   fi
   validate_ipv4 "$ip"
-  local sub="${domain%%.*}"
-  dns_add_a "$sub" "$ip" "${3:-true}"
+  dns_add_a "$domain" "$ip" "${3:-true}"
 }
 
 dns_set_ssl_mode() {
@@ -114,6 +126,8 @@ dns_set_ssl_mode() {
   dns_load_credentials
   zone="${zone:-$CF_DEFAULT_ZONE}"
   validate_domain "$zone"
+  # A site domain works too (shop.khachhang.vn → its zone khachhang.vn).
+  zone="$(dns_find_zone "$zone")" || panel_die "No active Cloudflare zone for ${2:-$CF_DEFAULT_ZONE}"
   case "$mode" in
     off|flexible|full|strict) ;;
     *) panel_die "Usage: cecp-panel dns ssl-mode off|flexible|full|strict [ZONE]" ;;

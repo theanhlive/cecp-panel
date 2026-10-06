@@ -38,9 +38,10 @@ source "$PANEL_ROOT/lib/monitor.sh"
 source "$PANEL_ROOT/lib/cloudflare.sh"
 source "$PANEL_ROOT/lib/modsec.sh"
 source "$PANEL_ROOT/lib/logview.sh"
+source "$PANEL_ROOT/lib/incident.sh"
 source "$PANEL_ROOT/lib/menu.sh"
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.11.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.12.0-beta}"
 
 usage() {
   cat <<EOF
@@ -72,12 +73,20 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel security fail2ban|fail2ban-full|firewall|ssh|ssh-key-only|ssh-harden|ssh-repair
   cecp-panel security ssh-port|mariadb-bind|apply-production|check|unattended|fix-perms
   cecp-panel security harden-docroot [DOMAIN|--all]   # nginx ACL, removes world-read (cross-site read protection)
+  cecp-panel security cf-only on [--force]|off|status  # ports 80/443 from Cloudflare only (hide origin)
+  cecp-panel security scan [DOMAIN|--all] [--days 7]   # web shells, cross-site writes, backdoors (read-only)
+  cecp-panel security scan-schedule on [--every 14|30] [--hour H] [--auto-restore] | off | status   # periodic scan at the quietest hour
+  cecp-panel security scan-cron [--force]   # run the periodic scan now (--force: ignore interval/load)
+  cecp-panel security scan-ack               # infection handled: resume backup retention
+  cecp-panel security restore-clean DOMAIN|--all [--dry-run] [--yes]   # back to the last backup a scan verified clean
+  cecp-panel security rotate-secrets DOMAIN|--all [--admins]   # after a hack: new DB/Redis/SFTP/WP secrets
+  cecp-panel security php-isolation                    # OPcache isolation between sites (part of apply-production)
   cecp-panel system info|ensure-swap|swap|disk-clean|maintain|tune
   cecp-panel mysql secure
   cecp-panel agent install|status
   cecp-panel onboard
   cecp-panel php list|install VER|set DOMAIN VER
-    php config DOMAIN [memory_limit=512M upload_max_filesize=128M max_execution_time=300 ...] | DOMAIN --reset [KEY]
+    php config DOMAIN [memory_limit=512M upload_max_filesize=128M max_execution_time=300 allow_putenv=on ...] | DOMAIN --reset [KEY]
   cecp-panel update check|mirror|panel|component|os|wp-cli
     update all [--skip-os] [--skip-wp] [--skip-panel]   # OS + wp-cli + every WP site + panel
     update enable-cron|disable-cron                     # weekly (Sun 04:10 UTC), runs update all
@@ -88,10 +97,15 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel db export DOMAIN [FILE] | import DOMAIN FILE [--replace-url OLD] [--yes] | shell|info DOMAIN
     db size | slow-log on [SECONDS]|off|status | slow-report [TOP]
   cecp-panel optimize site|nginx|redis|redis-wp|redis-acl|mariadb|opcache|kernel|purge|purge-url|stack|bench|report|webp|brotli
-  cecp-panel media enable|disable|status|run|run-all|enable-cron|disable-cron
-    media enable DOMAIN [--max-width 1920] [--quality 80] [--no-upload] [--no-cron] [--no-webp] [--avif]
+  cecp-panel media enable|disable|status|run|run-all|prune-originals|enable-cron|disable-cron
+    media enable DOMAIN [--format webp|avif|original] [--max-width 1920] [--quality 80] [--no-upload] [--no-cron] [--no-webp] [--avif]
+      --format webp (default): every upload, any format → one right-sized WebP, original not kept
+    media prune-originals DOMAIN [--yes]       # delete full-size originals WordPress kept (dry run without --yes)
     media run DOMAIN [--dry-run] [--limit N]   # only if enabled for that site
-  cecp-panel notify setup|status|test|health|enable-cron|disable-cron|webhook URL|off
+  cecp-panel notify setup                    # wizard: Telegram / Zalo Bot / Discord / n8n webhook + event types
+    notify telegram|zalo|discord             # paste the token/webhook (hidden); chat id found automatically
+    notify events [edit | set security,uptime,backup,ssl,resources,updates|all|none [--channel CH] [--min warning]]
+    notify test [CHANNEL] | off CHANNEL | status | webhook URL | health | enable-cron | disable-cron
   cecp-panel monitor run|status|enable|disable
   cecp-panel modsec status|install|enable|disable|blocking
   cecp-panel log panel|audit|nginx|php|mysql|fail2ban|notify [DOMAIN] [LINES]
@@ -256,7 +270,7 @@ case "$cmd" in
         [[ -n "${6:-}" ]] || panel_die "Usage: cecp-panel backup configure HOUR MINUTE DOW KEEP_DAILY KEEP_WEEKLY KEEP_MONTHLY [KEEP_YEARLY]"
         backup_configure "$1" "$2" "$3" "$4" "$5" "$6" "${7:-0}"
         ;;
-      prune|forget) backup_apply_retention ;;
+      prune|forget) backup_apply_retention --confirm ;;
       prune-dry-run) backup_apply_retention --dry-run ;;
       restore) backup_restore "$@" ;;
       verify) backup_verify "${1:---all}" ;;
@@ -285,6 +299,14 @@ case "$cmd" in
       check|self-check) security_self_check ;;
       unattended|auto-update) require_root; security_unattended_updates ;;
       fix-perms) require_root; security_fix_permissions ;;
+      cf-only) security_cf_only "$@" ;;
+      scan) security_scan "$@" ;;
+      scan-schedule) security_scan_schedule "$@" ;;
+      scan-cron) security_scan_cron "$@" ;;
+      scan-ack) security_scan_ack ;;
+      restore-clean) security_restore_clean "$@" ;;
+      rotate-secrets) security_rotate_secrets "$@" ;;
+      php-isolation) require_root; security_php_isolation ;;
       harden-docroot)
         require_root
         if [[ "${1:-}" == "--all" || -z "${1:-}" ]]; then
@@ -395,9 +417,10 @@ case "$cmd" in
         media_run "$@"
         ;;
       run-all) media_run_all ;;
+      prune-originals) media_prune_originals "$@" ;;
       enable-cron) media_enable_cron ;;
       disable-cron) media_disable_cron ;;
-      *) panel_die "Usage: cecp-panel media enable|disable|status|run|run-all|enable-cron|disable-cron" ;;
+      *) panel_die "Usage: cecp-panel media enable|disable|status|run|run-all|prune-originals|enable-cron|disable-cron" ;;
     esac
     ;;
   notify)
@@ -405,13 +428,18 @@ case "$cmd" in
     case "$sub" in
       setup) require_root; notify_setup ;;
       status) notify_status ;;
-      test) require_root; notify_test ;;
+      test) require_root; notify_test "${1:-}" ;;
+      telegram) notify_setup_bot telegram ;;
+      zalo) notify_setup_bot zalo ;;
+      discord) notify_setup_discord ;;
+      off) notify_channel_off "${1:-}" ;;
+      events) notify_events "$@" ;;
       health) notify_health ;;
       enable-cron) require_root; notify_enable_cron ;;
       disable-cron) require_root; notify_disable_cron ;;
       send) notify_send "$*" ;;
       webhook) notify_webhook_set "${1:-}" ;;
-      *) panel_die "Usage: cecp-panel notify setup|status|test|health|enable-cron|disable-cron|webhook URL|off" ;;
+      *) panel_die "Usage: cecp-panel notify setup|status|telegram|zalo|discord|webhook URL|off CHANNEL|events|test [CHANNEL]|health|enable-cron|disable-cron" ;;
     esac
     ;;
   monitor)

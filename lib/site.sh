@@ -18,14 +18,12 @@ site_ensure_tmp() {
 # (DB credentials, auth salts) is exactly the file that matters here.
 #
 # nginx needs SOME access to serve static assets, and isn't in any site's private group,
-# so it gets a named ACL entry rather than blanket "other" access — but nginx *never*
-# opens/reads .php file content itself (a .php request is always proxied to this site's
-# own PHP-FPM pool via fastcgi_pass; nginx only needs to traverse directories and read
-# non-PHP files it actually serves). So .php files get NO nginx ACL entry at all. This
-# matters beyond nginx itself: if ANY process ever ends up sharing the "nginx" Linux
-# identity (a misconfigured PHP-FPM pool set to `user = nginx` instead of its own site
-# user, e.g. a manually-added site outside the panel), it still can't read wp-config.php
-# or any other site's PHP source through this grant — there's nothing to inherit.
+# so it gets a named ACL entry rather than blanket "other" access. nginx does open .php files
+# itself (try_files), so they keep the grant — except wp-config.php, which nginx never opens
+# (deny all; PHP-FPM reads it as the site user). This matters beyond nginx itself: if ANY
+# process ever ends up sharing the "nginx" Linux identity (a misconfigured PHP-FPM pool set to
+# `user = nginx`, e.g. a manually-added site outside the panel), it still can't read
+# wp-config.php through this grant — there's nothing to inherit.
 #
 # Default ACLs (-d) make new files/dirs usable immediately without re-running this: they
 # get rx uniformly (files need to be servable — mostly media uploads, never .php in
@@ -49,11 +47,26 @@ site_harden_docroot_perms() {
   # traversal too) — narrowed for .php specifically below, on whatever exists right now.
   setfacl -R -m u:nginx:rx "$docroot" 2>/dev/null || true
   setfacl -R -d -m u:nginx:rx "$docroot" 2>/dev/null || true
-  # Directories only need search (traversal), not listing — nginx never directory-lists
-  # (no autoindex); stricter than the rx default above, applied to what exists today.
-  find "$docroot" -type d -exec setfacl -m u:nginx:--x {} + 2>/dev/null
-  # .php: no nginx ACL entry at all, existing files only (see comment above for new ones).
-  find "$docroot" -type f -name '*.php' -exec setfacl -x u:nginx {} + 2>/dev/null
+  # nginx opens (openat) directories and files itself for try_files / index lookups, even for
+  # .php it only hands to PHP-FPM, so it needs read on them: a "--x"-only or no-entry grant makes
+  # every WordPress page a 404 (nginx: openat() ... Permission denied). Directories: r-x (nginx
+  # never lists them, no autoindex). The one secret nginx never has to open is wp-config.php (its
+  # location is deny all, PHP-FPM reads it as the site user): drop nginx's entry from it so a
+  # process sharing the "nginx" identity still cannot read the DB password / salts.
+  find "$docroot" -type d -exec setfacl -m u:nginx:r-x {} + 2>/dev/null
+  find "$docroot" -type f -name 'wp-config*.php' -exec setfacl -x u:nginx {} + 2>/dev/null
+}
+
+# Site users never need their own crontab or at jobs (the panel's jobs live in /etc/cron.d):
+# denying them removes the classic persistence trick of a backdoor ("crontab -" re-infecting
+# the site every minute even after the files were cleaned).
+site_harden_account() {
+  local u="$1" f
+  [[ "$u" =~ ^site_[a-z0-9_]+$ ]] || return 0
+  for f in /etc/cron.deny /etc/at.deny; do
+    [[ -f "$f" ]] || install -m 600 /dev/null "$f"
+    grep -qx "$u" "$f" || echo "$u" >>"$f"
+  done
 }
 
 # Retrofit every existing site (upgrade path — new sites get this at creation time).
@@ -112,8 +125,9 @@ site_wp_config_sync() {
   local domain="$1" cfg
   cfg="$(site_json_get "$domain" docroot)/wp-config.php"
   [[ -f "$cfg" ]] || return 0
+  # As the site user: wp-config.php may be a symlink planted to another site's config.
   CECP_DB_NAME="$(site_json_get "$domain" db_name)" CECP_DB_USER="$(site_json_get "$domain" db_user)" \
-  CECP_DB_PASS="$(site_json_get "$domain" db_pass)" python3 - "$cfg" <<'PY'
+  CECP_DB_PASS="$(site_json_get "$domain" db_pass)" site_run_as "$(site_json_get "$domain" site_user)" python3 - "$cfg" <<'PY'
 import os, re, sys
 path = sys.argv[1]
 src = open(path, encoding="utf-8").read()
@@ -315,6 +329,13 @@ site_auth_curl_config() {
   printf 'user = "%s:%s"\n' "$(site_json_get_or "$1" site_auth_user "")" "$(site_json_get_or "$1" site_auth_pass "")"
 }
 
+# wp-cron.php access: loopback only once the server cron drives WordPress (it disables the
+# visitor-triggered one); open otherwise, so WordPress' own spawn keeps working.
+site_cron_access() {
+  [[ -f "/etc/cron.d/cecp-wp-$1" ]] || return 0
+  printf '        allow 127.0.0.1;\n        allow ::1;\n        deny all;\n        auth_basic off;'
+}
+
 # Render the site's nginx vhost: HTTPS variant (HTTP/2, HSTS, 80→301) when a Let's Encrypt
 # certificate exists, plain HTTP otherwise. Caller reloads nginx (nginx_test_and_reload).
 site_render_vhost() {
@@ -343,7 +364,7 @@ site_render_vhost() {
   body="$(mktemp)"
   template_render "$PANEL_ROOT/templates/nginx-site-body.tpl" "$body" \
     DOMAIN "$domain" DOCROOT "$docroot" PHP_SOCK "$php_sock" CACHE_TTL "$ttl" IMG_AVIF "$avif" \
-    ADMIN_GUARD "$(site_admin_guard "$domain" "$slug")" HEADERS "$headers" \
+    ADMIN_GUARD "$(site_admin_guard "$domain" "$slug")" HEADERS "$headers" CRON_ACCESS "$(site_cron_access "$slug")" \
     BODY_SIZE "$(( post_mb + 1 ))m" FCGI_TIMEOUT "$(( exec_s + 30 ))s"
   if cert_dir="$(site_cert_dir "$domain")"; then
     template_render "$PANEL_ROOT/templates/nginx-vhost-ssl.conf.tpl" "$out" \
@@ -394,7 +415,8 @@ site_render_pool() {
     UPLOAD_MAX_FILESIZE "$(php_cfg_get "$domain" upload_max_filesize)" \
     MAX_EXECUTION_TIME "$(php_cfg_get "$domain" max_execution_time)" \
     MAX_INPUT_TIME "$(php_cfg_get "$domain" max_input_time)" \
-    MAX_INPUT_VARS "$(php_cfg_get "$domain" max_input_vars)"
+    MAX_INPUT_VARS "$(php_cfg_get "$domain" max_input_vars)" \
+    DISABLE_FUNCTIONS "$(php_cfg_disable_functions "$domain")"
 }
 
 # Re-apply current templates (vhost + pool) to an existing site, with nginx rollback on error.
@@ -405,6 +427,13 @@ site_rebuild_vhost() {
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
   if [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
     ssl_renewal_use_webroot "$domain"
+  fi
+  # Upgrades apply the isolation fixes too: docroot ACLs (no cross-site read of wp-config.php),
+  # the site user barred from crontab/at, and the loopback wp-cron line.
+  site_harden_docroot_perms "$domain" || panel_log "WARN: docroot ACL hardening failed for $domain"
+  site_harden_account "$(site_json_get "$domain" site_user)"
+  if [[ -f "/etc/cron.d/cecp-wp-$(domain_slug "$domain")" ]]; then
+    wp_cron_write "$domain"
   fi
   site_render_pool "$domain"
   site_render_vhost "$domain"
@@ -487,6 +516,7 @@ site_add() {
 
   panel_log "Creating UNIX user $site_user ..."
   useradd -r -m -d "/home/${site_user}" -s /sbin/nologin "$site_user"
+  site_harden_account "$site_user"
   mkdir -p "$docroot"
   # SFTP chroot: home root-owned, only public_html writable by site user
   chown root:root "/home/${site_user}"
@@ -592,9 +622,12 @@ site_install_wordpress() {
   # Not "admin": the first name every wp-login brute-force list tries.
   admin_user="admin_$(rand_alnum 6 | tr '[:upper:]' '[:lower:]')"
   admin_pass="$(rand_alnum 20)"
+  # A subdomain covered by a parent wildcard certificate is served over HTTPS from the start.
+  local scheme=http
+  site_cert_dir "$domain" >/dev/null && scheme=https
   "${wp_run[@]}" core install \
     --path="$docroot" \
-    --url="http://${domain}" \
+    --url="${scheme}://${domain}" \
     --title="${domain}" \
     --admin_user="$admin_user" \
     --prompt=admin_password \
@@ -696,7 +729,7 @@ site_duplicate() {
   # at site_add's empty-docroot stage.
   site_harden_docroot_perms "$dst"
   # The auto-purge config names the source site's queue; enable it on the copy separately.
-  rm -f "$dst_doc/wp-content/mu-plugins/cecp-cache-purge.php" "$dst_doc/wp-content/mu-plugins/cecp-cache-purge.json"
+  site_run_as "$(site_json_get "$dst" site_user)" rm -f -- "$dst_doc/wp-content/mu-plugins/cecp-cache-purge.php" "$dst_doc/wp-content/mu-plugins/cecp-cache-purge.json"
   if [[ "$src_wp" == "True" ]]; then
     # The copied wp-config.php still holds the SOURCE database credentials: without this the
     # copy (and the search-replace below) would write to the source site's database.
