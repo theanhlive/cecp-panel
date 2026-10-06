@@ -650,7 +650,7 @@ check "5 MB upload is not refused by nginx (was 413 with the 1m default)" \
 check "invalid PHP settings rejected" bash -c "! cecp-panel php config $D memory_limit=99T && ! cecp-panel php config $D foo=1 && ! cecp-panel php config $D max_execution_time=5 && ! cecp-panel php config $D 'memory_limit=512M;id'"
 check "putenv disabled by default" grep -qE 'disable_functions\] = .*,putenv$' "$POOL"
 check "allow_putenv=on re-enables putenv, reset disables it again" \
-  bash -c "cecp-panel php config $D allow_putenv=on >/dev/null && ! grep -q putenv $POOL && cecp-panel php config $D --reset allow_putenv >/dev/null && grep -q ',putenv$' $POOL"
+  bash -c "cecp-panel php config $D allow_putenv=on >/dev/null && ! grep 'disable_functions' $POOL | grep -q putenv && cecp-panel php config $D --reset allow_putenv >/dev/null && grep -q ',putenv$' $POOL"
 check "php config --reset" bash -c "cecp-panel php config $D --reset memory_limit >/dev/null && grep -q 'memory_limit\] = 256M' $POOL"
 
 echo "=== Per-site resource limits (own PHP-FPM) ==="

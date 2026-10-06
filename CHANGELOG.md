@@ -2,6 +2,10 @@
 
 ## 1.12.0-beta — rà soát bảo mật, tốc độ, dữ liệu backup và thao tác
 
+### Sửa lỗi ACL docroot (phát hiện khi chạy test tích hợp đầy đủ lần đầu)
+- `harden-docroot` (từ 1.11.x) chỉ cấp nginx `--x` trên thư mục và gỡ hẳn quyền trên mọi file `.php`, nhưng nginx tự `openat()` thư mục và `index.php` (`try_files`), nên **mọi trang WordPress trả 404** (`openat() ... Permission denied`). Nay: thư mục `r-x`, file (kể cả `.php`) giữ quyền đọc, riêng `wp-config*.php` **không** có ACL nginx (nginx không bao giờ mở nó; PHP-FPM đọc bằng user site) — `security check` vẫn kiểm đúng điểm này. Áp bằng `cecp-panel security harden-docroot --all` (hoặc `apply-production`).
+
+
 ### Thông báo: Telegram, Zalo Bot, Discord — chọn loại thông báo
 - **Zalo Bot** (mới, API bot.zapps.vn) cùng Telegram, Discord, webhook n8n. `cecp-panel notify setup` (wizard) hoặc `notify telegram|zalo|discord`: dán token/URL ở **ô nhập ẩn** (không qua dòng lệnh), panel kiểm tra token (getMe), **tự tìm Chat ID** sau khi bạn nhắn cho bot một tin, gửi tin thử. Agent: `CECP_TELEGRAM_TOKEN`/`CECP_ZALO_TOKEN`/`CECP_DISCORD_WEBHOOK` qua môi trường.
 - **Chọn loại thông báo**: 6 nhóm (`security uptime backup ssl resources updates`) + mức tối thiểu (`info|warning|critical`), chung hoặc **riêng từng kênh**: `notify events edit` / `notify events set security,uptime --channel zalo --min warning`. Webhook n8n mặc định nhận tất cả.

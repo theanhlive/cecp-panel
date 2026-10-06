@@ -18,14 +18,12 @@ site_ensure_tmp() {
 # (DB credentials, auth salts) is exactly the file that matters here.
 #
 # nginx needs SOME access to serve static assets, and isn't in any site's private group,
-# so it gets a named ACL entry rather than blanket "other" access — but nginx *never*
-# opens/reads .php file content itself (a .php request is always proxied to this site's
-# own PHP-FPM pool via fastcgi_pass; nginx only needs to traverse directories and read
-# non-PHP files it actually serves). So .php files get NO nginx ACL entry at all. This
-# matters beyond nginx itself: if ANY process ever ends up sharing the "nginx" Linux
-# identity (a misconfigured PHP-FPM pool set to `user = nginx` instead of its own site
-# user, e.g. a manually-added site outside the panel), it still can't read wp-config.php
-# or any other site's PHP source through this grant — there's nothing to inherit.
+# so it gets a named ACL entry rather than blanket "other" access. nginx does open .php files
+# itself (try_files), so they keep the grant — except wp-config.php, which nginx never opens
+# (deny all; PHP-FPM reads it as the site user). This matters beyond nginx itself: if ANY
+# process ever ends up sharing the "nginx" Linux identity (a misconfigured PHP-FPM pool set to
+# `user = nginx`, e.g. a manually-added site outside the panel), it still can't read
+# wp-config.php through this grant — there's nothing to inherit.
 #
 # Default ACLs (-d) make new files/dirs usable immediately without re-running this: they
 # get rx uniformly (files need to be servable — mostly media uploads, never .php in
@@ -49,11 +47,14 @@ site_harden_docroot_perms() {
   # traversal too) — narrowed for .php specifically below, on whatever exists right now.
   setfacl -R -m u:nginx:rx "$docroot" 2>/dev/null || true
   setfacl -R -d -m u:nginx:rx "$docroot" 2>/dev/null || true
-  # Directories only need search (traversal), not listing — nginx never directory-lists
-  # (no autoindex); stricter than the rx default above, applied to what exists today.
-  find "$docroot" -type d -exec setfacl -m u:nginx:--x {} + 2>/dev/null
-  # .php: no nginx ACL entry at all, existing files only (see comment above for new ones).
-  find "$docroot" -type f -name '*.php' -exec setfacl -x u:nginx {} + 2>/dev/null
+  # nginx opens (openat) directories and files itself for try_files / index lookups, even for
+  # .php it only hands to PHP-FPM, so it needs read on them: a "--x"-only or no-entry grant makes
+  # every WordPress page a 404 (nginx: openat() ... Permission denied). Directories: r-x (nginx
+  # never lists them, no autoindex). The one secret nginx never has to open is wp-config.php (its
+  # location is deny all, PHP-FPM reads it as the site user): drop nginx's entry from it so a
+  # process sharing the "nginx" identity still cannot read the DB password / salts.
+  find "$docroot" -type d -exec setfacl -m u:nginx:r-x {} + 2>/dev/null
+  find "$docroot" -type f -name 'wp-config*.php' -exec setfacl -x u:nginx {} + 2>/dev/null
 }
 
 # Site users never need their own crontab or at jobs (the panel's jobs live in /etc/cron.d):
