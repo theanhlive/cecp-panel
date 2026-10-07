@@ -7,6 +7,14 @@
 - Đã nâng cấp 3 VPS lên 1.12.0-beta (1 VPS canary trước, rồi 2 VPS còn lại): `apply-production`, `site rebuild-vhost --all`, `security harden-docroot --all`. Mọi site trả 200, `security check` 0 FAIL.
 - **Còn lại:** (1) 2 cảnh báo `security check`: `PasswordAuthentication yes` (`security ssh-key-only`) và OPcache chưa cô lập (`security php-isolation`); (2) các tuỳ chọn chủ VPS quyết định: `notify setup`, `security scan-schedule on`, `backup prune-dry-run` rồi `backup prune`, `media enable`, `security cf-only`; (3) mục 4 (thử trên VPS lab: Ubuntu 22.04, thông báo Telegram/Zalo thật, HEIC/AVIF, cf-only, nâng cấp từ 1.11) chưa chạy; (4) scan sau nâng cấp vẫn báo "indicators found" (plugin stub, file thừa WP, checksum lệch) — đã được chủ VPS chấp nhận là không phải mã độc; một tài khoản admin WordPress tạo 2026-09-14 trên một VPS nên được chủ VPS xác nhận.
 - Lưu ý quy trình: 2 VPS sau được nâng cấp trước khi quét bảo mật (quét chạy sau). Lần sau quét **trước**, dừng nếu có dấu hiệu lạ.
+- Tag Git `v1.12.0-beta` (annotated, commit merge `b469ce6`) đã tạo và đẩy lên GitHub.
+
+---
+
+## Lưu trữ — hướng dẫn bàn giao gốc (lịch sử, phát hành hoàn tất 2026-10-07)
+
+Phần dưới giữ nguyên nội dung hướng dẫn trước khi merge/phát hành; **không** còn là checklist
+đang làm — chỉ tham chiếu. Mục **« 6. Cập nhật các VPS đang dùng »** vẫn là runbook nâng cấp chung.
 
 **Dành cho Claude Code (hoặc người) chạy trên máy local có Docker.** Mọi thay đổi 1.12 đang ở nhánh
 `claude/epic-fermat-85l79i`, chưa vào `main`. Chúng đã được lint và thử từng phần trong môi trường
