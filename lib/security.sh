@@ -537,11 +537,13 @@ security_self_check() {
   done
   shopt -u nullglob
 
+  shopt -s nullglob
   if ls /etc/php.d/98-cecp-isolation.ini /etc/opt/remi/php*/php.d/98-cecp-isolation.ini /etc/php/*/mods-available/cecp-isolation.ini >/dev/null 2>&1; then
     _ck PASS "OPcache isolated between sites"
   else
     _ck WARN "OPcache shared between sites without isolation — run: cecp-panel security php-isolation"
   fi
+  shopt -u nullglob
 
   echo "--- files / secrets ---"
   [[ "$(stat -c %a "$ETC_DIR" 2>/dev/null)" == "700" ]] && _ck PASS "$ETC_DIR is 700" || _ck FAIL "$ETC_DIR not 700"
