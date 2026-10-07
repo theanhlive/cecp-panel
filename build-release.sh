@@ -35,6 +35,12 @@ tar czf "$OUT" -C "$(dirname "$ROOT")" \
 # Portable "latest" copy (Windows Git bash may lack ln -sf)
 cp -f "$OUT" "$DIST/cecp-panel-latest.tar.gz"
 (cd "$DIST" && sha256sum cecp-panel-*.tar.gz >SHA256SUMS)
+for old in "$DIST"/cecp-panel-*.tar.gz; do
+  [[ -f "$old" ]] || continue
+  bn="$(basename "$old")"
+  [[ "$bn" == "cecp-panel-latest.tar.gz" || "$bn" == "cecp-panel-${VERSION}.tar.gz" ]] && continue
+  rm -f "$old"
+done
 echo "Built: $OUT ($(wc -c <"$OUT" | tr -d ' ') bytes)"
 echo "Latest: $DIST/cecp-panel-latest.tar.gz"
 echo "Checksums: $DIST/SHA256SUMS"

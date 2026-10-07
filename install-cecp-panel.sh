@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # CECP Panel — ONE command install for customers (VPS root)
 #
-#   curl -fsSL https://YOUR-CDN/install-cecp-panel.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/theanhlive/cecp-panel/main/install-cecp-panel.sh | sudo bash
 #
-# Or with your GitHub raw base:
-#   curl -fsSL https://raw.githubusercontent.com/ORG/REPO/main/scripts/cecp-panel/install-cecp-panel.sh | sudo bash -s -- --raw-base https://raw.githubusercontent.com/ORG/REPO/main/scripts/cecp-panel
+# Custom raw base (override):
+#   curl -fsSL …/install-cecp-panel.sh | sudo bash -s -- --raw-base https://HOST/other
 #
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.12.0-beta}"
-# Public mirror — one-command install for end users
-CECP_PANEL_RAW_BASE="${CECP_PANEL_RAW_BASE:-https://isharevn.net/downloads/cecp-panel}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.12.1-beta}"
+CECP_PANEL_RAW_BASE="${CECP_PANEL_RAW_BASE:-https://raw.githubusercontent.com/theanhlive/cecp-panel/main}"
 
 log() { echo "[install-cecp-panel] $*"; }
 die() { echo "[install-cecp-panel] ERROR: $*" >&2; exit 1; }
@@ -46,7 +45,7 @@ run_local_install() {
 
 download_and_install() {
   local base="${CECP_PANEL_RAW_BASE%/}"
-  [[ -n "$base" ]] || die "Set CECP_PANEL_RAW_BASE or pass --raw-base (GitHub raw path to scripts/cecp-panel)"
+  [[ -n "$base" ]] || die "Set CECP_PANEL_RAW_BASE or pass --raw-base (HTTPS raw base URL; default is GitHub main)"
   local name="cecp-panel-${CECP_PANEL_VERSION}.tar.gz"
   local tmp expected actual
   tmp="$(mktemp -d)"

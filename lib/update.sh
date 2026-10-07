@@ -3,6 +3,7 @@
 set -euo pipefail
 
 PANEL_ENV="$ETC_DIR/panel.env"
+CECP_PANEL_DEFAULT_RAW_BASE="https://raw.githubusercontent.com/theanhlive/cecp-panel/main"
 
 update_validate_mirror() {
   [[ "${1:-}" =~ ^(https://|http://|file:///)[A-Za-z0-9._~%/:@+-]+$ ]] \
@@ -23,6 +24,7 @@ update_load_mirror() {
     secure_source "$PANEL_ENV"
   fi
   CECP_PANEL_RAW_BASE="${CECP_PANEL_RAW_BASE:-${CECP_PANEL_BUNDLE_URL:-}}"
+  CECP_PANEL_RAW_BASE="${CECP_PANEL_RAW_BASE:-$CECP_PANEL_DEFAULT_RAW_BASE}"
 }
 
 update_check() {
@@ -90,7 +92,7 @@ update_panel() {
   require_root
   update_load_mirror
   local base="${CECP_PANEL_RAW_BASE:-}"
-  [[ -n "$base" ]] || panel_die "Set update mirror: cecp-panel update mirror https://HOST/path/cecp-panel"
+  [[ -n "$base" ]] || panel_die "No update source (default: $CECP_PANEL_DEFAULT_RAW_BASE). Override: cecp-panel update mirror URL"
   update_validate_mirror "$base"
   ver="${ver:-$CECP_PANEL_VERSION}"
   [[ "$ver" =~ ^([0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?|latest)$ ]] || panel_die "Invalid version: '$ver'"
@@ -170,9 +172,9 @@ PY
 
 update_mirror_set() {
   require_root
-  [[ -n "${1:-}" ]] || panel_die "Usage: cecp-panel update mirror URL"
+  [[ -n "${1:-}" ]] || panel_die "Usage: cecp-panel update mirror URL (default source: $CECP_PANEL_DEFAULT_RAW_BASE)"
   update_save_mirror "$1"
-  panel_log "Update mirror saved. Use: cecp-panel update panel"
+  panel_log "Update mirror saved (overrides default GitHub raw base). Use: cecp-panel update panel latest"
 }
 
 UPDATE_ALL_CRON="/etc/cron.d/cecp-panel-update-all"
@@ -250,7 +252,7 @@ update_all() {
   else
     update_load_mirror
     if [[ -z "${CECP_PANEL_RAW_BASE:-}" ]]; then
-      lines+=("panel: no update mirror configured (cecp-panel update mirror URL) — skipped")
+      lines+=("panel: no update source — skipped")
     elif ( update_panel latest ); then
       lines+=("panel: updated")
     else

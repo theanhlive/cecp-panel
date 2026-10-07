@@ -1,39 +1,35 @@
 # CECP Panel — cài một lệnh cho khách
 
+Nguồn chính thức: repo GitHub công khai `theanhlive/cecp-panel` (raw `main`).
+
 ## Khách chạy trên VPS mới (root, Alma 9 / Ubuntu 22)
 
-### Bước 1 — Bạn host 2 file (GitHub raw hoặc CDN)
-
-Sau mỗi bản release, chạy trên máy dev:
+### Cài panel
 
 ```bash
-cd scripts/cecp-panel && ./build-release.sh
-# Upload dist/cecp-panel-latest.tar.gz + install-cecp-panel.sh lên CDN/GitHub
+curl -fsSL https://raw.githubusercontent.com/theanhlive/cecp-panel/main/install-cecp-panel.sh | sudo bash
 ```
 
-### Bước 2 — Khách cài (mirror công khai)
+Script tự tải `dist/cecp-panel-<phiên-bản>.tar.gz` (hoặc `cecp-panel-latest.tar.gz`) và **xác minh SHA256** với `dist/SHA256SUMS` trên cùng nguồn GitHub.
+
+**Cài ghim phiên bản / checksum (tin cậy hơn):**
 
 ```bash
-curl -fsSL https://isharevn.net/downloads/cecp-panel/install-cecp-panel.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/theanhlive/cecp-panel/main/install-cecp-panel.sh | sudo bash -s -- \
+  --version 1.12.1-beta \
+  --sha256 <64-ký-tự-hex-từ-SHA256SUMS>
 ```
 
-Script tự tải `dist/cecp-panel-1.10.0-beta.tar.gz` (hoặc `cecp-panel-latest.tar.gz`) — **không cần** tải `.tar.gz` thủ công.
+Mirror tùy chọn (ghi đè nguồn mặc định): thêm `--raw-base https://HOST/path`.
 
-Mirror tùy chọn (GitHub raw):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ORG/REPO/main/scripts/cecp-panel/install-cecp-panel.sh | sudo bash -s -- \
-  --raw-base https://raw.githubusercontent.com/ORG/REPO/main/scripts/cecp-panel
-```
-
-### Bước 3 — Hardening + tối ưu (khuyến nghị, 1–2 phút)
+### Hardening + tối ưu (khuyến nghị, 1–2 phút)
 
 ```bash
 cecp-panel security apply-production
 cecp-panel optimize stack
 ```
 
-### Bước 4 — Wizard DNS/backup (tự chạy nếu có TTY)
+### Wizard DNS/backup (tự chạy nếu có TTY)
 
 ```bash
 cecp-panel onboard
@@ -42,7 +38,7 @@ cecp-panel onboard
 - Cloudflare API token (Zone DNS Edit) — thêm subdomain trỏ VPS
 - Google Drive service account JSON + Shared Drive ID — backup
 
-### Bước 5 — Thêm site WordPress
+### Thêm site WordPress
 
 ```bash
 cecp-panel dns point test1.theanhlive.com
@@ -52,6 +48,21 @@ cecp-panel ssl issue test1.theanhlive.com
 cecp-panel backup run test1.theanhlive.com
 cecp-panel security check
 ```
+
+## Nâng cấp panel trên VPS đã cài
+
+```bash
+cecp-panel update panel latest
+```
+
+VPS cài **trước 1.12.1** và còn URL mirror cũ trong `/etc/cecp-panel/panel.env` — chạy **một lần**:
+
+```bash
+cecp-panel update mirror https://raw.githubusercontent.com/theanhlive/cecp-panel/main
+cecp-panel update panel latest
+```
+
+**Tin cậy:** mọi bản tải đều đối chiếu `dist/SHA256SUMS` trên GitHub; để chặt hơn, ghim `--sha256` khi cài hoặc `cecp-panel update panel latest --sha256 <hash>`.
 
 ## Không cần wizard (env)
 
@@ -63,12 +74,9 @@ export CECP_GDRIVE_TEAM_ID="..."
 cecp-panel onboard
 ```
 
-## Agency (từ Mac, lab)
+## Agency (phát hành / lab)
 
 ```bash
-chmod +x scripts/cecp-panel/finish-lab.sh
-SSH_KEY=~/.ssh/cecp_vultr ./scripts/cecp-panel/finish-lab.sh root@207.148.65.70
-
-# Khi có file Google SA:
-CECP_GDRIVE_SA_JSON=~/gdrive-sa.json CECP_GDRIVE_TEAM_ID=xxx ./scripts/cecp-panel/finish-lab.sh root@207.148.65.70
+./build-release.sh   # lint + dist/ (commit dist/ lên main cùng code)
+SSH_KEY=~/.ssh/cecp_vultr ./deploy-safe.sh root@VPS_IP --with-check
 ```

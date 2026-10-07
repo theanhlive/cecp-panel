@@ -3,7 +3,7 @@
 CECP Panel là bộ script bash (+ Python nhỏ) cài và quản lý VPS web (nginx, PHP-FPM, MariaDB,
 Redis, WordPress, Let's Encrypt, backup restic → Google Drive). CLI: `cecp-panel`, chạy bằng root.
 
-> **1.12.0-beta đã phát hành** (merge vào `main`, mirror, 3 VPS đã nâng cấp). Việc còn lại và lưu ý:
+> **Phiên bản hiện tại 1.12.1-beta; GitHub là nguồn cài/cập nhật duy nhất.** Việc còn lại và lưu ý 1.12:
 > [docs/RELEASE_1.12_HANDOFF.md](docs/RELEASE_1.12_HANDOFF.md).
 
 ## Triển khai trên VPS (vận hành)
@@ -40,3 +40,15 @@ Quy tắc vận hành:
   `curl -K <(...)`, `mysql --defaults-extra-file`, stdin); root không ghi vào thư mục của site
   (dùng `runuser -u SITE_USER`); nginx đổi cấu hình qua `nginx_test_and_reload` (tự rollback).
 - Template nginx/PHP ở `templates/`; vhost được render lại bằng `cecp-panel site rebuild-vhost --all`.
+
+## Cài / cập nhật / phát hành: GitHub là nguồn duy nhất
+
+| Việc | Lệnh / URL |
+|---|---|
+| Khách cài VPS mới | `curl -fsSL https://raw.githubusercontent.com/theanhlive/cecp-panel/main/install-cecp-panel.sh \| sudo bash` |
+| Nâng cấp panel | `cecp-panel update panel latest` |
+| VPS còn mirror cũ trong `panel.env` | một lần: `cecp-panel update mirror https://raw.githubusercontent.com/theanhlive/cecp-panel/main` |
+
+**Quy trình phát hành (agent):** `bash tests/lint.sh` → `bash tests/integration/run.sh` (0 failed) → bump phiên bản ở 5 chỗ + `CHANGELOG.md` → `./build-release.sh` → commit code + `dist/` → push `main` → tag `vX.Y.Z-beta` trên commit cuối → kiểm tra raw URL + sha256 → nâng cấp từng VPS một.
+
+Mirror CDN isharevn cũ (**đã ngừng phân phối**) — chỉ dùng GitHub raw `main`.

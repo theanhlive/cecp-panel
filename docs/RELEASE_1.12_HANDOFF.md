@@ -2,6 +2,7 @@
 
 ## Trạng thái (cập nhật 2026-10-07): ĐÃ PHÁT HÀNH
 
+- **Phân phối 1.12.1-beta:** cài/cập nhật panel chỉ từ GitHub `theanhlive/cecp-panel` (`raw.githubusercontent.com/.../main`); `dist/` trong repo thay mirror isharevn.net.
 - Test Docker: **339 passed, 0 failed** (sau khi sửa lỗi ACL docroot khiến mọi trang WordPress trả 404 và một test sai — xem CHANGELOG 1.12.0-beta). Lint sạch.
 - Đã merge `claude/epic-fermat-85l79i` vào `main`, build `dist/` và upload mirror (`SHA256SUMS` có `1.12.0-beta`).
 - Đã nâng cấp 3 VPS lên 1.12.0-beta (1 VPS canary trước, rồi 2 VPS còn lại): `apply-production`, `site rebuild-vhost --all`, `security harden-docroot --all`. Mọi site trả 200, `security check` 0 FAIL.

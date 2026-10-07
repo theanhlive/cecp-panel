@@ -1,4 +1,4 @@
-# CECP Panel v1.12.0-beta
+# CECP Panel v1.12.1-beta
 
 Standalone VPS panel (LarVPS-style). **One install** = full stack + menu.
 
@@ -10,7 +10,7 @@ Standalone VPS panel (LarVPS-style). **One install** = full stack + menu.
 Xem **[CUSTOMER_INSTALL.md](CUSTOMER_INSTALL.md)** — khách chỉ cần:
 
 ```bash
-curl -fsSL https://YOUR-CDN/install-cecp-panel.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/theanhlive/cecp-panel/main/install-cecp-panel.sh | sudo bash
 ```
 
 Sau cài (khuyến nghị):
@@ -26,7 +26,7 @@ Gõ lệnh nhanh: phím **Tab** gợi ý lệnh, cờ và domain (`cecp-panel ss
 ## Agency (từ Mac/Windows CECP)
 
 ```bash
-./build-release.sh          # lint gate + dist/*.tar.gz + dist/SHA256SUMS (upload cả SHA256SUMS lên mirror)
+./build-release.sh          # lint gate + dist/*.tar.gz + dist/SHA256SUMS (commit dist/ lên main)
 SSH_KEY=~/.ssh/KEY ./deploy-safe.sh root@VPS_IP --with-check
 ```
 
@@ -72,8 +72,8 @@ cecp-panel backup enable-cron
 ## Nâng cấp panel trên VPS đã cài
 
 ```bash
-# Từ mirror (bắt buộc có dist/SHA256SUMS) — hoặc deploy-safe.sh từ máy agency
-cecp-panel update panel
+cecp-panel update panel latest
+# VPS còn mirror cũ trong panel.env: cecp-panel update mirror https://raw.githubusercontent.com/theanhlive/cecp-panel/main
 # rồi làm theo runbook trong CHANGELOG.md (apply-production, site rebuild-vhost --all, ...)
 ```
 

@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.12.1-beta — GitHub là nguồn cài/cập nhật duy nhất
+
+- **Cài một lệnh** và **`cecp-panel update panel latest`** lấy bundle từ `https://raw.githubusercontent.com/theanhlive/cecp-panel/main/dist/` (mặc định; không cần cấu hình mirror trên VPS mới).
+- Thư mục **`dist/`** (`cecp-panel-latest.tar.gz`, tarball phiên bản hiện tại, `SHA256SUMS`) được theo dõi trong Git; mirror CDN isharevn cũ **ngừng dùng**.
+- `build-release.sh` xoá tarball phiên bản cũ trong `dist/`, chỉ giữ `latest` + bản hiện tại.
+
+### Nâng cấp từ 1.12.0-beta
+
+```bash
+cecp-panel update mirror https://raw.githubusercontent.com/theanhlive/cecp-panel/main
+cecp-panel update panel latest
+```
+
+(VPS mới cài sau 1.12.1 không cần `update mirror` nếu `panel.env` chưa ghi URL mirror cũ.)
+
 ## 1.12.0-beta — rà soát bảo mật, tốc độ, dữ liệu backup và thao tác
 
 ### Sửa lỗi ACL docroot (phát hiện khi chạy test tích hợp đầy đủ lần đầu)

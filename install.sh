@@ -7,10 +7,10 @@
 #   curl -fsSL <url>/install.sh | sudo bash
 #
 # Usage (from your Mac — one command, pipes this script):
-#   ssh -i ~/.ssh/KEY root@VPS_IP 'bash -s' < scripts/cecp-panel/install.sh
+#   ssh -i ~/.ssh/KEY root@VPS_IP 'bash -s' < install.sh
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.12.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.12.1-beta}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/cecp-panel}"
 ETC_DIR="/etc/cecp-panel"
 VAR_LIB="/var/lib/cecp-panel"
@@ -158,8 +158,8 @@ fetch_panel_bundle_if_needed() {
     url="${CECP_PANEL_RAW_BASE%/}/dist/cecp-panel-${CECP_PANEL_VERSION}.tar.gz"
   fi
   if [[ -z "$url" ]]; then
-    die "Use customer installer: curl -fsSL <URL>/install-cecp-panel.sh | sudo bash
-Or: CECP_PANEL_RAW_BASE=https://.../scripts/cecp-panel bash install-cecp-panel.sh"
+    die "Use customer installer: curl -fsSL https://raw.githubusercontent.com/theanhlive/cecp-panel/main/install-cecp-panel.sh | sudo bash
+Or: CECP_PANEL_RAW_BASE=https://raw.githubusercontent.com/theanhlive/cecp-panel/main bash install-cecp-panel.sh"
   fi
   log "Downloading panel bundle $url ..."
   local tmp expected actual
