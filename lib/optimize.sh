@@ -69,6 +69,7 @@ EOF
 
 optimize_nginx_global() {
   require_root
+  tune_backup nginx /etc/nginx/nginx.conf /etc/nginx/conf.d/cecp-perf.conf
   ensure_nginx_global
   # http-context tuning via conf.d. Never repeat directives the distro nginx.conf already sets
   # (keepalive_timeout, sendfile, gzip on Ubuntu) — nginx -t rejects duplicates.
@@ -481,6 +482,18 @@ EOF
 
   local written=0
   local d f
+  local -a targets=()
+  for d in /etc/php.d /etc/opt/remi/php*/php.d; do
+    [[ -d $d ]] || continue
+    targets+=("${d}/99-cecp-opcache.ini")
+  done
+  for d in /etc/php/*/mods-available; do
+    [[ -d $d ]] || continue
+    targets+=("${d}/cecp-opcache.ini")
+  done
+  if (( ${#targets[@]} > 0 )); then
+    tune_backup opcache "${targets[@]}"
+  fi
   # Alma system + Remi
   for d in /etc/php.d /etc/opt/remi/php*/php.d; do
     [[ -d $d ]] || continue
@@ -542,6 +555,8 @@ optimize_mariadb_tune() {
     f=/etc/mysql/conf.d/cecp-tune.cnf
     mkdir -p "$(dirname "$f")"
   fi
+  tune_backup mariadb "$f"
+  local snap="$TUNE_LAST_SNAPSHOT"
   cat >"$f" <<EOF
 [mysqld]
 # CECP auto-tune RAM=${ram_mb}MB
@@ -557,7 +572,16 @@ table_definition_cache = 1400
 query_cache_type = 0
 skip_name_resolve = 1
 EOF
-  systemctl restart mariadb 2>/dev/null || systemctl restart mysql
+  if ! tune_mariadb_restart; then
+    panel_log "LỖI: MariaDB không khởi động lại được với cấu hình mới — khôi phục bản sao ${snap##*/} ..."
+    tune_restore_files "$snap"
+    if tune_mariadb_restart; then
+      panel_log "MariaDB đã chạy lại với cấu hình cũ"
+    else
+      panel_log "CẢNH BÁO: MariaDB vẫn chưa khởi động được — kiểm tra: journalctl -u mariadb"
+    fi
+    panel_die "Tối ưu MariaDB thất bại, đã trả lại cấu hình cũ ($f)"
+  fi
   panel_log "MariaDB tuned: innodb_buffer_pool=${pool}M max_connections=${max_conn} (RAM ${ram_mb}MB) -> $f"
 }
 
@@ -567,6 +591,7 @@ EOF
 optimize_kernel_bbr() {
   require_root
   local f=/etc/sysctl.d/99-cecp-bbr.conf
+  tune_backup kernel "$f" /etc/modules-load.d/cecp-bbr.conf
   mkdir -p /etc/sysctl.d
   cat >"$f" <<'EOF'
 # CECP Panel — network + fd tuning

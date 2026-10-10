@@ -50,6 +50,10 @@ Phạm vi **Zone Resources**: chỉ các zone cần quản lý (hoặc All zones
 Một token có thể dùng cho nhiều zone: panel tự tìm đúng zone từ tên miền (dò từ tên đầy đủ lên
 dần: `a.shop.khachhang.vn` → `shop.khachhang.vn` → `khachhang.vn`).
 
+Token cho **AI Agent** audit / tune Cloudflare từ máy vận hành là token **khác**, không đặt lên VPS;
+token trên VPS nên giữ tối thiểu (Cache Purge, thêm DNS Edit khi cấp SSL bằng DNS-01). Xem
+[CLOUDFLARE_AGENT_TOKEN.md](CLOUDFLARE_AGENT_TOKEN.md) và `tools/cf-agent.sh`.
+
 ---
 
 ## 2. Nạp token vào panel (một lần cho mỗi VPS)

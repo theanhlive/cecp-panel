@@ -27,6 +27,9 @@ source "$PANEL_ROOT/lib/php_mgr.sh"
 source "$PANEL_ROOT/lib/update.sh"
 source "$PANEL_ROOT/lib/wordpress.sh"
 source "$PANEL_ROOT/lib/optimize.sh"
+source "$PANEL_ROOT/lib/tune.sh"
+source "$PANEL_ROOT/lib/capacity.sh"
+source "$PANEL_ROOT/lib/loadtest.sh"
 source "$PANEL_ROOT/lib/cache.sh"
 source "$PANEL_ROOT/lib/limits.sh"
 source "$PANEL_ROOT/lib/staging.sh"
@@ -96,7 +99,14 @@ CECP Panel v$CECP_PANEL_VERSION
     wp rollback DOMAIN [--yes]                                   # undo the last update
   cecp-panel db export DOMAIN [FILE] | import DOMAIN FILE [--replace-url OLD] [--yes] | shell|info DOMAIN
     db size | slow-log on [SECONDS]|off|status | slow-report [TOP]
-  cecp-panel optimize site|nginx|redis|redis-wp|redis-acl|mariadb|opcache|kernel|purge|purge-url|stack|bench|report|webp|brotli
+  cecp-panel optimize site|nginx|redis|redis-wp|redis-acl|mariadb|opcache|kernel|purge|purge-url|stack|bench|report|webp|brotli|rollback|capacity|audit|loadtest
+    optimize rollback list | ID|latest      # trả lại cấu hình trước lần tối ưu nginx/opcache/mariadb/kernel (giữ 20 bản)
+    optimize capacity [--json]              # chỉ đọc: RAM/swap/vCPU, RSS thực tế, ngân sách PHP so với pm.max_children, req/s ước tính
+    optimize audit DOMAIN [--json]          # chỉ đọc: PASS/WARN/FAIL cho HTTPS, cache tĩnh, nén, FastCGI cache, bypass, OPcache, Redis, Cloudflare (FAIL → exit 2)
+    optimize loadtest plan DOMAIN [--profile cached|mixed|login-api] [--max-vus N] [--out FILE]
+                                            # tạo kịch bản k6 (chỉ GET) để chạy từ máy KHÁC, in lệnh k6 run
+    optimize loadtest monitor DOMAIN [--duration 900] [--interval 5]
+                                            # chỉ đọc: đo VPS trong lúc chạy k6 → CSV + PASS/FAIL (OOM, swap, 5xx, pm.max_children)
   cecp-panel media enable|disable|status|run|run-all|prune-originals|enable-cron|disable-cron
     media enable DOMAIN [--format webp|avif|original] [--max-width 1920] [--quality 80] [--no-upload] [--no-cron] [--no-webp] [--avif]
       --format webp (default): every upload, any format → one right-sized WebP, original not kept
@@ -396,7 +406,20 @@ case "$cmd" in
       bench) optimize_bench "${1:-}" ;;
       webp) [[ -n "${1:-}" ]] && optimize_webp "$1" || panel_die "Usage: cecp-panel optimize webp DOMAIN" ;;
       brotli) optimize_brotli ;;
-      *) panel_die "Usage: cecp-panel optimize site|nginx|redis|redis-wp|redis-acl|mariadb|opcache|kernel|purge|purge-url|stack|bench|report|webp|brotli" ;;
+      rollback)
+        case "${1:-}" in
+          list) tune_rollback_list ;;
+          "") panel_die "Usage: cecp-panel optimize rollback list | ID|latest" ;;
+          *) tune_rollback "$1" ;;
+        esac
+        ;;
+      capacity) optimize_capacity "$@" ;;
+      audit)
+        [[ -n "${1:-}" ]] || panel_die "Usage: cecp-panel optimize audit DOMAIN [--json]"
+        optimize_audit "$@"
+        ;;
+      loadtest) optimize_loadtest "$@" ;;
+      *) panel_die "Usage: cecp-panel optimize site|nginx|redis|redis-wp|redis-acl|mariadb|opcache|kernel|purge|purge-url|stack|bench|report|webp|brotli|rollback|capacity|audit|loadtest" ;;
     esac
     ;;
   media)

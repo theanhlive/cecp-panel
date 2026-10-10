@@ -5,3 +5,7 @@ etc/credentials.env
 tests/integration/.work/
 __pycache__/
 *.pyc
+cf-snapshots/
+docs/sites/*
+!docs/sites/README.md
+!docs/sites/_TEMPLATE.md

@@ -21,6 +21,7 @@ def shell_files():
     files = [ROOT / "cecp-panel"]
     files += sorted((ROOT / "lib").glob("*.sh"))
     files += sorted(ROOT.glob("*.sh"))
+    files += sorted((ROOT / "tools").glob("*.sh"))
     files += sorted((ROOT / "tests").rglob("*.sh"))
     return files
 

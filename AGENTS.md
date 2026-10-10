@@ -15,6 +15,7 @@ Redis, WordPress, Let's Encrypt, backup restic → Google Drive). CLI: `cecp-pan
 | Cài panel cho khách | [CUSTOMER_INSTALL.md](CUSTOMER_INSTALL.md) |
 | Nâng cấp panel trên VPS đang chạy | mục "Nâng cấp từ …" của phiên bản mới nhất trong [CHANGELOG.md](CHANGELOG.md) |
 | Tối ưu ảnh theo site | [docs/MEDIA_OPTIMIZE.md](docs/MEDIA_OPTIMIZE.md) |
+| Tune / chứng minh tải theo domain (audit, capacity, loadtest, rollback); Cloudflare token cho agent (`tools/cf-agent.sh`, máy vận hành) | [docs/SITE_TUNING.md](docs/SITE_TUNING.md), [docs/CLOUDFLARE_AGENT_TOKEN.md](docs/CLOUDFLARE_AGENT_TOKEN.md) |
 | Thông báo Telegram / Zalo / Discord, chọn loại thông báo | [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md) |
 | Webhook n8n (JSON ký HMAC) | [docs/WEBHOOK_N8N.md](docs/WEBHOOK_N8N.md) |
 

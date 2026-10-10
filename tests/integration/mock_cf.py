@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Minimal Cloudflare API stand-in for scenario.sh.
 
-Usage: mock_cf.py PORT LOGFILE [DELAY_SECONDS]
+Usage: mock_cf.py PORT LOGFILE [DELAY_SECONDS] [FIXTURES_JSON]
 Records method, path, Authorization header and body of every call. The default delay (1.5 s)
 gives the scenario time to scan /proc/*/cmdline for leaked tokens while curl is running.
 
 Stateful bits: the http_request_cache_settings entrypoint ruleset (GET/PUT, 10003 when it
 does not exist yet). Touch /tmp/mockcf.fail-rulesets to make ruleset reads fail with an
 authentication error.
+
+FIXTURES_JSON (optional): {"<path suffix>": <response>} — a GET whose path (without the query)
+ends with a suffix gets that response instead of the defaults.
 """
 import json
 import os
@@ -17,6 +20,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 LOG = sys.argv[2]
 DELAY = float(sys.argv[3]) if len(sys.argv) > 3 else 1.5
+FIXTURES = {}
+if len(sys.argv) > 4:
+    with open(sys.argv[4], encoding="utf-8") as fx:
+        FIXTURES = json.load(fx)
 RULESET = None
 NEXT_ID = [1]
 
@@ -41,7 +48,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         global RULESET
-        if self.path.startswith("/zones?"):
+        route = self.path.split("?", 1)[0]
+        fixture = next((v for k, v in FIXTURES.items() if route.endswith(k)), None)
+        if fixture is not None:
+            self._reply(fixture)
+        elif self.path.startswith("/zones?"):
             self._reply({"success": True, "result": [{"id": "zone123"}]})
         elif "/dns_records" in self.path:
             self._reply({"success": True, "result": []})

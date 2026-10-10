@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.13.0-dev — tuning theo domain, audit/capacity/loadtest
+
+### Tài liệu vận hành (agent & người)
+- **[docs/SITE_TUNING.md](docs/SITE_TUNING.md)** (mới): runbook tune một domain — `optimize audit`, `optimize capacity`, áp dụng từng thay đổi (cache TTL, `optimize site`, `php config`, `optimize mariadb|opcache|nginx`, swap, lệnh `cf`), `optimize loadtest plan` trên máy khác + `optimize loadtest monitor` trên VPS, `optimize rollback` khi FAIL; bảng loại site/bypass cache; Cloudflare Free qua `cecp-panel cf`; cổng phê duyệt và ngưỡng PASS/FAIL.
+- **Profile theo domain**: [docs/sites/README.md](docs/sites/README.md), mẫu [docs/sites/_TEMPLATE.md](docs/sites/_TEMPLATE.md) — file `<domain>.md` thật không commit (`.gitignore`).
+- **`tools/cf-agent.sh`** (mới, chạy trên máy vận hành, không cần panel): `verify`, `zones`, `audit DOMAIN [--json]`, `snapshot DOMAIN`, `apply DOMAIN --ssl-strict|--brotli|--cache-level|--static-cache-rules` (tự snapshot, in trước/sau), `rollback FILE`. Mặc định chỉ đọc; cache HTML cần `--html-cache --yes-i-approved` (bypass giống `cf edge-cache`), ghi DNS cần `--allow-dns`; không bao giờ "Cache Everything". Token chỉ lấy từ `CF_API_TOKEN` / `CF_API_TOKEN_FILE`, gửi qua `curl -K -`, không nằm trong argv, không in ra. Snapshot ở `./cf-snapshots/` (git-ignored). Hướng dẫn tạo/giao/thu hồi token: [docs/CLOUDFLARE_AGENT_TOKEN.md](docs/CLOUDFLARE_AGENT_TOKEN.md). Test offline: `bash tests/cf_agent_test.sh` (mock Cloudflare).
+
+### Nâng cấp từ 1.12
+- Chỉ cần cập nhật mã panel khi các lệnh `optimize audit|capacity|loadtest|rollback` đã có trên VPS (nhánh load-tuning). **Không** migration DB hay lệnh bắt buộc một lần; đọc SITE_TUNING trước khi tune production.
+
 ## 1.12.1-beta — GitHub là nguồn cài/cập nhật duy nhất
 
 - **Cài một lệnh** và **`cecp-panel update panel latest`** lấy bundle từ `https://raw.githubusercontent.com/theanhlive/cecp-panel/main/dist/` (mặc định; không cần cấu hình mirror trên VPS mới).

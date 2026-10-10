@@ -130,6 +130,31 @@ check "redis secured and running" bash -c 'test -f /etc/cecp-panel/redis.env && 
 check "redis config not world-readable" bash -c '[ "$(stat -c %a /etc/redis/cecp.conf)" = 640 ]'
 check "site still serves WordPress after tuning" serves_wp
 
+echo "=== optimize rollback (tune-backups) ==="
+TB=/var/lib/cecp-panel/tune-backups
+check "optimize stack snapshotted configs (root-only dir, MANIFEST per step)" \
+  bash -c "[ \"\$(stat -c '%a %U' $TB)\" = '700 root' ] && for l in kernel nginx opcache mariadb; do ls -d $TB/*-\$l >/dev/null || exit 1; done && [ \"\$(stat -c %a \$(ls -d $TB/*-mariadb | tail -1))\" = 700 ]"
+check "MANIFEST records the original sha256 of the tuned file" \
+  bash -c "grep -qF \"\$(sha256sum /etc/my.cnf.d/cecp-tune.cnf | cut -d' ' -f1)\" \$(ls -d $TB/*-mariadb | tail -1)/MANIFEST || grep -q \$'^absent\t.*/etc/my.cnf.d/cecp-tune.cnf\$' \$(ls -d $TB/*-mariadb | tail -1)/MANIFEST"
+echo '# it-rollback-marker' >>/etc/nginx/conf.d/cecp-perf.conf
+cp /etc/nginx/conf.d/cecp-perf.conf /tmp/cecp-perf.before
+check "optimize nginx snapshots then rewrites cecp-perf.conf" \
+  bash -c "cecp-panel optimize nginx && ! grep -q it-rollback-marker /etc/nginx/conf.d/cecp-perf.conf && grep -rqs it-rollback-marker $TB/\$(ls $TB | grep -- '-nginx\$' | tail -1)/files"
+check "rollback list shows the snapshots" bash -c "cecp-panel optimize rollback list | grep -q -- '-nginx'"
+check "rollback latest restores the previous content" \
+  bash -c "cecp-panel optimize rollback latest && cmp -s /tmp/cecp-perf.before /etc/nginx/conf.d/cecp-perf.conf"
+check "rollback took an undo snapshot first" bash -c "ls -d $TB/*-rollback >/dev/null"
+check "nginx config valid after rollback" nginx -t
+check "site still serves WordPress after rollback" serves_wp
+check "rollback rejects an invalid id" bash -c "! cecp-panel optimize rollback '../../etc' && ! cecp-panel optimize rollback 20990101T000000.000Z-nope"
+# The first kernel snapshot was taken on a fresh box: its files were "absent" → rollback removes them.
+FIRST_KERNEL="$(find $TB -mindepth 1 -maxdepth 1 -type d -name '*-kernel' -printf '%f\n' | sort | head -1)"
+check "rollback removes files that did not exist before (MANIFEST absent)" \
+  bash -c "grep -q '^absent' $TB/$FIRST_KERNEL/MANIFEST && cecp-panel optimize rollback $FIRST_KERNEL && [ ! -e /etc/sysctl.d/99-cecp-bbr.conf ]"
+check "optimize kernel re-applies after the rollback" cecp-panel optimize kernel
+check "tune-backups keeps at most 20 snapshots" \
+  bash -c "for i in \$(seq 1 22); do cecp-panel optimize kernel >/dev/null || exit 1; done; [ \"\$(ls $TB | wc -l)\" -le 20 ]"
+
 echo "=== PHP-FPM pool isolation ==="
 check "open_basedir uses per-site tmp (no shared /tmp)" \
   grep -qx "php_admin_value\[open_basedir\] = $DOCROOT:/home/$SU/tmp" "/etc/php-fpm.d/cecp-$SLUG.conf"
@@ -171,6 +196,58 @@ check "precondition: sample page cached" expect_cache /sample-page/ HIT
 check "purge-url removes exactly that URL" \
   bash -c "cecp-panel optimize purge-url http://$D/sample-page/ | grep -q '(2 entries)\|(1 entries)' && [ \"\$(curl -s -o /dev/null -D - http://$D/sample-page/ | tr -d '\r' | awk -F': ' 'tolower(\$1)==\"x-cecp-cache\"{print \$2}')\" = MISS ]"
 check "optimize report shows hit ratio" bash -c "cecp-panel optimize report $D | grep -q HIT"
+
+echo "=== optimize capacity / optimize audit (read-only) ==="
+ro_state() {
+  find /etc/nginx /etc/php-fpm.d /etc/php.d /etc/my.cnf.d /etc/cecp-panel -type f -exec md5sum {} + 2>/dev/null | sort
+  for u in nginx php-fpm mariadb; do systemctl show -p MainPID --value "$u"; done
+}
+ro_state >/tmp/ro.before
+check "optimize capacity prints RAM verdicts" \
+  bash -c "cecp-panel optimize capacity >/tmp/cap.out && grep -qE '^(OK|WARN|FAIL) php_ram — ' /tmp/cap.out && grep -qE '^(OK|WARN|FAIL) swap — ' /tmp/cap.out"
+check "optimize capacity lists the panel pools" bash -c "grep -q 'pm.max_children=' /tmp/cap.out && grep -q '$D' /tmp/cap.out"
+check "optimize capacity --json is valid JSON" \
+  bash -c "cecp-panel optimize capacity --json >/tmp/cap.json && python3 -m json.tool /tmp/cap.json >/dev/null && grep -q '\"sum_max_children\": [1-9]' /tmp/cap.json && grep -q '\"level\": \"' /tmp/cap.json"
+check "optimize audit $D: no FAIL, exit 0" bash -c "cecp-panel optimize audit $D >/tmp/audit.out && ! grep -q '^FAIL ' /tmp/audit.out"
+check "optimize audit: page cache MISS then HIT" grep -q '^PASS page_cache — MISS → HIT' /tmp/audit.out
+check "optimize audit: logged-in cookie, /wp-admin/, /wp-login.php bypass the cache" \
+  bash -c "grep -q '^PASS bypass_logged_in — .*BYPASS' /tmp/audit.out && grep -q '^PASS bypass_wp_admin' /tmp/audit.out && grep -q '^PASS bypass_wp_login' /tmp/audit.out"
+check "optimize audit: static asset long Cache-Control, gzip, OPcache on" \
+  bash -c "grep -q '^PASS static_cache — .*max-age=2592000' /tmp/audit.out && grep -q '^PASS compression' /tmp/audit.out && grep -q '^PASS opcache' /tmp/audit.out"
+check "optimize audit: WARN (not silence) when no Cloudflare token is configured" grep -q '^WARN cloudflare — chưa cấu hình token Cloudflare' /tmp/audit.out
+check "optimize audit: bypass checks run only after a page-cache HIT" \
+  bash -c "grep -q '^PASS page_cache — MISS → HIT' /tmp/audit.out && ! grep -q 'bypass chưa kiểm chứng' /tmp/audit.out"
+check "optimize audit --json is one JSON object" \
+  bash -c "cecp-panel optimize audit $D --json >/tmp/audit.json && python3 -m json.tool /tmp/audit.json >/dev/null && grep -q '\"domain\": \"$D\"' /tmp/audit.json && grep -q '\"exit_code\": 0' /tmp/audit.json && grep -q '\"name\": \"page_cache\"' /tmp/audit.json"
+check "optimize audit of an unknown site exits 2" bash -c "cecp-panel optimize audit nosuch.test >/dev/null; [ \$? -eq 2 ]"
+check "optimize audit rejects an invalid domain" bash -c "! cecp-panel optimize audit 'x.test;id'"
+ro_state >/tmp/ro.after
+check "capacity/audit changed no config and restarted nothing" cmp -s /tmp/ro.before /tmp/ro.after
+
+echo "=== optimize loadtest plan / monitor ==="
+LT="/root/cecp-loadtest"
+ro_state >/tmp/ro.before
+check "optimize loadtest plan: k6 script created in a 700 dir, k6 run command printed" \
+  bash -c "cecp-panel optimize loadtest plan $D --max-vus 300 >/tmp/lt.out && test -s $LT/$D-cached.js && [ \"\$(stat -c %a $LT)\" = 700 ] && grep -q 'k6 run -e BASE_URL=http' /tmp/lt.out && grep -q 'máy KHÁC' /tmp/lt.out"
+check "optimize loadtest plan: stages capped by --max-vus, thresholds 1% / p95 1000 ms" \
+  bash -c "grep -q 'target: 300 }' $LT/$D-cached.js && ! grep -q 'target: 500 }' $LT/$D-cached.js && grep -q \"rate<0.01\" $LT/$D-cached.js && grep -q 'p(95)<1000' $LT/$D-cached.js"
+check "optimize loadtest plan login-api: credentials only via __ENV, never in file or output" \
+  bash -c "TEST_USER=ltuser TEST_PASS=Lt-Secret-9x cecp-panel optimize loadtest plan $D --profile login-api >/tmp/lt2.out && f=$LT/$D-login-api.js && grep -q '__ENV.TEST_PASS' \$f && ! grep -q 'Lt-Secret-9x' \$f /tmp/lt2.out && grep -q 'target: 50 }' \$f && ! grep -q 'target: 100' \$f"
+# /root is root-owned and not group/world-writable (--out rejects a world-writable parent such as /tmp).
+check "optimize loadtest plan mixed: public REST GET added" \
+  bash -c "cecp-panel optimize loadtest plan $D --profile mixed --max-vus 50 --out /root/lt-mixed.js >/dev/null && grep -q '/wp-json/wp/v2/posts' /root/lt-mixed.js"
+check "optimize loadtest plan: no POST/PUT/DELETE anywhere" \
+  bash -c "! grep -qiE 'http\\.(post|put|del|patch|request|batch)\\(|[\"'\\''](POST|PUT|DELETE|PATCH)[\"'\\'']' $LT/*.js /root/lt-mixed.js"
+check "optimize loadtest plan rejects unknown site, bad profile, too many VUs" \
+  bash -c "! cecp-panel optimize loadtest plan nosuch.test && ! cecp-panel optimize loadtest plan $D --profile checkout && ! cecp-panel optimize loadtest plan $D --profile login-api --max-vus 500 && ! cecp-panel optimize loadtest plan $D --out /home/x.js"
+check "optimize loadtest plan --out rejects a world-writable parent (/tmp) and a bare /x.js" \
+  bash -c "! cecp-panel optimize loadtest plan $D --out /tmp/lt-x.js 2>/dev/null && ! cecp-panel optimize loadtest plan $D --out /nosuchdir/x.js 2>/dev/null"
+check "optimize loadtest monitor: CSV + verdict (PASS, FAIL or INCONCLUSIVE)" \
+  bash -c "cecp-panel optimize loadtest monitor $D --duration 10 --interval 2 >/tmp/lt3.out; rc=\$?; { [ \$rc -eq 0 ] || [ \$rc -eq 2 ] || [ \$rc -eq 3 ]; } && grep -qE '^(PASS|FAIL|INCONCLUSIVE) loadtest — ' /tmp/lt3.out && head -1 \$(ls -t $LT/$D-monitor-*.csv | head -1) | grep -q '^time,load1,mem_available_mb,swap_in_pages'"
+check "optimize loadtest monitor with no traffic is INCONCLUSIVE (exit 3), never PASS" \
+  bash -c "cecp-panel optimize loadtest monitor $D --duration 10 --interval 2 >/tmp/lt4.out; [ \$? -eq 3 ] && grep -q '^INCONCLUSIVE loadtest — ' /tmp/lt4.out && ! grep -q '^PASS loadtest' /tmp/lt4.out"
+ro_state >/tmp/ro.after
+check "optimize loadtest changed no config and restarted nothing" cmp -s /tmp/ro.before /tmp/ro.after
 
 echo "=== Real client IP ==="
 check "Cloudflare real-IP config installed" grep -q 'real_ip_header CF-Connecting-IP' /etc/nginx/conf.d/cecp-cloudflare-realip.conf
@@ -652,6 +729,9 @@ check "putenv disabled by default" grep -qE 'disable_functions\] = .*,putenv$' "
 check "allow_putenv=on re-enables putenv, reset disables it again" \
   bash -c "cecp-panel php config $D allow_putenv=on >/dev/null && ! grep 'disable_functions' $POOL | grep -q putenv && cecp-panel php config $D --reset allow_putenv >/dev/null && grep -q ',putenv$' $POOL"
 check "php config --reset" bash -c "cecp-panel php config $D --reset memory_limit >/dev/null && grep -q 'memory_limit\] = 256M' $POOL"
+# The documented syntax in docs/SITE_TUNING.md is `php config DOMAIN pm_max_children=N` (underscore key).
+check "php config pm_max_children=N sets the pool's pm.max_children" \
+  bash -c "cecp-panel php config $D pm_max_children=6 >/dev/null && grep -q '^pm.max_children = 6' $POOL && cecp-panel php config $D --reset pm_max_children >/dev/null"
 
 echo "=== Per-site resource limits (own PHP-FPM) ==="
 check "site limits --cpu 50 --mem 768M --tasks 128" cecp-panel site limits "$D" --cpu 50 --mem 768M --tasks 128

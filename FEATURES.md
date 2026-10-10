@@ -48,6 +48,7 @@
 ### Tốc độ
 - HTTP/2; cache key bỏ `fbclid`/`gclid`/`utm_*`; background update
 - `optimize purge DOMAIN`, `optimize purge-url URL`, `optimize report DOMAIN`
+- Runbook tune/loadtest theo domain: [docs/SITE_TUNING.md](docs/SITE_TUNING.md) + profile mẫu [docs/sites/_TEMPLATE.md](docs/sites/_TEMPLATE.md)
 - PHP-FPM sizing theo RAM, BBR nạp lúc boot, MariaDB table cache theo số site
 
 ## v1.5 (Performance sâu + UX + Cloud edge + Advanced)

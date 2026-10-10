@@ -83,5 +83,6 @@ cecp-panel update panel latest
 - [INCIDENT_RESPONSE.md](docs/INCIDENT_RESPONSE.md) — website bị hack: quét, làm sạch, đổi bí mật, ngăn lây chéo
 - [CLOUDFLARE_DNS.md](docs/CLOUDFLARE_DNS.md) — trỏ domain qua Cloudflare (DNS, SSL, khoá IP gốc) — runbook cho người & AI Agent ([AGENTS.md](AGENTS.md))
 - [MEDIA_OPTIMIZE.md](docs/MEDIA_OPTIMIZE.md) — per-site image optimize (opt-in)
+- [SITE_TUNING.md](docs/SITE_TUNING.md) — tune và loadtest theo domain (audit → capacity → một thay đổi → verify → rollback)
 - [VPS_BACKUP_GDRIVE.md](../../docs/infrastructure/VPS_BACKUP_GDRIVE.md)
 - [CECP_PANEL_PRODUCT_PRIORITIES.md](../../docs/products/CECP_PANEL_PRODUCT_PRIORITIES.md)

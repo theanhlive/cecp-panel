@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-files=(cecp-panel lib/*.sh ./*.sh)
+files=(cecp-panel lib/*.sh ./*.sh tools/*.sh)
 while IFS= read -r f; do files+=("$f"); done < <(find tests -name '*.sh' | sort)
 
 fail=0

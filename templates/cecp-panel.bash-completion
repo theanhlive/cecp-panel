@@ -10,6 +10,15 @@ _cecp_panel_domains() {
   done
 }
 
+_cecp_panel_tune_ids() {
+  local d
+  for d in /var/lib/cecp-panel/tune-backups/*/; do
+    [[ -e "$d" ]] || continue
+    d="${d%/}"
+    printf '%s\n' "${d##*/}"
+  done
+}
+
 _cecp_panel() {
   local cur cmd sub words=""
   cur="${COMP_WORDS[COMP_CWORD]}"
@@ -35,7 +44,7 @@ _cecp_panel() {
       agent) words="install status" ;;
       wp) words="harden optimize cron status update auto-update rollback" ;;
       db) words="export import shell info size slow-log slow-report" ;;
-      optimize) words="site nginx redis redis-wp redis-acl mariadb opcache kernel purge purge-url stack bench report webp brotli" ;;
+      optimize) words="site nginx redis redis-wp redis-acl mariadb opcache kernel purge purge-url stack bench report webp brotli rollback capacity audit loadtest" ;;
       media) words="enable disable status run run-all prune-originals enable-cron disable-cron" ;;
       notify) words="setup status telegram zalo discord webhook off events test health enable-cron disable-cron" ;;
       monitor) words="run status enable disable" ;;
@@ -44,6 +53,8 @@ _cecp_panel() {
       php) words="list install set config" ;;
       update) words="check mirror panel component os wp-cli all enable-cron disable-cron" ;;
     esac
+  elif [[ "$cmd $sub" == "optimize loadtest" && "${COMP_WORDS[COMP_CWORD-1]}" == --profile ]]; then
+    words="cached mixed login-api"
   elif [[ "$cur" == -* ]]; then
     case "$cmd $sub" in
       "site add") words="--wordpress --wp --php --ssl --redis --minimal" ;;
@@ -71,6 +82,13 @@ _cecp_panel() {
       "security restore-clean") words="--all --dry-run --yes" ;;
       "notify events") words="--channel --min" ;;
       "security rotate-secrets") words="--all --admins" ;;
+      "optimize capacity"|"optimize audit") words="--json" ;;
+      "optimize loadtest")
+        case "${COMP_WORDS[3]:-}" in
+          plan) words="--profile --max-vus --out" ;;
+          monitor) words="--duration --interval" ;;
+        esac
+        ;;
     esac
   elif (( COMP_CWORD == 3 )); then
     case "$cmd $sub" in
@@ -83,10 +101,12 @@ _cecp_panel() {
       "notify off"|"notify test") words="telegram zalo discord webhook" ;;
       "notify events") words="edit set" ;;
       "system swap") words="1 2 4" ;;
+      "optimize rollback") words="list latest $(_cecp_panel_tune_ids)" ;;
+      "optimize loadtest") words="plan monitor" ;;
       site\ *|ssl\ issue|ssl\ fix|ssl\ remove|ssl\ hsts|dns\ point|cf\ edge-cache|cf\ status|cache\ *|backup\ run|\
       backup\ verify|backup\ restore|security\ harden-docroot|security\ scan|security\ rotate-secrets|security\ restore-clean|wp\ *|db\ export|db\ import|db\ shell|db\ info|\
       optimize\ site|optimize\ redis-wp|optimize\ redis-acl|optimize\ purge|optimize\ report|optimize\ bench|\
-      optimize\ webp|media\ enable|media\ disable|media\ status|media\ run|media\ prune-originals|php\ set|php\ config|log\ nginx|logs\ nginx)
+      optimize\ webp|optimize\ audit|media\ enable|media\ disable|media\ status|media\ run|media\ prune-originals|php\ set|php\ config|log\ nginx|logs\ nginx)
         words="$(_cecp_panel_domains)" ;;
     esac
   elif (( COMP_CWORD == 4 )); then
@@ -101,6 +121,7 @@ _cecp_panel() {
       "backup restore") words="latest" ;;
       "php set") words="81 82 83 84" ;;
       "media prune-originals") words="--yes" ;;
+      "optimize loadtest") words="$(_cecp_panel_domains)" ;;
     esac
   fi
 
