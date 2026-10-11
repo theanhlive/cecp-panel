@@ -3,7 +3,7 @@
 CECP Panel là bộ script bash (+ Python nhỏ) cài và quản lý VPS web (nginx, PHP-FPM, MariaDB,
 Redis, WordPress, Let's Encrypt, backup restic → Google Drive). CLI: `cecp-panel`, chạy bằng root.
 
-> **Phiên bản hiện tại 1.12.1-beta; GitHub là nguồn cài/cập nhật duy nhất.** Việc còn lại và lưu ý 1.12:
+> **Phiên bản hiện tại 1.13.0-beta; GitHub là nguồn cài/cập nhật duy nhất.** Việc còn lại và lưu ý 1.12:
 > [docs/RELEASE_1.12_HANDOFF.md](docs/RELEASE_1.12_HANDOFF.md).
 
 ## Triển khai trên VPS (vận hành)

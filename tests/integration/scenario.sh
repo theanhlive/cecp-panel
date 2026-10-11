@@ -246,6 +246,16 @@ check "optimize loadtest monitor: CSV + verdict (PASS, FAIL or INCONCLUSIVE)" \
   bash -c "cecp-panel optimize loadtest monitor $D --duration 10 --interval 2 >/tmp/lt3.out; rc=\$?; { [ \$rc -eq 0 ] || [ \$rc -eq 2 ] || [ \$rc -eq 3 ]; } && grep -qE '^(PASS|FAIL|INCONCLUSIVE) loadtest — ' /tmp/lt3.out && head -1 \$(ls -t $LT/$D-monitor-*.csv | head -1) | grep -q '^time,load1,mem_available_mb,swap_in_pages'"
 check "optimize loadtest monitor with no traffic is INCONCLUSIVE (exit 3), never PASS" \
   bash -c "cecp-panel optimize loadtest monitor $D --duration 10 --interval 2 >/tmp/lt4.out; [ \$? -eq 3 ] && grep -q '^INCONCLUSIVE loadtest — ' /tmp/lt4.out && ! grep -q '^PASS loadtest' /tmp/lt4.out"
+# Test hooks: CECP_LOADTEST_SWAP_FIXTURE replaces /proc/vmstat with cumulative pswpin/pswpout lines (one per sample).
+check "loadtest swap: one 486-page burst is a note, not a sustained swap FAIL" \
+  bash -c "{ echo '0 0'; yes '486 0' | head -n 10; } >/tmp/swapfx-burst.txt && export CECP_LOADTEST_SWAP_FIXTURE=/tmp/swapfx-burst.txt && cecp-panel optimize loadtest monitor $D --duration 20 --interval 2 >/tmp/lt6.out; rc=\$?; unset CECP_LOADTEST_SWAP_FIXTURE; [ \$rc -ne 2 ] && ! grep -q 'FAIL loadtest — swap-in' /tmp/lt6.out"
+check "loadtest swap: 300 pages per sample for 10 samples is a sustained swap FAIL (exit 2)" \
+  bash -c "seq 0 300 3000 | sed 's/\$/ 0/' >/tmp/swapfx-sustained.txt && export CECP_LOADTEST_SWAP_FIXTURE=/tmp/swapfx-sustained.txt && cecp-panel optimize loadtest monitor $D --duration 20 --interval 2 >/tmp/lt7.out; rc=\$?; unset CECP_LOADTEST_SWAP_FIXTURE; [ \$rc -eq 2 ] && grep -q 'FAIL loadtest — swap-in kéo dài' /tmp/lt7.out"
+# journalctl exits 1 when no entries match (systemd 252): that is not "OOM check unavailable"; exit 2 is.
+check "loadtest OOM: journalctl exit 1 with no entries does NOT disable the OOM check" \
+  bash -c "mkdir -p /tmp/jstub-empty && printf '#!/bin/sh\nexit 1\n' >/tmp/jstub-empty/journalctl && chmod +x /tmp/jstub-empty/journalctl && PATH=/tmp/jstub-empty:\$PATH cecp-panel optimize loadtest monitor $D --duration 10 --interval 2 >/tmp/lt8.out; ! grep -q 'OOM check unavailable' /tmp/lt8.out"
+check "loadtest OOM: journalctl exit 2 (broken journal) DOES report OOM check unavailable" \
+  bash -c "mkdir -p /tmp/jstub-broken && printf '#!/bin/sh\nexit 2\n' >/tmp/jstub-broken/journalctl && chmod +x /tmp/jstub-broken/journalctl && PATH=/tmp/jstub-broken:\$PATH cecp-panel optimize loadtest monitor $D --duration 10 --interval 2 >/tmp/lt9.out; grep -q 'OOM check unavailable' /tmp/lt9.out"
 ro_state >/tmp/ro.after
 check "optimize loadtest changed no config and restarted nothing" cmp -s /tmp/ro.before /tmp/ro.after
 

@@ -151,17 +151,17 @@ Audit chỉ chạy các kiểm tra bypass **sau khi** trang chủ đã vào cach
 
 | Kiểm tra | PASS | FAIL → rollback + báo chủ VPS | INCONCLUSIVE (exit 3, không bao giờ là PASS) |
 |---|---|---|---|
-| OOM | Không có dòng OOM | OOM killer: `Out of memory`, `oom-kill`, `oomd`, `Killed process` (`journalctl -k`) | `OOM check unavailable` (không có journalctl) |
+| OOM | Không có dòng OOM | OOM killer: `Out of memory`, `oom-kill`, `oomd`, `Killed process` (`journalctl -k`) | `OOM check unavailable` = journald không dùng được (journalctl thiếu hoặc lỗi, exit ≠ 0 và ≠ 1) — **không** có nghĩa là "không có OOM". Không có dòng nào khớp (journalctl exit 1) là bình thường, vẫn PASS. |
 | 5xx | < 1 % yêu cầu | ≥ 1 % yêu cầu | — |
 | Pool bão hoà | Không có `server reached pm.max_children` trong `[pool <pool của site>]` | Có (chỉ pool của site này được tính) | — |
-| Swap-in | Trung bình < 10 trang/s trên mọi cửa sổ ≥ 3 lần đo và ≥ 15 s | ≥ 10 trang/s | — |
+| Swap-in | Không có cửa sổ nào (≥ 3 lần đo, ≥ 15 s) mà trung bình ≥ 100 trang/s **và** có swap-in ở ≥ 3 lần đo đó | Có cửa sổ như trên: swap kéo dài ≥ 100 trang/s (≈ 400 KB/s) | — (pico ngắn vượt 100 trang/s chỉ in ghi chú, không FAIL) |
 | Số lần đo | — | — | < 6 lần đo |
 | Traffic | — | — | 0 yêu cầu trong access log, 0 lần đo, hoặc dừng bằng Ctrl-C |
 
 Ghi chú:
 
 - Số liệu 5xx và cache HIT lấy từ access log chỉ gồm yêu cầu **động/HTML**: các location tĩnh (`.css`, `.js`, ảnh, font) có `access_log off`, nên không được đếm.
-- Một lần đo swap-in đơn lẻ không đủ để FAIL: cần tốc độ trung bình trong cửa sổ đủ dài.
+- Một lần đo swap-in đơn lẻ (pico ngắn, ví dụ php-fpm worker idle được page in một lượt) không đủ để FAIL: cần tốc độ trung bình ≥ 100 trang/s trong cửa sổ ≥ 15 s **và** swap-in xuất hiện ở ≥ 3 lần đo — tức swap kéo dài, không phải pico ngắn.
 - Exit code: PASS 0 · FAIL 2 · INCONCLUSIVE 3. INCONCLUSIVE nghĩa là chạy lại có traffic thật, không được coi là đạt.
 
 ### 3.3 Audit sau tune

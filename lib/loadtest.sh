@@ -5,7 +5,7 @@
 #   cecp-panel optimize loadtest monitor DOMAIN [--duration SEC] [--interval SEC]
 #     samples this VPS while the test runs → CSV + verdict: PASS (exit 0), FAIL (exit 2), or
 #     INCONCLUSIVE (exit 3: no samples, no requests in the access log, interrupted, too few samples,
-#     or no OOM check). INCONCLUSIVE is never reported as PASS.
+#     or journald unusable → "OOM check unavailable"). INCONCLUSIVE is never reported as PASS.
 # Neither installs k6, sends load, changes config or restarts anything. Files go to
 # LOADTEST_DIR (root only); the monitor reads MariaDB status through a temporary
 # --defaults-extra-file (no password in argv).
@@ -18,8 +18,9 @@ LOADTEST_LOGIN_DEFAULT_VUS=50
 LOADTEST_LOGIN_MAX_VUS=100
 # PASS needs at least this many samples (30 s at the default 5 s interval).
 LOADTEST_MIN_SAMPLES=6
-# Swap-in above this many pages/s (≈40 KiB/s) averaged over >= 3 samples spanning >= 15 s is RAM pressure.
-LOADTEST_SWAP_RATE_PAGES=10
+# Swap-in at or above this many pages/s (≈400 KiB/s) averaged over >= 3 samples spanning >= 15 s,
+# with swap-in seen in >= 3 of those samples, is sustained RAM pressure. A single burst is only a note.
+LOADTEST_SWAP_RATE_PAGES=100
 
 # cecp-panel optimize loadtest plan|monitor ...
 optimize_loadtest() {
@@ -279,7 +280,21 @@ def meminfo_mb(key):
     return int(m.group(1)) // 1024 if m else 0
 
 
+FIXTURE = {"lines": None, "i": 0}
+
+
 def swap_pages():
+    # TEST ONLY (tests/integration/scenario.sh): CECP_LOADTEST_SWAP_FIXTURE=FILE makes this read successive
+    # cumulative "pswpin pswpout" lines from FILE instead of /proc/vmstat. Never set it in production.
+    fixture = os.environ.get("CECP_LOADTEST_SWAP_FIXTURE", "")
+    if fixture:
+        if FIXTURE["lines"] is None:
+            FIXTURE["lines"] = [p.split() for p in read(fixture).splitlines() if p.strip()]
+        if not FIXTURE["lines"]:
+            return 0, 0
+        pair = FIXTURE["lines"][min(FIXTURE["i"], len(FIXTURE["lines"]) - 1)]
+        FIXTURE["i"] += 1
+        return int(pair[0]), int(pair[1])
     v = dict(line.split(" ", 1) for line in read("/proc/vmstat").splitlines() if " " in line)
     return int(v.get("pswpin", 0)), int(v.get("pswpout", 0))
 
@@ -337,7 +352,7 @@ class Journal:
         except (OSError, subprocess.SubprocessError):
             self.ok = False
             return None
-        if proc.returncode != 0:
+        if proc.returncode not in (0, 1):
             self.ok = False
             return None
         msgs = []
@@ -346,6 +361,12 @@ class Journal:
                 self.cursor = line[len("-- cursor: "):].strip()
             else:
                 msgs.append(line)
+        if proc.returncode == 1 and not msgs:
+            # journalctl (systemd 252) exits 1 when the filter matches nothing: "no entries", not a broken journal
+            return []
+        if proc.returncode != 0:
+            self.ok = False
+            return None
         return msgs
 
 
@@ -472,10 +493,10 @@ finally:
         os.unlink(cnf)
 
 
-def swap_peak():
-    """Highest swap-in rate (pages/s) over the smallest window of >= 3 samples spanning >= 15 s."""
+def swap_windows():
+    """(average pages/s, samples with swap-in > 0) for each smallest window of >= 3 samples spanning >= 15 s."""
     times = [start] + stamps  # times[k + 1] is when rows[k] was taken
-    best = None
+    out = []
     for b in range(len(rows)):
         a = b - 2
         if a < 0:
@@ -485,9 +506,9 @@ def swap_peak():
         span = times[b + 1] - times[a]
         if span < 15:
             continue
-        rate = sum(r["swap_in_pages"] for r in rows[a:b + 1]) / span
-        best = rate if best is None else max(best, rate)
-    return best or 0.0
+        win = rows[a:b + 1]
+        out.append((sum(r["swap_in_pages"] for r in win) / span, sum(1 for r in win if r["swap_in_pages"] > 0)))
+    return out
 
 
 req_total = sum(r["requests"] for r in rows)
@@ -497,14 +518,17 @@ oom_total = sum(r["oom_kills"] for r in rows)
 warn_total = sum(r["fpm_max_children_warnings"] for r in rows)
 hits_total = sum(r["cache_hits"] for r in rows)
 dyn_total = sum(r["cache_dynamic"] for r in rows)
-swap_peak_rate = swap_peak()
+windows = swap_windows()
+swap_peak_rate = max((w[0] for w in windows), default=0.0)
+# Sustained = a window spanning >= 15 s with >= 3 samples, average >= limit, and swap-in in >= 3 of its samples.
+swap_sustained = [w[0] for w in windows if w[0] >= swap_limit and w[1] >= 3]
 rate5 = 100 * e5_total / req_total if req_total else 0.0
 
 fails = []
 if oom_total:
     fails.append(f"OOM killer: {oom_total} dòng nhật ký khớp Out of memory / oom-kill / oomd / Killed process (journalctl -k)")
-if swap_peak_rate >= swap_limit:
-    fails.append(f"swap-in trung bình {swap_peak_rate:.1f} trang/s (ngưỡng {swap_limit:g}) trong cửa sổ ≥ 15 s và ≥ 3 lần đo — RAM không đủ")
+if swap_sustained:
+    fails.append(f"swap-in kéo dài {max(swap_sustained):.1f} trang/s (ngưỡng {swap_limit:g}) trong cửa sổ ≥ 15 s, ≥ 3 lần đo có swap-in — RAM không đủ")
 if req_total and rate5 >= 1:
     fails.append(f"tỉ lệ 5xx {rate5:.2f}% ({e5_total}/{req_total}) ≥ 1%")
 if warn_total:
@@ -532,10 +556,13 @@ if rows:
              f" {max(r['req_per_sec'] for r in rows)} req/s, {req_total} yêu cầu, 5xx {rate5:.2f}%")
     if dyn_total:
         peaks += f", cache HIT {100 * hits_total / dyn_total:.0f}% yêu cầu động"
+    peaks += f", swap-in đỉnh {swap_peak_rate:.1f} trang/s"
 
 print("Kết luận:" + (" (dừng sớm bằng Ctrl-C)" if interrupted else ""))
 if not oom_ok:
     print("OOM check unavailable — journalctl không chạy được, không xác nhận được là không có OOM.")
+if swap_peak_rate >= swap_limit and not swap_sustained:
+    print(f"  Ghi chú: swap-in {swap_peak_rate:.1f} trang/s vượt ngưỡng {swap_limit:g} nhưng chỉ trong pico ngắn, không phải swap kéo dài — không tính là FAIL.")
 if fails:
     for f in fails:
         print(f"FAIL loadtest — {f}")

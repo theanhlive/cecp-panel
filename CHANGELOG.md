@@ -1,6 +1,8 @@
 # Changelog
 
-## 1.13.0-dev — tuning theo domain, audit/capacity/loadtest
+## 1.13.0-beta — tuning theo domain, audit/capacity/loadtest
+
+- **Sửa 2 kết luận sai của `optimize loadtest monitor`**: swap-in chỉ FAIL khi kéo dài (cửa sổ ≥ 15 s, ≥ 3 lần đo có swap-in, trung bình ≥ 100 trang/s; pico ngắn chỉ là ghi chú); journalctl thoát mã 1 khi không có dòng nào khớp không còn bị báo "OOM check unavailable" (chỉ exit khác 0/1 mới là journald lỗi).
 
 ### Tài liệu vận hành (agent & người)
 - **[docs/SITE_TUNING.md](docs/SITE_TUNING.md)** (mới): runbook tune một domain — `optimize audit`, `optimize capacity`, áp dụng từng thay đổi (cache TTL, `optimize site`, `php config`, `optimize mariadb|opcache|nginx`, swap, lệnh `cf`), `optimize loadtest plan` trên máy khác + `optimize loadtest monitor` trên VPS, `optimize rollback` khi FAIL; bảng loại site/bypass cache; Cloudflare Free qua `cecp-panel cf`; cổng phê duyệt và ngưỡng PASS/FAIL.
