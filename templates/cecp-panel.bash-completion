@@ -31,7 +31,7 @@ _cecp_panel() {
   elif (( COMP_CWORD == 2 )); then
     case "$cmd" in
       status) words="--json" ;;
-      site) words="list add remove duplicate sftp-info sftp-password rebuild-vhost protect-admin auth limits staging staging-push" ;;
+      site) words="list add remove duplicate sftp-info sftp-password rebuild-vhost probe protect-admin auth limits staging staging-push" ;;
       ssl) words="list issue fix renew status remove hsts" ;;
       dns) words="list add point ssl-mode" ;;
       cf|cloudflare) words="status purge purge-url realip edge-cache brotli cache-level minify recommend" ;;
@@ -63,7 +63,7 @@ _cecp_panel() {
       "site limits") words="--cpu --mem --tasks" ;;
       "site protect-admin") words="--ip --no-auth --user" ;;
       "site auth") words="--user" ;;
-      "site rebuild-vhost"|"optimize redis-acl"|"backup run"|"backup verify"|"security harden-docroot"|"ssl fix") words="--all" ;;
+      "site rebuild-vhost"|"site probe"|"optimize redis-acl"|"backup run"|"backup verify"|"security harden-docroot"|"ssl fix") words="--all" ;;
       "ssl issue") words="--dns --wildcard" ;;
       "cf edge-cache") words="--ttl" ;;
       "backup restore") words="--live --dry-run --yes --target --repo" ;;

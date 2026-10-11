@@ -456,6 +456,8 @@ site_rebuild_vhost_all() {
     site_rebuild_vhost "$domain"
   done
   shopt -u nullglob
+  # Non-fatal: uncached pages must still answer after new pool/vhost templates (putenv incident).
+  if declare -F probe_post_summary >/dev/null; then probe_post_summary || true; fi
 }
 
 site_list_json() {

@@ -7,6 +7,17 @@
 - **Profile theo domain**: [docs/sites/README.md](docs/sites/README.md), mẫu [docs/sites/_TEMPLATE.md](docs/sites/_TEMPLATE.md) — file `<domain>.md` thật không commit (`.gitignore`).
 - **`tools/cf-agent.sh`** (mới, chạy trên máy vận hành, không cần panel): `verify`, `zones`, `audit DOMAIN [--json]`, `snapshot DOMAIN`, `apply DOMAIN --ssl-strict|--brotli|--cache-level|--static-cache-rules` (tự snapshot, in trước/sau), `rollback FILE`. Mặc định chỉ đọc; cache HTML cần `--html-cache --yes-i-approved` (bypass giống `cf edge-cache`), ghi DNS cần `--allow-dns`; không bao giờ "Cache Everything". Token chỉ lấy từ `CF_API_TOKEN` / `CF_API_TOKEN_FILE`, gửi qua `curl -K -`, không nằm trong argv, không in ra. Snapshot ở `./cf-snapshots/` (git-ignored). Hướng dẫn tạo/giao/thu hồi token: [docs/CLOUDFLARE_AGENT_TOKEN.md](docs/CLOUDFLARE_AGENT_TOKEN.md). Test offline: `bash tests/cf_agent_test.sh` (mock Cloudflare).
 
+### Sự cố `putenv` sau nâng cấp 1.12 — probe trang không cache
+- Sau khi nâng cấp 1.12, pool PHP-FPM tắt `putenv()`; WooCommerce 6.2.2 gọi hàm này nên **mọi trang không cache trả HTTP 500 trong 4 ngày**, vì bước kiểm tra sau nâng cấp chỉ gọi trang chủ (đến từ page cache).
+- **`cecp-panel site probe [DOMAIN|--all]`** (mới, `lib/probe.sh`, chỉ đọc): gọi `127.0.0.1` với Host của site vào `/wp-login.php`, `/wp-json/`, `/?cecp_probe=<ngẫu nhiên>`; in `PASS|WARN|FAIL domain path HTTP mã`, HTTP >= 500 là FAIL (thoát mã 2). Khi FAIL, đọc 200 dòng cuối log nginx/PHP-FPM tìm `Call to undefined function` / `has been disabled for security reasons` và in cách sửa (`putenv` → `cecp-panel php config DOMAIN allow_putenv=on`, kèm cảnh báo mở lại đường LD_PRELOAD; hàm khác → tên mục trong `disable_functions` của pool). Không ghi, không restart, không purge.
+- Tóm tắt probe không-fatal ở cuối `update panel`, `site rebuild-vhost --all`, `security apply-production` ("Probe: N site(s) OK" hoặc dòng FAIL + "run: cecp-panel site probe --all"); probe lỗi không bao giờ làm hỏng hay rollback bản nâng cấp.
+- `security check`: mục mới "PHP fatals in the last 24 h" theo từng site (đếm `PHP Fatal error` trong log lỗi nginx), WARN kèm cách sửa khi có `undefined function` / hàm bị tắt.
+- **`tools/cf-agent.sh apply DOMAIN --www-redirect --allow-dns`**: tạo/thay **một** Redirect Rule `cf-agent: www.<zone> -> <zone>` (301, giữ query string, đích `concat("https://<zone>", http.request.uri.path)`), rồi bật proxy cho bản ghi `www` nếu đang DNS only. Có snapshot trước (gồm ruleset redirect), `rollback` khôi phục; thiếu `--allow-dns` bị từ chối. Token cần thêm **Zone → Dynamic URL Redirects: Edit** ([docs/CLOUDFLARE_AGENT_TOKEN.md](docs/CLOUDFLARE_AGENT_TOKEN.md)).
+- Docs: [docs/SITE_TUNING.md](docs/SITE_TUNING.md) mục 1.6 — `site probe` là bước bắt buộc sau mỗi lần nâng cấp panel và mỗi lần cập nhật WordPress/plugin.
+
+### Nâng cấp từ 1.12.1
+- Cập nhật mã panel (`cecp-panel update panel latest`), rồi chạy ngay `cecp-panel site probe --all`; nếu FAIL vì `putenv`, cập nhật plugin gọi `putenv` hoặc tạm dùng `cecp-panel php config DOMAIN allow_putenv=on`. Không có migration. `tools/cf-agent.sh` là file độc lập ở máy vận hành: chép lại bản mới nếu cần `--www-redirect`.
+
 ### Nâng cấp từ 1.12
 - Chỉ cần cập nhật mã panel khi các lệnh `optimize audit|capacity|loadtest|rollback` đã có trên VPS (nhánh load-tuning). **Không** migration DB hay lệnh bắt buộc một lần; đọc SITE_TUNING trước khi tune production.
 

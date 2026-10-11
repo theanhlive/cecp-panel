@@ -96,6 +96,29 @@ cecp-panel optimize audit "$D"
 
 Chạy lại monitor ngắn nếu cần xác nhận hồi phục.
 
+### 1.6 Probe trang không cache — **bắt buộc** sau mỗi lần nâng cấp panel và mỗi lần cập nhật WordPress/plugin
+
+Trang chủ thường đến từ page cache, nên kiểm tra "trang chủ trả 200" **không** chứng minh site còn chạy.
+Sự cố thật: sau khi nâng cấp 1.12, template pool tắt `putenv`; WooCommerce 6.2.2 gọi `putenv`, mọi trang
+không cache trả HTTP 500 suốt 4 ngày trong khi trang chủ vẫn 200. Lệnh dưới chỉ đọc (không ghi, không
+restart, không purge), gọi `127.0.0.1` với Host của site:
+
+```bash
+cecp-panel site probe "$D"      # hoặc: cecp-panel site probe --all
+```
+
+- Với WordPress: `/wp-login.php`, `/wp-json/` và `/?cecp_probe=<ngẫu nhiên>`; site khác: chỉ URL có query.
+  Mỗi dòng `PASS|WARN|FAIL domain path HTTP mã`; HTTP >= 500 là FAIL, thoát mã 2.
+- Khi FAIL, lệnh đọc 200 dòng cuối log lỗi nginx và log PHP-FPM, tìm `Call to undefined function NAME()` /
+  `has been disabled for security reasons` rồi in cách sửa. Với `putenv`:
+  `cecp-panel php config "$D" allow_putenv=on` — việc này mở lại đường LD_PRELOAD cho site đó, nên cập nhật
+  plugin gọi `putenv` là cách ưu tiên; chỉ bật khi chưa cập nhật được.
+- `cecp-panel update panel`, `site rebuild-vhost --all` và `security apply-production` tự chạy bản tóm tắt
+  ("Probe: N site(s) OK" hoặc các dòng FAIL) ở cuối, **không** làm hỏng hay rollback việc nâng cấp. Sau
+  cập nhật WordPress/plugin (`wp update`, `update all`) vẫn phải chạy `site probe` bằng tay.
+- `cecp-panel security check` cũng đếm `PHP Fatal error` trong 24 giờ qua của từng site.
+- Chưa probe = chưa xong nâng cấp; ghi kết quả vào profile site.
+
 ---
 
 ## 2. Bảng quyết định theo loại site

@@ -5,8 +5,8 @@ Usage: mock_cf.py PORT LOGFILE [DELAY_SECONDS] [FIXTURES_JSON]
 Records method, path, Authorization header and body of every call. The default delay (1.5 s)
 gives the scenario time to scan /proc/*/cmdline for leaked tokens while curl is running.
 
-Stateful bits: the http_request_cache_settings entrypoint ruleset (GET/PUT, 10003 when it
-does not exist yet). Touch /tmp/mockcf.fail-rulesets to make ruleset reads fail with an
+Stateful bits: the http_request_cache_settings and http_request_dynamic_redirect entrypoint
+rulesets (GET/PUT, 10003 when they do not exist yet). Touch /tmp/mockcf.fail-rulesets to make ruleset reads fail with an
 authentication error.
 
 FIXTURES_JSON (optional): {"<path suffix>": <response>} — a GET whose path (without the query)
@@ -25,6 +25,7 @@ if len(sys.argv) > 4:
     with open(sys.argv[4], encoding="utf-8") as fx:
         FIXTURES = json.load(fx)
 RULESET = None
+REDIRECT = None
 NEXT_ID = [1]
 
 
@@ -47,7 +48,7 @@ class Handler(BaseHTTPRequestHandler):
         return raw.decode("utf-8", "replace"), (json.loads(raw) if raw else {})
 
     def do_GET(self):
-        global RULESET
+        global RULESET, REDIRECT
         route = self.path.split("?", 1)[0]
         fixture = next((v for k, v in FIXTURES.items() if route.endswith(k)), None)
         if fixture is not None:
@@ -56,6 +57,11 @@ class Handler(BaseHTTPRequestHandler):
             self._reply({"success": True, "result": [{"id": "zone123"}]})
         elif "/dns_records" in self.path:
             self._reply({"success": True, "result": []})
+        elif self.path.endswith("/rulesets/phases/http_request_dynamic_redirect/entrypoint"):
+            if REDIRECT is None:
+                self._reply({"success": False, "errors": [{"code": 10003, "message": "could not find entrypoint ruleset"}]})
+            else:
+                self._reply({"success": True, "result": REDIRECT})
         elif self.path.endswith("/rulesets/phases/http_request_cache_settings/entrypoint"):
             if os.path.exists("/tmp/mockcf.fail-rulesets"):
                 self._reply({"success": False, "errors": [{"code": 10000, "message": "Authentication error"}]})
@@ -67,9 +73,18 @@ class Handler(BaseHTTPRequestHandler):
             self._reply({"success": True, "result": {}})
 
     def do_PUT(self):
-        global RULESET
+        global RULESET, REDIRECT
         raw, data = self._body()
-        if self.path.endswith("/rulesets/phases/http_request_cache_settings/entrypoint"):
+        if self.path.endswith("/rulesets/phases/http_request_dynamic_redirect/entrypoint"):
+            rules = []
+            for r in data.get("rules", []):
+                if "id" not in r:
+                    r = dict(r, id=f"rule{NEXT_ID[0]}")
+                    NEXT_ID[0] += 1
+                rules.append(r)
+            REDIRECT = {"id": "rs2", "phase": "http_request_dynamic_redirect", "rules": rules}
+            self._reply({"success": True, "result": REDIRECT}, raw)
+        elif self.path.endswith("/rulesets/phases/http_request_cache_settings/entrypoint"):
             rules = []
             for r in data.get("rules", []):
                 if "id" not in r:

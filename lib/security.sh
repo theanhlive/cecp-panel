@@ -459,6 +459,7 @@ security_apply_production() {
   panel_log "  - MariaDB bind localhost + baseline secure"
   panel_log "Next: cecp-panel site rebuild-vhost --all   # apply new vhost/pool templates"
   panel_log "Recommended: cecp-panel security ssh-key-only (after SSH key verified)"
+  if declare -F probe_post_summary >/dev/null; then probe_post_summary || true; fi
 }
 
 security_self_check() {
@@ -518,6 +519,16 @@ security_self_check() {
     sock="$(site_json_get_or "$dom" php_sock "")"
     if [[ -S "$sock" && "$(stat -c %U "$sock")" != "nginx" ]] && id nginx &>/dev/null; then
       _ck FAIL "$dom: PHP-FPM socket owned by $(stat -c %U:%G "$sock") — nginx gets 502 (run: systemctl restart php-fpm)"
+    fi
+    local fatals fnames fn
+    fatals="$(tail -n 20000 "/var/log/nginx/${dom}-error.log" 2>/dev/null       | awk -v since="$(date -d '24 hours ago' '+%Y/%m/%d %H:%M:%S' 2>/dev/null || true)"         'since == "" || $1 " " $2 >= since' | grep -c 'PHP Fatal error' || true)"
+    if (( ${fatals:-0} == 0 )); then
+      _ck PASS "$dom: no PHP fatals in the last 24 h"
+    else
+      fnames="$(probe_log_names "$dom" 2>/dev/null | tr '
+' ' ')"
+      _ck WARN "$dom: ${fatals} PHP fatal error(s) in the last 24 h (cecp-panel log nginx $dom)"
+      for fn in $fnames; do probe_remedy "$dom" "$fn"; done
     fi
     local docroot wpcfg
     docroot="$(site_json_get_or "$dom" docroot "")"

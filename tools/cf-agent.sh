@@ -31,7 +31,10 @@ Changes (each takes a snapshot first and prints before/after):
                [--html-cache [--ttl 1h] --yes-i-approved]   HTML edge cache, same bypass as
                                                             "cecp-panel cf edge-cache"
                [--proxy-record FQDN --allow-dns]            turn on the Cloudflare proxy for a record
-  rollback SNAPSHOT_FILE [--allow-dns]                      restore settings + Cache Rules
+               [--www-redirect --allow-dns]                 ONE Redirect Rule "www.<zone> -> <zone>" (301, keeps
+                                                            the query string), then proxy the www record if it
+                                                            is DNS only
+  rollback SNAPSHOT_FILE [--allow-dns]                      restore settings + Cache Rules + Redirect Rules
                                                             (+ DNS proxy state with --allow-dns)
 
 Token: export CF_API_TOKEN, or CF_API_TOKEN_FILE=/path/to/git-ignored/file. Never pass it as an argument.
@@ -156,6 +159,20 @@ def keep_rule(r):
 
 def norm_rule(r):
     return {k: r[k] for k in ("description", "expression", "action", "action_parameters", "enabled") if k in r}
+
+
+def redirect_desc(zone):
+    return f"cf-agent: www.{zone} -> {zone}"
+
+
+def redirect_rule(zone):
+    return {
+        "description": redirect_desc(zone), "enabled": True,
+        "expression": "(http.host eq " + json.dumps("www." + zone) + ")", "action": "redirect",
+        "action_parameters": {"from_value": {
+            "status_code": 301, "preserve_query_string": True,
+            "target_url": {"expression": 'concat("https://' + zone + '", http.request.uri.path)'}}},
+    }
 
 
 def html_rule(domain, ttl):
@@ -330,8 +347,9 @@ def cmd_audit(domain, zone, zid, spath, dpath, cpath, wpath, as_json):
     print(f"RESULT: {nfail} FAIL, {nwarn} WARN")
 
 
-def cmd_snapshot(out, domain, zone, zid, spath, dpath, cpath, wpath):
+def cmd_snapshot(out, domain, zone, zid, spath, dpath, cpath, wpath, rpath=""):
     s, dn, c, w = load(spath), load(dpath), load(cpath), load(wpath)
+    rd = load(rpath) if rpath else {}
     if not ok(s):
         sys.exit("snapshot refused: cannot read zone settings (" + errs(s) + ")")
     if not ok(c) and not no_entrypoint(c):
@@ -343,6 +361,8 @@ def cmd_snapshot(out, domain, zone, zid, spath, dpath, cpath, wpath):
         "dns_records": web_records(dn) if ok(dn) else None,
         "cache_rules": {"exists": ok(c), "rules": [keep_rule(r) for r in rules_of(c)]},
         "waf_custom_rules": [norm_rule(r) for r in rules_of(w)] if ok(w) else None,
+        "redirect_rules": ({"exists": ok(rd), "rules": [keep_rule(r) for r in rules_of(rd)]}
+                           if ok(rd) or no_entrypoint(rd) else None),
     }
     fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -384,6 +404,18 @@ def cmd_rules_body(path, domain, which, ttl):
     print(json.dumps({"rules": keep}, separators=(",", ":")))
 
 
+def cmd_redirect_body(path, zone):
+    keep = [keep_rule(r) for r in rules_of(load(path)) if r.get("description") != redirect_desc(zone)]
+    keep.append(redirect_rule(zone))
+    print(json.dumps({"rules": keep}, separators=(",", ":")))
+
+
+def cmd_redirect_summary(path, zone):
+    rules = rules_of(load(path))
+    on = any(r.get("description") == redirect_desc(zone) for r in rules)
+    print(f"{len(rules)} rule(s); www redirect={'on' if on else 'off'}")
+
+
 def cmd_value_body(value):
     print(json.dumps({"value": value}))
 
@@ -394,7 +426,7 @@ def cmd_dns_find(path, name):
             print(f"{r.get('id')}\t{r.get('type')}\t{str(bool(r.get('proxied'))).lower()}")
 
 
-def cmd_rollback_plan(snap_path, spath, cpath, dpath):
+def cmd_rollback_plan(snap_path, spath, cpath, dpath, rpath=""):
     snap = load(snap_path)
     if snap.get("tool") != "cf-agent":
         sys.exit("not a cf-agent snapshot")
@@ -410,6 +442,15 @@ def cmd_rollback_plan(snap_path, spath, cpath, dpath):
     have = [norm_rule(r) for r in rules_of(c)]
     if want != have:
         print("RULES\t" + json.dumps({"rules": want}, separators=(",", ":")))
+    saved_redirect = snap.get("redirect_rules")
+    if saved_redirect is not None and rpath:
+        rd = load(rpath)
+        if not ok(rd) and not no_entrypoint(rd):
+            sys.exit("cannot read current Redirect Rules (" + errs(rd) + ")")
+        want = [norm_rule(r) for r in saved_redirect.get("rules") or []]
+        have = [norm_rule(r) for r in rules_of(rd)]
+        if want != have:
+            print("REDIRECT\t" + json.dumps({"rules": want}, separators=(",", ":")))
     saved = snap.get("dns_records")
     if saved is not None:
         cur = {r.get("id"): r for r in web_records(load(dpath))}
@@ -425,6 +466,7 @@ cmd, args = sys.argv[1], sys.argv[2:]
     "snapshot": cmd_snapshot, "snap-field": cmd_snap_field, "setting": cmd_setting,
     "entrypoint-ok": cmd_entrypoint_ok, "rules-summary": cmd_rules_summary, "rules-body": cmd_rules_body,
     "value-body": cmd_value_body, "dns-find": cmd_dns_find, "rollback-plan": cmd_rollback_plan,
+    "redirect-body": cmd_redirect_body, "redirect-summary": cmd_redirect_summary,
 }[cmd](*args)
 PY
 }
@@ -446,6 +488,7 @@ resolve_zone() {
 
 CACHE_EP="rulesets/phases/http_request_cache_settings/entrypoint"
 WAF_EP="rulesets/phases/http_request_firewall_custom/entrypoint"
+REDIRECT_EP="rulesets/phases/http_request_dynamic_redirect/entrypoint"
 
 fetch_state() {
   local zid="$1"
@@ -453,6 +496,7 @@ fetch_state() {
   api GET "/zones/${zid}/dns_records?per_page=500" "$TMPD/dns.json"
   api GET "/zones/${zid}/${CACHE_EP}" "$TMPD/cache.json"
   api GET "/zones/${zid}/${WAF_EP}" "$TMPD/waf.json"
+  api GET "/zones/${zid}/${REDIRECT_EP}" "$TMPD/redir.json"
 }
 
 # take_snapshot DOMAIN ZID ZONE → prints the snapshot path.
@@ -468,7 +512,7 @@ take_snapshot() {
     out="$SNAP_DIR/${zone}-${ts}-${n}.json"
   done
   py snapshot "$out" "$domain" "$zone" "$zid" "$TMPD/settings.json" "$TMPD/dns.json" \
-    "$TMPD/cache.json" "$TMPD/waf.json" >&2 || die "snapshot failed"
+    "$TMPD/cache.json" "$TMPD/waf.json" "$TMPD/redir.json" >&2 || die "snapshot failed"
   printf '%s\n' "$out"
 }
 
@@ -555,6 +599,21 @@ put_cache_rule() {  # ZID DOMAIN html|static TTL
   echo "  cache rules: ${before} -> ${after}"
 }
 
+put_www_redirect() {  # ZID ZONE
+  local zid="$1" zone="$2" err before after
+  api GET "/zones/${zid}/${REDIRECT_EP}" "$TMPD/redir.json"
+  # The PUT replaces the whole ruleset: build only on a readable one (or "none yet", 10003).
+  err="$(py entrypoint-ok "$TMPD/redir.json" 2>&1)" \
+    || die "cannot read Redirect Rules: $err — token needs Zone > Dynamic URL Redirects: Edit"
+  before="$(py redirect-summary "$TMPD/redir.json" "$zone")"
+  api PUT "/zones/${zid}/${REDIRECT_EP}" "$TMPD/put.json" "$(py redirect-body "$TMPD/redir.json" "$zone")"
+  err="$(py entrypoint-ok "$TMPD/put.json" 2>&1)" \
+    || die "Cloudflare rejected the redirect rule: $err — token needs Zone > Dynamic URL Redirects: Edit"
+  api GET "/zones/${zid}/${REDIRECT_EP}" "$TMPD/redir.json"
+  after="$(py redirect-summary "$TMPD/redir.json" "$zone")"
+  echo "  redirect rules: ${before} -> ${after}"
+}
+
 proxy_record() {  # ZID FQDN
   local zid="$1" name="$2" id type proxied found=0
   api GET "/zones/${zid}/dns_records?per_page=500" "$TMPD/dns.json"
@@ -578,7 +637,7 @@ cmd_apply() {
   shift
   domain="${domain,,}"
   validate_domain "$domain"
-  local ssl=0 brotli=0 level="" static=0 html=0 approved=0 allow_dns=0 ttl=3600 proxy_name=""
+  local ssl=0 brotli=0 level="" static=0 html=0 approved=0 allow_dns=0 ttl=3600 proxy_name="" www=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --ssl-strict) ssl=1; shift ;;
@@ -593,6 +652,7 @@ cmd_apply() {
       --yes-i-approved) approved=1; shift ;;
       --proxy-record) proxy_name="${2:-}"; shift 2 || shift ;;
       --allow-dns) allow_dns=1; shift ;;
+      --www-redirect) www=1; shift ;;
       --cache-everything) refuse "\"Cache Everything\" is never applied (it caches logged-in, cart and admin pages)" ;;
       *) die "unknown option for apply: $1" ;;
     esac
@@ -606,6 +666,9 @@ cmd_apply() {
   if [[ -n "$proxy_name" && "$allow_dns" != 1 ]]; then
     refuse "--proxy-record writes a DNS record; pass --allow-dns once the owner approved the DNS change"
   fi
+  if [[ "$www" == 1 && "$allow_dns" != 1 ]]; then
+    refuse "--www-redirect writes a redirect rule and proxies the www DNS record; pass --allow-dns once the owner approved the DNS change"
+  fi
   if [[ -n "$proxy_name" ]]; then
     proxy_name="${proxy_name,,}"
     validate_domain "$proxy_name"
@@ -613,7 +676,7 @@ cmd_apply() {
   if [[ "$html" == 1 ]]; then
     (( ttl >= 60 && ttl <= 2592000 )) || die "TTL must be between 60s and 30d"
   fi
-  [[ "$ssl$brotli$static$html" != "0000" || -n "$level" || -n "$proxy_name" ]] \
+  [[ "$ssl$brotli$static$html$www" != "00000" || -n "$level" || -n "$proxy_name" ]] \
     || die "nothing to apply (see: cf-agent.sh help)"
 
   load_token
@@ -633,6 +696,10 @@ cmd_apply() {
   [[ "$static" == 1 ]] && put_cache_rule "$zid" "$domain" static 0
   [[ "$html" == 1 ]] && put_cache_rule "$zid" "$domain" html "$ttl"
   [[ -n "$proxy_name" ]] && proxy_record "$zid" "$proxy_name"
+  if [[ "$www" == 1 ]]; then
+    put_www_redirect "$zid" "$zone"
+    proxy_record "$zid" "www.${zone}"
+  fi
   CF_WRITE_OK=0
   echo "done. Check: tools/cf-agent.sh audit $domain"
 }
@@ -659,7 +726,7 @@ cmd_rollback() {
   pre="$(take_snapshot "$domain" "$zid" "$zone")"
   echo "snapshot of the current state: $pre"
   local plan
-  plan="$(py rollback-plan "$file" "$TMPD/settings.json" "$TMPD/cache.json" "$TMPD/dns.json" 2>&1)" \
+  plan="$(py rollback-plan "$file" "$TMPD/settings.json" "$TMPD/cache.json" "$TMPD/dns.json" "$TMPD/redir.json" 2>&1)" \
     || die "rollback plan failed: $plan"
   if [[ -z "$plan" ]]; then
     echo "nothing to roll back: the zone already matches $file"
@@ -673,6 +740,10 @@ cmd_rollback() {
         api PATCH "/zones/${zid}/settings/${a}" "$TMPD/r.json" "$b"
         err="$(py setting "$TMPD/r.json" 2>&1)" || die "Cloudflare rejected ${a}: $err"
         echo "  ${a} -> ${err}" ;;
+      REDIRECT)
+        api PUT "/zones/${zid}/${REDIRECT_EP}" "$TMPD/r.json" "$a"
+        err="$(py entrypoint-ok "$TMPD/r.json" 2>&1)" || die "Cloudflare rejected the Redirect Rules restore: $err"
+        echo "  redirect rules restored" ;;
       RULES)
         api PUT "/zones/${zid}/${CACHE_EP}" "$TMPD/r.json" "$a"
         err="$(py entrypoint-ok "$TMPD/r.json" 2>&1)" || die "Cloudflare rejected the Cache Rules restore: $err"

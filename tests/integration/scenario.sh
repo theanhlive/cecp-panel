@@ -733,6 +733,24 @@ check "php config --reset" bash -c "cecp-panel php config $D --reset memory_limi
 check "php config pm_max_children=N sets the pool's pm.max_children" \
   bash -c "cecp-panel php config $D pm_max_children=6 >/dev/null && grep -q '^pm.max_children = 6' $POOL && cecp-panel php config $D --reset pm_max_children >/dev/null"
 
+echo "=== site probe: uncached pages after an upgrade (putenv incident) ==="
+PUTENV_STUB="$DOCROOT/wp-content/mu-plugins/cecp-putenv-stub.php"
+check "site probe passes on a healthy site" cecp-panel site probe "$D"
+check "site probe rejects an unknown site" bash -c "! cecp-panel site probe not-a-panel-site.test"
+POOL_SUM_BEFORE="$(md5sum "$POOL" "$VHOST" | md5sum)"
+runuser -u "$SU" -- mkdir -p "$DOCROOT/wp-content/mu-plugins"
+printf '<?php\nputenv("CECP_PROBE_STUB=1");\n' | runuser -u "$SU" -- tee "$PUTENV_STUB" >/dev/null
+settle
+probe_fails() { local out rc=0; out="$(cecp-panel site probe "$D" 2>&1)" || rc=$?; echo "$out"; [ "$rc" = 2 ] && grep -q '^FAIL ' <<<"$out"; }
+check "probe FAILs (exit 2) when a plugin calls the disabled putenv" probe_fails
+check "probe prints the allow_putenv remedy" bash -c "cecp-panel site probe $D 2>&1 | grep -q 'cecp-panel php config $D allow_putenv=on'"
+check "probe changed no pool or vhost file" bash -c "[ \"\$(md5sum $POOL $VHOST | md5sum)\" = '$POOL_SUM_BEFORE' ]"
+check "security check reports the PHP fatals of the last 24 h" bash -c "cecp-panel security check 2>&1 | grep -qE 'PHP fatal error|no PHP fatals'"
+check "allow_putenv=on makes the probe pass again" \
+  bash -c "cecp-panel php config $D allow_putenv=on >/dev/null && sleep 2 && cecp-panel site probe $D"
+rm -f "$PUTENV_STUB"
+cecp-panel php config "$D" --reset allow_putenv >/dev/null 2>&1 || true
+
 echo "=== Per-site resource limits (own PHP-FPM) ==="
 check "site limits --cpu 50 --mem 768M --tasks 128" cecp-panel site limits "$D" --cpu 50 --mem 768M --tasks 128
 UNIT="cecp-php-fpm@$SLUG.service"

@@ -29,6 +29,7 @@ source "$PANEL_ROOT/lib/wordpress.sh"
 source "$PANEL_ROOT/lib/optimize.sh"
 source "$PANEL_ROOT/lib/tune.sh"
 source "$PANEL_ROOT/lib/capacity.sh"
+source "$PANEL_ROOT/lib/probe.sh"
 source "$PANEL_ROOT/lib/loadtest.sh"
 source "$PANEL_ROOT/lib/cache.sh"
 source "$PANEL_ROOT/lib/limits.sh"
@@ -54,6 +55,7 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel status [--json]         Rich health status (--json: machine-readable, per-site details)
 
   cecp-panel site list|add|remove|duplicate|sftp-info|sftp-password|rebuild-vhost
+    site probe DOMAIN|--all                                      # read-only: uncached pages (wp-login, wp-json, ?query) must not be HTTP 5xx; run after EVERY upgrade/plugin update
     site staging DOMAIN [--name staging.DOMAIN] [--no-auth]      # clone to a protected, noindex copy
     site staging-push DOMAIN [--files-only|--db-only] [--dry-run] [--yes]
     site limits DOMAIN [--cpu 100] [--mem 1G] [--tasks 256] | off | show   # own PHP-FPM with CPU/RAM caps
@@ -184,13 +186,14 @@ case "$cmd" in
       limits) site_limits "$@" ;;
       staging) site_staging "$@" ;;
       staging-push) site_staging_push "$@" ;;
+      probe) site_probe "$@" ;;
       rebuild-vhost)
         if [[ "${1:-}" == "--all" ]]; then site_rebuild_vhost_all
         elif [[ -n "${1:-}" ]]; then site_rebuild_vhost "$1"
         else panel_die "Usage: cecp-panel site rebuild-vhost DOMAIN|--all"
         fi
         ;;
-      *) panel_die "Usage: cecp-panel site list|add|remove|duplicate|sftp-info|sftp-password|rebuild-vhost|protect-admin|auth|limits|staging|staging-push" ;;
+      *) panel_die "Usage: cecp-panel site list|add|remove|duplicate|sftp-info|sftp-password|rebuild-vhost|probe|protect-admin|auth|limits|staging|staging-push" ;;
     esac
     ;;
   ssl)

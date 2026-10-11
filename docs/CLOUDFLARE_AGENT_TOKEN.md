@@ -39,6 +39,9 @@ brotli|cache-level|edge-cache` và `dns ssl-mode` trên VPS chỉ dùng khi ch�
   ngay sau khi xong.
 - **DNS → Edit** không nằm trong cả hai mức. Chỉ thêm khi chủ domain yêu cầu một thay đổi DNS cụ thể
   (vd. bật proxy cho một bản ghi: `apply DOMAIN --proxy-record FQDN --allow-dns`).
+- **Zone → Dynamic URL Redirects → Edit** (Redirect Rules) cũng không nằm trong hai mức; chỉ thêm khi chủ
+  domain đồng ý chuyển hướng `www` → gốc: `apply DOMAIN --www-redirect --allow-dns` (cần thêm **DNS → Edit**
+  để bật proxy cho bản ghi `www`).
 - Không dùng **Global API Key**. Không dùng token "Edit zone DNS" mẫu cho mọi zone.
 
 ---
@@ -122,6 +125,7 @@ tools/cf-agent.sh rollback ./cf-snapshots/khachhang.vn-20261010T080000Z.json
 |---|---|---|
 | Cache HTML tại edge | `apply "$D" --html-cache [--ttl 1h] --yes-i-approved` | Chủ site đã đồng ý; audit bypass OK. Quy tắc bỏ qua đăng nhập/giỏ hàng/admin **giống hệt** `cecp-panel cf edge-cache` (cùng mô tả `cecp-panel: DOMAIN`, nên `cf edge-cache DOMAIN off` trên VPS cũng tắt được nếu token VPS có Cache Rules Edit) |
 | Ghi bản ghi DNS | `apply "$D" --proxy-record FQDN --allow-dns`; `rollback FILE --allow-dns` | Chủ domain đã đồng ý; token có DNS Edit |
+| Chuyển hướng `www` → gốc | `apply "$D" --www-redirect --allow-dns`; `rollback FILE --allow-dns` | Chủ domain đã đồng ý; token có **Dynamic URL Redirects: Edit** + DNS Edit. Tạo/thay **một** Redirect Rule `cf-agent: www.<zone> -> <zone>` (301, giữ query string, đích `concat("https://<zone>", http.request.uri.path)`), rồi bật proxy cho bản ghi `www` nếu đang DNS only. Chạy lại không tạo trùng. Snapshot chứa cả ruleset redirect; `rollback` khôi phục nó (bản ghi DNS chỉ khôi phục khi có `--allow-dns`) |
 | "Cache Everything" | không có | **Không bao giờ** — công cụ từ chối `--cache-everything` |
 
 Lỗi `Authentication error` / `cannot read …` ⇒ token thiếu quyền hoặc sai zone: sửa token (mục 3),

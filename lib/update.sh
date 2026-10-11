@@ -168,6 +168,9 @@ os.chmod(p, 0o600)
 PY
   rm -rf "$tmp"
   panel_log "Panel updated to $ver. Config in $ETC_DIR preserved."
+  # Non-fatal, run by the NEW code: a failing probe never aborts or rolls back the update.
+  echo "--- Probe (uncached pages) ---"
+  "$BIN_PATH" site probe --all --summary || true
 }
 
 update_mirror_set() {

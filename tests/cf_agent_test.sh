@@ -44,11 +44,13 @@ done
 
 cat >"$work/fixtures.json" <<'EOF'
 {
+  "/zones": {"success": true, "result": [{"id": "zone123", "name": "example.com", "status": "active"}]},
   "/zones/zone123/settings": {"success": true, "result": [
     {"id": "ssl", "value": "flexible"}, {"id": "always_use_https", "value": "off"},
     {"id": "brotli", "value": "off"}, {"id": "cache_level", "value": "basic"}]},
   "/dns_records": {"success": true, "result": [
     {"id": "rec1", "type": "A", "name": "shop.example.com", "content": "192.0.2.10", "proxied": false},
+    {"id": "rec3", "type": "A", "name": "www.example.com", "content": "192.0.2.10", "proxied": false},
     {"id": "rec2", "type": "MX", "name": "example.com", "content": "mx.example.com"}]}
 }
 EOF
@@ -108,6 +110,7 @@ check "--ssl-strict without --yes-i-approved exits non-zero" run fail apply "$D"
 check "--html-cache without --yes-i-approved exits non-zero" run fail apply "$D" --html-cache
 check "--proxy-record without --allow-dns exits non-zero" run fail apply "$D" --proxy-record "$D"
 check "--cache-everything is refused" run fail apply "$D" --cache-everything
+check "--www-redirect without --allow-dns exits non-zero" run fail apply "$D" --www-redirect
 check "token as an argument is refused" run fail verify --token "$TOKEN"
 check "refused actions made no write call" no_writes
 
@@ -143,9 +146,38 @@ check "HTML rule identical to cf edge-cache" same_rule
 check "approved --proxy-record exits 0" run ok apply "$D" --proxy-record "$D" --allow-dns
 check "approved --proxy-record patched only that record" grep -q '^PATCH /zones/zone123/dns_records/rec1 .*"proxied":true' "$work/mock.log"
 
+# --- www redirect rule -------------------------------------------------------------------
+: >"$work/mock.log"
+check "approved --www-redirect exits 0" run ok apply "$D" --www-redirect --allow-dns
+check "--www-redirect wrote the redirect ruleset" grep -q '^PUT .*http_request_dynamic_redirect/entrypoint' "$work/mock.log"
+check "--www-redirect proxied only the www record" grep -q '^PATCH /zones/zone123/dns_records/rec3 .*"proxied":true' "$work/mock.log"
+redirect_rules_in_last_put() {  # prints the number of cf-agent www rules in the last redirect PUT
+  "$PY" - "$work/mock.log" "$1" <<'PY'
+import json, sys
+put = [l.split(" body=", 1)[1] for l in open(sys.argv[1], encoding="utf-8")
+       if l.startswith("PUT ") and "http_request_dynamic_redirect/entrypoint" in l and " body=" in l]
+rules = json.loads(put[-1])["rules"]
+ours = [r for r in rules if r.get("description") == "cf-agent: www.example.com -> example.com"]
+r = ours[0] if ours else {}
+fv = (r.get("action_parameters") or {}).get("from_value") or {}
+good = (len(ours) == 1 and r.get("action") == "redirect" and fv.get("status_code") == 301
+        and fv.get("preserve_query_string") is True
+        and fv.get("target_url", {}).get("expression") == 'concat("https://example.com", http.request.uri.path)'
+        and r.get("expression") == '(http.host eq "www.example.com")')
+sys.exit(0 if good else 1)
+PY
+}
+check "redirect rule: 301, query kept, concat target, created once" redirect_rules_in_last_put "$work/mock.log"
+: >"$work/mock.log"
+check "second --www-redirect exits 0" run ok apply "$D" --www-redirect --allow-dns
+check "second run replaced the rule, no duplicate" redirect_rules_in_last_put "$work/mock.log"
+
 # --- rollback ----------------------------------------------------------------------------
 first_snap="$(ls "$CF_SNAPSHOT_DIR"/*.json | sort | head -n 1)"
-check "rollback exits 0" run ok rollback "$first_snap"
+check "first snapshot holds the redirect ruleset field" grep -q '"redirect_rules"' "$first_snap"
+: >"$work/mock.log"
+check "rollback exits 0" run ok rollback "$first_snap" --allow-dns
+check "rollback restored the empty redirect ruleset" grep -q '^PUT .*http_request_dynamic_redirect/entrypoint.* body={"rules":\[\]}' "$work/mock.log"
 
 # --- secrets -----------------------------------------------------------------------------
 check "token absent from all output" token_not_in "$out"
