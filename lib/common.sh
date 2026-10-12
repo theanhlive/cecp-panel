@@ -3,7 +3,7 @@
 # shellcheck disable=SC2034  # globals consumed by other lib files
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.13.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.13.1-beta}"
 PANEL_ROOT="${PANEL_ROOT:-/opt/cecp-panel}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/cecp-panel}"
 ETC_DIR="/etc/cecp-panel"
@@ -374,14 +374,58 @@ php_fpm_reload_all() {
   done < <(systemctl list-units 'php*-php-fpm.service' 'cecp-php-fpm@*.service' --type=service --state=running --no-legend 2>/dev/null | awk '{print $1}')
 }
 
-php_fpm_reload() {
-  if systemctl is-active --quiet php-fpm 2>/dev/null; then
-    systemctl reload php-fpm 2>/dev/null || systemctl restart php-fpm
-  elif systemctl is-active --quiet php8.2-fpm 2>/dev/null; then
-    systemctl reload php8.2-fpm 2>/dev/null || systemctl restart php8.2-fpm
-  else
-    systemctl restart php-fpm 2>/dev/null || true
+# Same units as php_fpm_reload_all, but a failed reload AND restart is an error (non-zero, message
+# on stderr) — for callers that must not report success over a dead PHP (optimize rollback/opcache).
+php_fpm_reload_all_strict() {
+  local svc rc=0
+  php_fpm_reload_strict || rc=1
+  while read -r svc; do
+    [[ -n "$svc" ]] || continue
+    if ! systemctl reload "$svc" 2>/dev/null && ! systemctl restart "$svc" 2>/dev/null; then
+      echo "Không nạp lại được $svc" >&2
+      rc=1
+    fi
+  done < <(systemctl list-units 'php*-php-fpm.service' 'cecp-php-fpm@*.service' --type=service --state=running --no-legend 2>/dev/null | awk '{print $1}')
+  return "$rc"
+}
+
+# Every active PHP-FPM service of any version: php-fpm, php8.2-fpm, php8.3-fpm (Debian/Ubuntu),
+# php83-php-fpm (Remi). Per-site cecp-php-fpm@SLUG masters are left to php_fpm_reload_all.
+php_fpm_active_units() {
+  systemctl list-units 'php*-fpm.service' '*php-fpm*.service' --type=service --state=active --no-legend 2>/dev/null \
+    | awk '{print $1}' | grep -v '@' | sort -u || true
+}
+
+# Strict: every active unit is reloaded (restart if reload fails). Fails when a unit cannot be
+# reloaded, and when no PHP-FPM unit could be reloaded at all.
+php_fpm_reload_strict() {
+  local svc n=0 rc=0
+  while read -r svc; do
+    [[ -n "$svc" ]] || continue
+    if systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null; then
+      n=$(( n + 1 ))
+    else
+      echo "Không nạp lại được $svc" >&2
+      rc=1
+    fi
+  done < <(php_fpm_active_units)
+  if [[ "$n" == 0 && "$rc" == 0 ]]; then
+    # nothing active: start the default unit (best effort, as before); strict fails if it stays down
+    systemctl restart php-fpm 2>/dev/null && n=1
+    [[ "$n" == 1 ]] || { echo "Không tìm thấy PHP-FPM nào để nạp lại" >&2; rc=1; }
   fi
+  return "$rc"
+}
+
+# Best effort: reload every active unit; with none active, try the default unit and ignore failure.
+php_fpm_reload() {
+  local svc n=0
+  while read -r svc; do
+    [[ -n "$svc" ]] || continue
+    n=$(( n + 1 ))
+    systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
+  done < <(php_fpm_active_units)
+  [[ "$n" -gt 0 ]] || systemctl restart php-fpm 2>/dev/null || true
 }
 
 # template_render TPL OUT KEY VALUE ... — replaces {{KEY}}. Done in Python: bash 5.2's

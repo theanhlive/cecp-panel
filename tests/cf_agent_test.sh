@@ -55,6 +55,7 @@ cat >"$work/fixtures.json" <<'EOF'
 }
 EOF
 : >"$work/mock.log"
+export MOCKCF_CTL="$work"
 "$PY" tests/integration/mock_cf.py "$port" "$work/mock.log" 0.05 "$work/fixtures.json" &
 mock_pid=$!
 for _ in $(seq 1 50); do
@@ -178,6 +179,72 @@ check "first snapshot holds the redirect ruleset field" grep -q '"redirect_rules
 : >"$work/mock.log"
 check "rollback exits 0" run ok rollback "$first_snap" --allow-dns
 check "rollback restored the empty redirect ruleset" grep -q '^PUT .*http_request_dynamic_redirect/entrypoint.* body={"rules":\[\]}' "$work/mock.log"
+
+# --- strict writes -----------------------------------------------------------------------
+# The snapshot's DNS GET fails once: a DNS write must be refused before any mutation.
+: >"$work/mock.log"
+: >"$work/mockcf.dns-fail-once"
+check "unreadable DNS snapshot: --proxy-record refused" run fail apply "$D" --proxy-record "$D" --allow-dns
+check "unreadable DNS snapshot: refusal says so" grep -q 'DNS records could not be read' "$out"
+check "unreadable DNS snapshot: no write call" no_writes
+: >"$work/mock.log"
+: >"$work/mockcf.dns-fail-once"
+check "unreadable DNS snapshot: --www-redirect refused" run fail apply "$D" --www-redirect --allow-dns
+check "unreadable DNS snapshot: --www-redirect made no write call" no_writes
+# A PUT answering success:false / 10003 is a rejected write, not "no ruleset yet".
+: >"$work/mock.log"
+: >"$work/mockcf.reject-put"
+check "rejected PUT (10003): --html-cache exits non-zero" run fail apply "$D" --html-cache --yes-i-approved
+check "rejected PUT (10003): says it was rejected" grep -q 'Cloudflare rejected the cache rule' "$out"
+check "rejected PUT (10003): --www-redirect exits non-zero" run fail apply "$D" --www-redirect --allow-dns
+check "rejected PUT (10003): redirect says it was rejected" grep -q 'Cloudflare rejected the redirect rule' "$out"
+rm -f "$work/mockcf.reject-put"
+
+# --- tuned snapshot: an unreadable DNS read blocks only with --allow-dns -------------------
+# The snapshot wants ssl=strict (live: flexible). Its DNS GET fails once, and that failure is the
+# rollback's own DNS read (take_snapshot's read is the first DNS GET).
+tuned="$work/tuned.json"
+"$PY" - "$first_snap" "$tuned" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+for s in d.get("settings") or []:
+    if s.get("id") == "ssl":
+        s["value"] = "strict"
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), indent=2)
+PY
+: >"$work/mock.log"
+: >"$work/mockcf.dns-fail-once"
+check "DNS read fails, no --allow-dns: rollback still exits 0" run ok rollback "$tuned"
+check "DNS read fails, no --allow-dns: changed setting restored" grep -qE '^PATCH /zones/zone123/settings/ssl .*"value": ?"strict"' "$work/mock.log"
+check "DNS read fails, no --allow-dns: says DNS was not compared" grep -qF 'DNS not compared (unreadable or --allow-dns not given)' "$out"
+: >"$work/mock.log"
+: >"$out"
+: >"$work/mockcf.dns-fail-once"
+check "DNS read fails, --allow-dns: rollback refused" run fail rollback "$tuned" --allow-dns
+check "DNS read fails, --allow-dns: refusal names the DNS read" grep -qF 'cannot read current DNS records' "$out"
+check "DNS read fails, --allow-dns: no write call" no_writes
+
+# --- read-back: a PUT that answers success:true but stores no rule -----------------------
+# mockcf.drop-put keeps the PUT's answer and stores an empty ruleset: the read-back must fail.
+: >"$work/mockcf.drop-put"
+: >"$out"
+check "accepted but not stored: --html-cache exits non-zero" run fail apply "$D" --html-cache --yes-i-approved
+check "accepted but not stored: cache says the read-back does not show it" grep -qF 'read-back does not show' "$out"
+: >"$out"
+check "accepted but not stored: --www-redirect exits non-zero" run fail apply "$D" --www-redirect --allow-dns
+check "accepted but not stored: redirect says the read-back does not show it" grep -qF 'read-back does not show' "$out"
+rm -f "$work/mockcf.drop-put"
+
+# A Redirect rollback whose rules-equal read-back fails must exit non-zero.
+check "www redirect rule live again" run ok apply "$D" --www-redirect --allow-dns
+www_snap="$(bash "$TOOL" snapshot "$D" 2>>"$out" | sed -n 's/^snapshot: //p' || true)"
+check "snapshot with the www rule taken" test -s "$www_snap"
+check "rollback to the empty first snapshot" run ok rollback "$first_snap" --allow-dns
+: >"$work/mockcf.drop-put"
+: >"$out"
+check "redirect rollback: read-back fails -> non-zero" run fail rollback "$www_snap" --allow-dns
+check "redirect rollback: says the restore is not confirmed" grep -qF 'Redirect Rules restore not confirmed' "$out"
+rm -f "$work/mockcf.drop-put"
 
 # --- secrets -----------------------------------------------------------------------------
 check "token absent from all output" token_not_in "$out"

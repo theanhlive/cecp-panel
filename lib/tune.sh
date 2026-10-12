@@ -187,6 +187,24 @@ tune_mariadb_config_check() {
   "$bin" --help --verbose >/dev/null
 }
 
+# Config test of every installed PHP-FPM binary (system, Debian php-fpmX.Y, Remi). The FPM test
+# parses php.ini and the conf.d/mods ini files, so a bad restored ini is caught before a reload.
+tune_php_config_check() {
+  local bin real rc=0 out tested=" "
+  for bin in "$(command -v php-fpm 2>/dev/null || true)" /usr/sbin/php-fpm /usr/sbin/php-fpm[0-9]* \
+             /opt/remi/php*/root/usr/sbin/php-fpm; do
+    [[ -n "$bin" && -x "$bin" ]] || continue
+    real="$(readlink -f -- "$bin" 2>/dev/null || echo "$bin")"
+    [[ "$tested" == *" $real "* ]] && continue
+    tested+="$real "
+    if ! out="$("$bin" -t 2>&1)"; then
+      printf '%s: %s\n' "$bin" "$out"
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
 tune_mariadb_restart() {
   systemctl restart mariadb 2>/dev/null || systemctl restart mysql 2>/dev/null
 }
@@ -201,8 +219,8 @@ tune_rollback_abort() {
   if [[ "$nginx" == "1" ]] && nginx -t 2>/dev/null; then
     systemctl reload nginx 2>/dev/null || true
   fi
-  if [[ "$php" == "1" ]]; then
-    php_fpm_reload_all || true
+  if [[ "$php" == "1" ]] && ! php_fpm_reload_all_strict; then
+    panel_log "CẢNH BÁO: PHP-FPM vẫn chưa nạp lại được — kiểm tra: journalctl -u php-fpm"
   fi
   if [[ "$mariadb" == "1" ]] && ! tune_mariadb_restart; then
     panel_log "CẢNH BÁO: MariaDB vẫn chưa khởi động được — kiểm tra: journalctl -u mariadb"
@@ -262,12 +280,15 @@ tune_rollback() {
   if (( mariadb )) && ! err="$(tune_mariadb_config_check 2>&1)"; then
     tune_rollback_abort "$pre" "MariaDB không chấp nhận cấu hình của bản sao $id" "$err" 0 0 0
   fi
+  if (( php )) && ! err="$(tune_php_config_check 2>&1)"; then
+    tune_rollback_abort "$pre" "PHP-FPM báo lỗi cấu hình với bản sao $id" "$err" 0 0 0
+  fi
   if (( nginx )); then
     systemctl reload nginx
     nginx_save_known_good
   fi
-  if (( php )); then
-    php_fpm_reload_all || true
+  if (( php )) && ! err="$(php_fpm_reload_all_strict 2>&1)"; then
+    tune_rollback_abort "$pre" "PHP-FPM không nạp lại được với cấu hình của bản sao $id" "$err" "$nginx" 1 0
   fi
   if (( mariadb )) && ! tune_mariadb_restart; then
     tune_rollback_abort "$pre" "MariaDB không khởi động lại được với cấu hình của bản sao $id" "" "$nginx" "$php" 1

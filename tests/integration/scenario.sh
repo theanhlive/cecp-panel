@@ -147,6 +147,19 @@ check "rollback took an undo snapshot first" bash -c "ls -d $TB/*-rollback >/dev
 check "nginx config valid after rollback" nginx -t
 check "site still serves WordPress after rollback" serves_wp
 check "rollback rejects an invalid id" bash -c "! cecp-panel optimize rollback '../../etc' && ! cecp-panel optimize rollback 20990101T000000.000Z-nope"
+# The nginx snapshot covers every file ensure_nginx_global can create or remove: a file the
+# command creates must disappear again on rollback, a legacy file it removes must come back.
+rm -f /etc/nginx/conf.d/cecp-cloudflare-realip.conf
+printf '# legacy\n' >/etc/nginx/conf.d/cecp-global.conf
+check "optimize nginx creates the real-IP file and removes the legacy global config" \
+  bash -c "cecp-panel optimize nginx && [ -f /etc/nginx/conf.d/cecp-cloudflare-realip.conf ] && [ ! -e /etc/nginx/conf.d/cecp-global.conf ]"
+check "nginx snapshot records the created file as absent" \
+  bash -c "grep -q \$'^absent\t.*/etc/nginx/conf.d/cecp-cloudflare-realip.conf\$' $TB/\$(ls $TB | grep -- '-nginx\$' | tail -1)/MANIFEST"
+check "rollback after optimize nginx removes the file the command created" \
+  bash -c "cecp-panel optimize rollback latest && [ ! -e /etc/nginx/conf.d/cecp-cloudflare-realip.conf ] && grep -q legacy /etc/nginx/conf.d/cecp-global.conf"
+rm -f /etc/nginx/conf.d/cecp-global.conf
+check "optimize nginx re-applies after the rollback" cecp-panel optimize nginx
+check "nginx config valid after the nginx rollback round-trip" nginx -t
 # The first kernel snapshot was taken on a fresh box: its files were "absent" → rollback removes them.
 FIRST_KERNEL="$(find $TB -mindepth 1 -maxdepth 1 -type d -name '*-kernel' -printf '%f\n' | sort | head -1)"
 check "rollback removes files that did not exist before (MANIFEST absent)" \
@@ -531,6 +544,11 @@ GOOD="$(cut -d' ' -f1 /tmp/mirror/dist/SHA256SUMS)"
 rm -f /tmp/mirror/dist/SHA256SUMS
 check "missing SHA256SUMS is refused" bash -c "cecp-panel update panel 2>&1 | grep -q 'refusing an unverified update'"
 check "pinned --sha256 works" cecp-panel update panel "$VERSION" --sha256 "$GOOD"
+# "latest" is a download alias: panel.json must record the version the bundle really contains.
+cp "/tmp/mirror/dist/cecp-panel-${VERSION}.tar.gz" /tmp/mirror/dist/cecp-panel-latest.tar.gz
+(cd /tmp/mirror/dist && sha256sum "cecp-panel-${VERSION}.tar.gz" cecp-panel-latest.tar.gz >SHA256SUMS)
+check "update panel latest records the installed version, not 'latest'" \
+  bash -c "cecp-panel update panel latest && grep -qF '\"version\": \"$VERSION\"' /etc/cecp-panel/panel.json && ! grep -q '\"version\": \"latest\"' /etc/cecp-panel/panel.json"
 
 echo "=== Update everything (update all) ==="
 set_meta() { bash -c "source /opt/cecp-panel/lib/common.sh; site_json_set $1 $2 '$3'"; }
@@ -760,6 +778,28 @@ check "allow_putenv=on makes the probe pass again" \
   bash -c "cecp-panel php config $D allow_putenv=on >/dev/null && sleep 2 && cecp-panel site probe $D"
 rm -f "$PUTENV_STUB"
 cecp-panel php config "$D" --reset allow_putenv >/dev/null 2>&1 || true
+
+echo "=== theme file owned by nginx, mode 650 (permission incident) ==="
+PERM_DIR="$DOCROOT/wp-content/themes/cecp-perm-test"
+PERM_FILE="$PERM_DIR/functions.php"
+PERM_STUB="$DOCROOT/wp-content/mu-plugins/cecp-perm-stub.php"
+runuser -u "$SU" -- mkdir -p "$PERM_DIR" "$DOCROOT/wp-content/mu-plugins"
+printf '<?php\n' | runuser -u "$SU" -- tee "$PERM_FILE" >/dev/null
+printf '<?php\nrequire_once WP_CONTENT_DIR . "/themes/cecp-perm-test/functions.php";\n' | runuser -u "$SU" -- tee "$PERM_STUB" >/dev/null
+chown nginx:nginx "$PERM_FILE"
+chmod 650 "$PERM_FILE"
+settle
+check "security check FAILs on a PHP file the pool user cannot read" \
+  bash -c "cecp-panel security check 2>&1 | grep -E 'FAIL' | grep -q 'unreadable by the pool user'"
+check "security check names the file, owner and mode" \
+  bash -c "cecp-panel security check 2>&1 | grep -F '$PERM_FILE' | grep -q 'nginx:nginx mode 650'"
+check "probe FAILs (exit 2) on the permission error" probe_fails
+check "probe prints the chown remedy, not allow_putenv" \
+  bash -c "out=\$(cecp-panel site probe $D 2>&1); grep -q 'chown $SU:$SU $PERM_FILE' <<<\"\$out\" && ! grep -q allow_putenv <<<\"\$out\""
+check "probe did not change the file's owner" bash -c "[ \"\$(stat -c %U:%G:%a $PERM_FILE)\" = nginx:nginx:650 ]"
+rm -f "$PERM_STUB" "$PERM_FILE"
+rm -rf "$PERM_DIR"
+check "site probe passes again once the file is gone" bash -c "sleep 1; cecp-panel site probe $D"
 
 echo "=== Per-site resource limits (own PHP-FPM) ==="
 check "site limits --cpu 50 --mem 768M --tasks 128" cecp-panel site limits "$D" --cpu 50 --mem 768M --tasks 128

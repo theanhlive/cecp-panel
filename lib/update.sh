@@ -149,7 +149,13 @@ update_panel() {
   if [[ -f "$INSTALL_ROOT/templates/cecp-panel.bash-completion" ]]; then
     install -D -m 0644 "$INSTALL_ROOT/templates/cecp-panel.bash-completion" /etc/bash_completion.d/cecp-panel 2>/dev/null || true
   fi
-  python3 - "$ETC_DIR/panel.json" "$ver" "$bak" "$actual" <<'PY'
+  # "latest" is a download alias, not a version: record what the bundle actually contains.
+  local installed_ver="$ver"
+  if [[ "$ver" == "latest" ]]; then
+    installed_ver="$(grep -m1 -oE '^CECP_PANEL_VERSION="\$\{CECP_PANEL_VERSION:-[0-9][^}"]*' "$tmp/cecp-panel/lib/common.sh" | sed 's/.*:-//' || true)"
+    [[ "$installed_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?$ ]] || installed_ver="$ver"
+  fi
+  python3 - "$ETC_DIR/panel.json" "$installed_ver" "$bak" "$actual" <<'PY'
 import json, os, sys
 from datetime import datetime, timezone
 p, ver, bak, sha = sys.argv[1:5]

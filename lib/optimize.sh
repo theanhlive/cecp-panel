@@ -69,7 +69,13 @@ EOF
 
 optimize_nginx_global() {
   require_root
-  tune_backup nginx /etc/nginx/nginx.conf /etc/nginx/conf.d/cecp-perf.conf
+  # Everything ensure_nginx_global / nginx_default_ssl_install can create, replace or remove,
+  # plus the two files this function rewrites itself (absent ones are recorded as absent).
+  tune_backup nginx /etc/nginx/nginx.conf /etc/nginx/conf.d/cecp-perf.conf \
+    /etc/nginx/conf.d/00-cecp-global.conf /etc/nginx/conf.d/cecp-global.conf \
+    /etc/nginx/snippets/cecp-headers.conf /etc/nginx/snippets/cecp-headers-noindex.conf \
+    /etc/nginx/snippets/cecp-ssl-params.conf /etc/nginx/conf.d/cecp-cloudflare-realip.conf \
+    /etc/nginx/conf.d/00-cecp-default-ssl.conf
   ensure_nginx_global
   # http-context tuning via conf.d. Never repeat directives the distro nginx.conf already sets
   # (keepalive_timeout, sendfile, gzip on Ubuntu) — nginx -t rejects duplicates.
@@ -491,8 +497,10 @@ EOF
     [[ -d $d ]] || continue
     targets+=("${d}/cecp-opcache.ini")
   done
+  local snap=""
   if (( ${#targets[@]} > 0 )); then
     tune_backup opcache "${targets[@]}"
+    snap="$TUNE_LAST_SNAPSHOT"
   fi
   # Alma system + Remi
   for d in /etc/php.d /etc/opt/remi/php*/php.d; do
@@ -516,12 +524,17 @@ EOF
     panel_log "OPcache/JIT -> $f"
   done
   [[ "$written" == "1" ]] || panel_log "WARN: no php.d found; pool-level opcache values still apply"
-  php_fpm_reload || true
-  # reload remi fpm services
-  systemctl list-units 'php*-php-fpm*' --type=service --state=running --no-legend 2>/dev/null \
-    | awk '{print $1}' | while read -r svc; do
-      systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
-    done
+  # Validate every PHP-FPM config BEFORE the reload; a bad ini or a failed reload puts the
+  # snapshot back and ends non-zero instead of leaving PHP down with a "success" message.
+  local err=""
+  if ! err="$(tune_php_config_check 2>&1)" || ! err="$(php_fpm_reload_all_strict 2>&1)"; then
+    [[ -n "$err" ]] && printf '%s\n' "$err" | sed 's/^/    /' >&2
+    panel_log "LỖI: PHP-FPM không nhận cấu hình OPcache mới — khôi phục bản sao ${snap##*/} ..."
+    [[ -n "$snap" ]] && tune_restore_files "$snap"
+    php_fpm_reload_all_strict >/dev/null 2>&1 \
+      || panel_log "CẢNH BÁO: PHP-FPM vẫn chưa nạp lại được — kiểm tra: journalctl -u php-fpm"
+    panel_die "Tối ưu OPcache thất bại, đã trả lại cấu hình PHP cũ"
+  fi
   panel_log "OPcache memory=${mem}M, JIT off by default (unstable under PHP 8.0; enable manually per version after testing)"
 }
 

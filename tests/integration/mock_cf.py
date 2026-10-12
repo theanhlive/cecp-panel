@@ -7,7 +7,9 @@ gives the scenario time to scan /proc/*/cmdline for leaked tokens while curl is 
 
 Stateful bits: the http_request_cache_settings and http_request_dynamic_redirect entrypoint
 rulesets (GET/PUT, 10003 when they do not exist yet). Touch /tmp/mockcf.fail-rulesets to make ruleset reads fail with an
-authentication error.
+authentication error. In MOCKCF_CTL (default /tmp): mockcf.dns-fail-once makes the next DNS GET
+fail once; mockcf.reject-put makes every ruleset PUT answer success:false, code 10003;
+mockcf.drop-put makes every ruleset PUT answer success:true but store no rule.
 
 FIXTURES_JSON (optional): {"<path suffix>": <response>} — a GET whose path (without the query)
 ends with a suffix gets that response instead of the defaults.
@@ -24,6 +26,7 @@ FIXTURES = {}
 if len(sys.argv) > 4:
     with open(sys.argv[4], encoding="utf-8") as fx:
         FIXTURES = json.load(fx)
+CTL = os.environ.get("MOCKCF_CTL", "/tmp")  # control files: mockcf.dns-fail-once, mockcf.reject-put
 RULESET = None
 REDIRECT = None
 NEXT_ID = [1]
@@ -50,6 +53,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         global RULESET, REDIRECT
         route = self.path.split("?", 1)[0]
+        once = os.path.join(CTL, "mockcf.dns-fail-once")
+        if "/dns_records" in route and os.path.exists(once):
+            os.unlink(once)
+            self._reply({"success": False, "errors": [{"code": 9109, "message": "transient DNS read failure"}]})
+            return
         fixture = next((v for k, v in FIXTURES.items() if route.endswith(k)), None)
         if fixture is not None:
             self._reply(fixture)
@@ -75,13 +83,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         global RULESET, REDIRECT
         raw, data = self._body()
-        if self.path.endswith("/rulesets/phases/http_request_dynamic_redirect/entrypoint"):
+        # mockcf.drop-put: a ruleset PUT answers success:true but stores no rule (the read-back must catch it).
+        dropped = "/rulesets/phases/" in self.path and os.path.exists(os.path.join(CTL, "mockcf.drop-put"))
+        if "/rulesets/phases/" in self.path and os.path.exists(os.path.join(CTL, "mockcf.reject-put")):
+            # A rejected write that answers 10003 ("no entrypoint"): must never count as success.
+            self._reply({"success": False, "errors": [{"code": 10003, "message": "could not find entrypoint ruleset"}]}, raw)
+        elif self.path.endswith("/rulesets/phases/http_request_dynamic_redirect/entrypoint"):
             rules = []
             for r in data.get("rules", []):
                 if "id" not in r:
                     r = dict(r, id=f"rule{NEXT_ID[0]}")
                     NEXT_ID[0] += 1
                 rules.append(r)
+            if dropped:
+                rules = []
             REDIRECT = {"id": "rs2", "phase": "http_request_dynamic_redirect", "rules": rules}
             self._reply({"success": True, "result": REDIRECT}, raw)
         elif self.path.endswith("/rulesets/phases/http_request_cache_settings/entrypoint"):
@@ -91,6 +106,8 @@ class Handler(BaseHTTPRequestHandler):
                     r = dict(r, id=f"rule{NEXT_ID[0]}")
                     NEXT_ID[0] += 1
                 rules.append(r)
+            if dropped:
+                rules = []
             RULESET = {"id": "rs1", "phase": "http_request_cache_settings", "rules": rules}
             self._reply({"success": True, "result": RULESET}, raw)
         else:

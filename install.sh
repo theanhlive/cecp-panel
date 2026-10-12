@@ -10,7 +10,7 @@
 #   ssh -i ~/.ssh/KEY root@VPS_IP 'bash -s' < install.sh
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.13.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.13.1-beta}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/cecp-panel}"
 ETC_DIR="/etc/cecp-panel"
 VAR_LIB="/var/lib/cecp-panel"

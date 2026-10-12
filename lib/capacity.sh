@@ -4,8 +4,8 @@
 #   cecp-panel optimize audit DOMAIN [--json]  — HTTPS, caching, bypass, OPcache, Redis, Cloudflare
 # Nothing here writes config, reloads/restarts a service or purges a cache. The audit's two
 # page-cache probes use a unique query string, so they add one cache entry (like any visitor).
-# The one documented exception to "read-only": the audit's `wp redis status` loads WordPress as
-# the site user (wp-cli reads the database and the object-cache drop-in; it writes nothing).
+# The audit is fully read-only, with no exception: it never bootstraps WordPress (a plugin could write
+# the database on load), so the Redis check is the drop-in file plus a bounded `redis-cli ping`.
 set -euo pipefail
 
 # Parallel dynamic requests one vCPU serves in the throughput estimate: a PHP request is part
@@ -359,6 +359,11 @@ capacity_bypass_eval() {
     echo "WARN|không có phản hồi"
     return 0
   fi
+  # HTTP health first: a 5xx is a failure even when the cache header says BYPASS (or is absent).
+  if [[ "$st" =~ ^5[0-9]{2}$ ]]; then
+    echo "FAIL|HTTP $st — PHP trả lỗi máy chủ (cache ${cs:-không có}); cecp-panel site probe"
+    return 0
+  fi
   case "$cs" in
     "") echo "PASS|HTTP $st, không qua cache" ;;
     BYPASS) echo "PASS|HTTP $st, cache BYPASS" ;;
@@ -454,34 +459,27 @@ capacity_opcache() {
   esac
 }
 
-# Level|detail for the Redis object cache of a WordPress site (wp redis status as the site user).
+# Level|detail for the Redis object cache of a WordPress site. Read-only: WordPress is never
+# bootstrapped (a plugin could write the database on load), so this is the drop-in file plus a
+# bounded `redis-cli ping` on the configured host/port. The password is never needed: an answer of
+# PONG or NOAUTH both prove the server is reachable.
 capacity_redis() {
-  local domain="$1" docroot="$2" site_user="$3" out line
+  local domain="$1" docroot="$2" host port reply
   if [[ ! -f "$docroot/wp-content/object-cache.php" ]]; then
     echo "WARN|chưa bật Redis object cache — cecp-panel optimize redis-wp $domain"
     return 0
   fi
-  if [[ ! -x "$WP_CLI_BIN" ]]; then
-    echo "WARN|có drop-in object-cache.php nhưng không có wp-cli để kiểm tra"
+  if ! command -v redis-cli >/dev/null 2>&1; then
+    echo "WARN|có drop-in object-cache.php nhưng không có redis-cli để kiểm tra — chưa xác minh end-to-end (audit không nạp WordPress)"
     return 0
   fi
-  local -a wp=(runuser -u "$site_user" -- php -d memory_limit=512M "$WP_CLI_BIN" --path="$docroot")
-  # `wp redis` exists only while the redis-cache plugin is loaded, so --skip-plugins is used only for
-  # the activation check (plugin commands work without loading the plugins). Themes are never needed.
-  if ! (cd / && timeout 40 "${wp[@]}" --skip-plugins --skip-themes plugin is-active redis-cache >/dev/null 2>&1); then
-    echo "WARN|wp redis status không trả kết quả (plugin redis-cache chưa kích hoạt?)"
-    return 0
-  fi
-  out="$(cd / && timeout 40 "${wp[@]}" --skip-themes redis status 2>/dev/null || true)"
-  line="$(grep -iE '^status:' <<<"$out" | head -n 1 || true)"
-  line="${line#*:}"
-  line="${line# }"
-  if [[ -z "$line" ]]; then
-    echo "WARN|wp redis status không trả kết quả (plugin redis-cache chưa kích hoạt?)"
-  elif [[ "${line,,}" == connected* ]]; then
-    echo "PASS|Redis object cache: $line"
+  host="$(sed -nE 's/^REDIS_HOST=([A-Za-z0-9._-]+)$//p' "$ETC_DIR/redis.env" 2>/dev/null | head -n 1 || true)"
+  port="$(sed -nE 's/^REDIS_PORT=([0-9]+)$//p' "$ETC_DIR/redis.env" 2>/dev/null | head -n 1 || true)"
+  reply="$(timeout 2 redis-cli -h "${host:-127.0.0.1}" -p "${port:-6379}" ping 2>&1 || true)"
+  if [[ "$reply" == PONG* || "$reply" == *NOAUTH* ]]; then
+    echo "PASS|có drop-in object-cache.php và Redis ${host:-127.0.0.1}:${port:-6379} trả lời — chưa xác minh end-to-end (audit không nạp WordPress)"
   else
-    echo "FAIL|có drop-in object-cache.php nhưng Redis: $line — cecp-panel optimize redis-wp $domain"
+    echo "FAIL|có drop-in object-cache.php nhưng Redis ${host:-127.0.0.1}:${port:-6379} không trả lời (${reply:-hết thời gian 2 s}) — cecp-panel optimize redis-wp $domain"
   fi
 }
 

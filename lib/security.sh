@@ -520,18 +520,43 @@ security_self_check() {
     if [[ -S "$sock" && "$(stat -c %U "$sock")" != "nginx" ]] && id nginx &>/dev/null; then
       _ck FAIL "$dom: PHP-FPM socket owned by $(stat -c %U:%G "$sock") — nginx gets 502 (run: systemctl restart php-fpm)"
     fi
-    local fatals fnames fn
-    fatals="$(tail -n 20000 "/var/log/nginx/${dom}-error.log" 2>/dev/null       | awk -v since="$(date -d '24 hours ago' '+%Y/%m/%d %H:%M:%S' 2>/dev/null || true)"         'since == "" || $1 " " $2 >= since' | grep -c 'PHP Fatal error' || true)"
-    if (( ${fatals:-0} == 0 )); then
-      _ck PASS "$dom: no PHP fatals in the last 24 h"
+    local fatals fnames fn nlog="${PROBE_NGINX_LOG_DIR:-/var/log/nginx}/${dom}-error.log"
+    if [[ ! -r "$nlog" ]]; then
+      _ck WARN "$dom: PHP fatal check skipped — nginx error log missing/unreadable ($nlog)"
     else
-      fnames="$(probe_log_names "$dom" 2>/dev/null | tr '
+      fatals="$(tail -n 20000 "$nlog" 2>/dev/null         | awk -v since="$(date -d '24 hours ago' '+%Y/%m/%d %H:%M:%S' 2>/dev/null || true)"           'since == "" || $1 " " $2 >= since' | grep -c 'PHP Fatal error' || true)"
+      if (( ${fatals:-0} == 0 )); then
+        _ck PASS "$dom: no PHP fatals in the last 24 h"
+      else
+        fnames="$(probe_log_names "$(tail -n 2000 "$nlog" 2>/dev/null || true)" 2>/dev/null | tr '
 ' ' ')"
-      _ck WARN "$dom: ${fatals} PHP fatal error(s) in the last 24 h (cecp-panel log nginx $dom)"
-      for fn in $fnames; do probe_remedy "$dom" "$fn"; done
+        _ck WARN "$dom: ${fatals} PHP fatal error(s) in the last 24 h (cecp-panel log nginx $dom)"
+        for fn in $fnames; do probe_remedy "$dom" "$fn"; done
+      fi
     fi
-    local docroot wpcfg
+    local docroot wpcfg pool_user unreadable=() pf n_test=0 n_bad=0 shown=0
     docroot="$(site_json_get_or "$dom" docroot "")"
+    pool_user="$(site_json_get_or "$dom" site_user "")"
+    if [[ -n "$docroot" && -d "$docroot" && -n "$pool_user" ]] && id "$pool_user" &>/dev/null; then
+      while IFS= read -r pf; do
+        [[ -n "$pf" ]] || continue
+        (( n_test < 200 )) || break
+        n_test=$((n_test + 1))
+        runuser -u "$pool_user" -- test -r "$pf" 2>/dev/null || unreadable+=("$pf")
+      done < <(find "$docroot" -type f -name '*.php' ! -user "$pool_user" -print 2>/dev/null | head -n 500 || true)
+      n_bad=${#unreadable[@]}
+      if (( n_bad == 0 )); then
+        _ck PASS "$dom: every PHP file is readable by the pool user ($pool_user)"
+      else
+        _ck FAIL "$dom: ${n_bad} PHP file(s) unreadable by the pool user $pool_user — PHP answers 500 on uncached pages (fix: chown $pool_user:$pool_user <file>  or  cecp-panel security harden-docroot $dom)"
+        for pf in "${unreadable[@]}"; do
+          (( shown < 10 )) || break
+          shown=$((shown + 1))
+          echo "        $pf  owner $(stat -c '%U:%G' "$pf" 2>/dev/null || echo '?') mode $(stat -c %a "$pf" 2>/dev/null || echo '?') pool user $pool_user"
+        done
+        (( n_bad <= 10 )) || echo "        ... and $((n_bad - 10)) more"
+      fi
+    fi
     wpcfg="${docroot}/wp-config.php"
     if [[ -f "$wpcfg" ]]; then
       if (( (8#$(stat -c %a "$wpcfg" 2>/dev/null || echo 644) & 8#004) != 0 )); then

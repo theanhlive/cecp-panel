@@ -381,10 +381,36 @@ def cmd_setting(path):
     print((d.get("result") or {}).get("value", "?"))
 
 
-def cmd_entrypoint_ok(path):
+def cmd_entrypoint_ok(path, mode="write"):
+    # "no entrypoint" (10003) only means "no ruleset yet" for a GET; a PUT/PATCH/POST answering it
+    # was rejected, whatever the code says.
     d = load(path)
-    if not (ok(d) or no_entrypoint(d)):
-        sys.exit(errs(d))
+    if ok(d):
+        return
+    if mode == "read" and no_entrypoint(d):
+        return
+    sys.exit(errs(d))
+
+
+def cmd_snap_has(path, field):
+    # A snapshot field is usable only when it was actually read (a list / an object, not null).
+    v = load(path).get(field)
+    sys.exit(0 if isinstance(v, (list, dict)) else 1)
+
+
+def cmd_rules_equal(path, wanted):
+    # Read-back check: the live ruleset holds exactly the rules a restore PUT intended.
+    d = load(path)
+    want = [norm_rule(r) for r in (json.loads(wanted).get("rules") or [])]
+    have = [norm_rule(r) for r in rules_of(d)]
+    if not ok(d) or want != have:
+        sys.exit("read-back does not show the intended rules")
+
+
+def cmd_rule_present(path, desc):
+    # Read-back check: a rule with this description is live after the write.
+    if not any(r.get("description") == desc for r in rules_of(load(path))):
+        sys.exit("read-back does not show the rule '" + desc + "'")
 
 
 def cmd_rules_summary(path, domain):
@@ -426,7 +452,7 @@ def cmd_dns_find(path, name):
             print(f"{r.get('id')}\t{r.get('type')}\t{str(bool(r.get('proxied'))).lower()}")
 
 
-def cmd_rollback_plan(snap_path, spath, cpath, dpath, rpath=""):
+def cmd_rollback_plan(snap_path, spath, cpath, dpath, rpath="", allow_dns="0"):
     snap = load(snap_path)
     if snap.get("tool") != "cf-agent":
         sys.exit("not a cf-agent snapshot")
@@ -452,8 +478,12 @@ def cmd_rollback_plan(snap_path, spath, cpath, dpath, rpath=""):
         if want != have:
             print("REDIRECT\t" + json.dumps({"rules": want}, separators=(",", ":")))
     saved = snap.get("dns_records")
-    if saved is not None:
-        cur = {r.get("id"): r for r in web_records(load(dpath))}
+    # DNS is compared only with --allow-dns; without it an unreadable DNS read must not block the rest.
+    if saved is not None and allow_dns == "1":
+        dn = load(dpath)
+        if not ok(dn):
+            sys.exit("cannot read current DNS records (" + errs(dn) + ") — --allow-dns needs them")
+        cur = {r.get("id"): r for r in web_records(dn)}
         for r in saved:
             now = cur.get(r.get("id"))
             if now is not None and bool(now.get("proxied")) != bool(r.get("proxied")):
@@ -467,6 +497,7 @@ cmd, args = sys.argv[1], sys.argv[2:]
     "entrypoint-ok": cmd_entrypoint_ok, "rules-summary": cmd_rules_summary, "rules-body": cmd_rules_body,
     "value-body": cmd_value_body, "dns-find": cmd_dns_find, "rollback-plan": cmd_rollback_plan,
     "redirect-body": cmd_redirect_body, "redirect-summary": cmd_redirect_summary,
+    "snap-has": cmd_snap_has, "rules-equal": cmd_rules_equal, "rule-present": cmd_rule_present,
 }[cmd](*args)
 PY
 }
@@ -588,13 +619,17 @@ put_cache_rule() {  # ZID DOMAIN html|static TTL
   local zid="$1" domain="$2" which="$3" ttl="$4" err before after
   api GET "/zones/${zid}/${CACHE_EP}" "$TMPD/cache.json"
   # The PUT replaces the whole ruleset: build only on a readable one (or "none yet", 10003).
-  err="$(py entrypoint-ok "$TMPD/cache.json" 2>&1)" \
+  err="$(py entrypoint-ok "$TMPD/cache.json" read 2>&1)" \
     || die "cannot read Cache Rules: $err — token needs Cache Rules Read/Edit"
   before="$(py rules-summary "$TMPD/cache.json" "$domain")"
   api PUT "/zones/${zid}/${CACHE_EP}" "$TMPD/put.json" "$(py rules-body "$TMPD/cache.json" "$domain" "$which" "$ttl")"
   err="$(py entrypoint-ok "$TMPD/put.json" 2>&1)" \
     || die "Cloudflare rejected the cache rule: $err — token needs Cache Rules Edit"
   api GET "/zones/${zid}/${CACHE_EP}" "$TMPD/cache.json"
+  local desc="cecp-panel: ${domain}"
+  [[ "$which" == static ]] && desc="cf-agent static: ${domain}"
+  err="$(py rule-present "$TMPD/cache.json" "$desc" 2>&1)" \
+    || die "Cloudflare accepted the cache rule but the read-back does not show it: $err"
   after="$(py rules-summary "$TMPD/cache.json" "$domain")"
   echo "  cache rules: ${before} -> ${after}"
 }
@@ -603,13 +638,15 @@ put_www_redirect() {  # ZID ZONE
   local zid="$1" zone="$2" err before after
   api GET "/zones/${zid}/${REDIRECT_EP}" "$TMPD/redir.json"
   # The PUT replaces the whole ruleset: build only on a readable one (or "none yet", 10003).
-  err="$(py entrypoint-ok "$TMPD/redir.json" 2>&1)" \
+  err="$(py entrypoint-ok "$TMPD/redir.json" read 2>&1)" \
     || die "cannot read Redirect Rules: $err — token needs Zone > Dynamic URL Redirects: Edit"
   before="$(py redirect-summary "$TMPD/redir.json" "$zone")"
   api PUT "/zones/${zid}/${REDIRECT_EP}" "$TMPD/put.json" "$(py redirect-body "$TMPD/redir.json" "$zone")"
   err="$(py entrypoint-ok "$TMPD/put.json" 2>&1)" \
     || die "Cloudflare rejected the redirect rule: $err — token needs Zone > Dynamic URL Redirects: Edit"
   api GET "/zones/${zid}/${REDIRECT_EP}" "$TMPD/redir.json"
+  err="$(py rule-present "$TMPD/redir.json" "cf-agent: www.${zone} -> ${zone}" 2>&1)" \
+    || die "Cloudflare accepted the redirect rule but the read-back does not show it: $err"
   after="$(py redirect-summary "$TMPD/redir.json" "$zone")"
   echo "  redirect rules: ${before} -> ${after}"
 }
@@ -685,6 +722,19 @@ cmd_apply() {
   [[ -n "$zid" ]] || die "zone not found for $domain"
   snap="$(take_snapshot "$domain" "$zid" "$zone")"
   echo "snapshot: $snap   (undo: tools/cf-agent.sh rollback $snap)"
+  # A rollback can only undo what the snapshot captured: never write what was not read.
+  if [[ -n "$proxy_name" || "$www" == 1 ]]; then
+    py snap-has "$snap" dns_records \
+      || die "refused: the DNS records could not be read for the snapshot, so a DNS change could not be rolled back — nothing was changed; retry"
+  fi
+  if [[ "$www" == 1 ]]; then
+    py snap-has "$snap" redirect_rules \
+      || die "refused: the Redirect Rules could not be read for the snapshot — nothing was changed; retry"
+  fi
+  if [[ "$static" == 1 || "$html" == 1 ]]; then
+    py snap-has "$snap" cache_rules \
+      || die "refused: the Cache Rules could not be read for the snapshot — nothing was changed; retry"
+  fi
   CF_WRITE_OK=1
   echo "apply on zone $zone for $domain:"
   if [[ "$ssl" == 1 ]]; then
@@ -721,19 +771,26 @@ cmd_rollback() {
   zone="$(py snap-field "$file" zone)"
   validate_domain "$domain"
   [[ "$zid" =~ ^[A-Za-z0-9]+$ ]] || die "snapshot has no valid zone id"
+  if [[ "$allow_dns" == 1 ]]; then
+    py snap-has "$file" dns_records \
+      || die "refused: this snapshot has no readable DNS records, so --allow-dns has nothing to restore from — nothing was changed"
+  fi
   load_token
   local pre
   pre="$(take_snapshot "$domain" "$zid" "$zone")"
   echo "snapshot of the current state: $pre"
   local plan
-  plan="$(py rollback-plan "$file" "$TMPD/settings.json" "$TMPD/cache.json" "$TMPD/dns.json" "$TMPD/redir.json" 2>&1)" \
-    || die "rollback plan failed: $plan"
+  plan="$(py rollback-plan "$file" "$TMPD/settings.json" "$TMPD/cache.json" "$TMPD/dns.json" "$TMPD/redir.json" "$allow_dns" 2>&1)" \
+    || die "rollback plan failed: $plan — nothing was changed"
+  if [[ "$allow_dns" != 1 ]]; then
+    echo "  DNS not compared (unreadable or --allow-dns not given)"
+  fi
   if [[ -z "$plan" ]]; then
     echo "nothing to roll back: the zone already matches $file"
     return 0
   fi
   CF_WRITE_OK=1
-  local kind a b c err skipped=0
+  local kind a b c err
   while IFS=$'\t' read -r kind a b c; do
     case "$kind" in
       SETTING)
@@ -743,17 +800,16 @@ cmd_rollback() {
       REDIRECT)
         api PUT "/zones/${zid}/${REDIRECT_EP}" "$TMPD/r.json" "$a"
         err="$(py entrypoint-ok "$TMPD/r.json" 2>&1)" || die "Cloudflare rejected the Redirect Rules restore: $err"
+        api GET "/zones/${zid}/${REDIRECT_EP}" "$TMPD/rb.json"
+        err="$(py rules-equal "$TMPD/rb.json" "$a" 2>&1)" || die "Redirect Rules restore not confirmed: $err"
         echo "  redirect rules restored" ;;
       RULES)
         api PUT "/zones/${zid}/${CACHE_EP}" "$TMPD/r.json" "$a"
         err="$(py entrypoint-ok "$TMPD/r.json" 2>&1)" || die "Cloudflare rejected the Cache Rules restore: $err"
+        api GET "/zones/${zid}/${CACHE_EP}" "$TMPD/rb.json"
+        err="$(py rules-equal "$TMPD/rb.json" "$a" 2>&1)" || die "Cache Rules restore not confirmed: $err"
         echo "  cache rules restored" ;;
       DNS)
-        if [[ "$allow_dns" != 1 ]]; then
-          echo "  SKIPPED dns ${b}: proxy state differs from the snapshot (pass --allow-dns to restore)"
-          skipped=1
-          continue
-        fi
         api PATCH "/zones/${zid}/dns_records/${a}" "$TMPD/r.json" "$c"
         py entrypoint-ok "$TMPD/r.json" >/dev/null 2>&1 || die "Cloudflare rejected the DNS restore for $b"
         echo "  dns ${b} -> ${c}" ;;
@@ -761,7 +817,6 @@ cmd_rollback() {
   done <<<"$plan"
   CF_WRITE_OK=0
   echo "rollback done from $file"
-  [[ "$skipped" == 0 ]] || echo "note: DNS differences were left untouched"
 }
 
 main() {

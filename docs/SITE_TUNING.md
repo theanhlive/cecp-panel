@@ -96,6 +96,8 @@ cecp-panel optimize audit "$D"
 
 Chạy lại monitor ngắn nếu cần xác nhận hồi phục.
 
+Lưu ý `optimize rollback` và `optimize opcache`: trước khi reload, lệnh chạy `php-fpm -t` trên **mọi** binary FPM đã cài (không chỉ phiên bản của site). Lỗi cấu hình ở bất kỳ phiên bản PHP nào, kể cả phiên bản không liên quan tới file được khôi phục, đều chặn thao tác — theo thiết kế. Sửa lỗi đó rồi chạy lại.
+
 ### 1.6 Probe trang không cache — **bắt buộc** sau mỗi lần nâng cấp panel và mỗi lần cập nhật WordPress/plugin
 
 Trang chủ thường đến từ page cache, nên kiểm tra "trang chủ trả 200" **không** chứng minh site còn chạy.
@@ -151,17 +153,19 @@ Audit chỉ chạy các kiểm tra bypass **sau khi** trang chủ đã vào cach
 
 | Kiểm tra | PASS | FAIL → rollback + báo chủ VPS | INCONCLUSIVE (exit 3, không bao giờ là PASS) |
 |---|---|---|---|
-| OOM | Không có dòng OOM | OOM killer: `Out of memory`, `oom-kill`, `oomd`, `Killed process` (`journalctl -k`) | `OOM check unavailable` = journald không dùng được (journalctl thiếu hoặc lỗi, exit ≠ 0 và ≠ 1) — **không** có nghĩa là "không có OOM". Không có dòng nào khớp (journalctl exit 1) là bình thường, vẫn PASS. |
+| OOM | Không có dòng OOM | OOM killer: `Out of memory`, `oom-kill`, `oomd`, `Killed process` (`journalctl -k`) | `OOM check unavailable` = journald không dùng được: journalctl thiếu, timeout, exit ≥ 2, hoặc exit 1 kèm stderr khác "No entries" (lỗi I/O, quyền…) — **không** có nghĩa là "không có OOM". Chỉ exit 1 + stdout rỗng + stderr rỗng/"No entries" mới là "không có dòng nào" (bình thường, vẫn PASS). |
 | 5xx | < 1 % yêu cầu | ≥ 1 % yêu cầu | — |
-| Pool bão hoà | Không có `server reached pm.max_children` trong `[pool <pool của site>]` | Có (chỉ pool của site này được tính) | — |
-| Swap-in | Không có cửa sổ nào (≥ 3 lần đo, ≥ 15 s) mà trung bình ≥ 100 trang/s **và** có swap-in ở ≥ 3 lần đo đó | Có cửa sổ như trên: swap kéo dài ≥ 100 trang/s (≈ 400 KB/s) | — (pico ngắn vượt 100 trang/s chỉ in ghi chú, không FAIL) |
+| Pool bão hoà | Không có `server reached pm.max_children` trong `[pool <pool của site>]` (site có pool cô lập: đọc cả unit `cecp-php-fpm@SLUG.service` / syslog identifier `cecp-php-fpm-SLUG`) | Có (chỉ pool của site này được tính) | `Saturation telemetry unavailable`: không đọc được log/journal của pool — không xác nhận được pool có bão hoà hay không |
+| Swap-in | Không có cửa sổ nào (≥ 3 lần đo, ≥ 15 s) mà trung bình ≥ 100 trang/s, có swap-in ở ≥ 3 lần đo **và** không lần đo nào chiếm quá 60 % tổng cửa sổ | Có cửa sổ như trên: swap kéo dài ≥ 100 trang/s (≈ 400 KB/s) | — (pico ngắn vượt 100 trang/s chỉ in ghi chú, không FAIL) |
 | Số lần đo | — | — | < 6 lần đo |
 | Traffic | — | — | 0 yêu cầu trong access log, 0 lần đo, hoặc dừng bằng Ctrl-C |
+| Bị chặn (throttled) | < 20 % yêu cầu là 429 | — | ≥ 20 % yêu cầu (hoặc tất cả) là 429: `throttled by limit_req/Cloudflare: capacity not measured` — không đo được sức chứa, không bao giờ PASS (FAIL thật như OOM/5xx vẫn FAIL) |
 
 Ghi chú:
 
 - Số liệu 5xx và cache HIT lấy từ access log chỉ gồm yêu cầu **động/HTML**: các location tĩnh (`.css`, `.js`, ảnh, font) có `access_log off`, nên không được đếm.
-- Một lần đo swap-in đơn lẻ (pico ngắn, ví dụ php-fpm worker idle được page in một lượt) không đủ để FAIL: cần tốc độ trung bình ≥ 100 trang/s trong cửa sổ ≥ 15 s **và** swap-in xuất hiện ở ≥ 3 lần đo — tức swap kéo dài, không phải pico ngắn.
+- Một lần đo swap-in đơn lẻ (pico ngắn, ví dụ php-fpm worker idle được page in một lượt) không đủ để FAIL: cần tốc độ trung bình ≥ 100 trang/s trong cửa sổ ≥ 15 s **và** swap-in xuất hiện ở ≥ 3 lần đo — tức swap kéo dài, không phải pico ngắn. Thêm nữa, không lần đo đơn lẻ nào được chiếm quá 60 % tổng swap-in của cửa sổ: deltas `[3000, 1, 1]` là một burst (chỉ in ghi chú), còn `[300, 300, 300, 300, 300, 300]` mỗi 2 s (150 trang/s) vẫn là FAIL.
+- Access log xoay vòng (logrotate đổi tên/tạo file mới) hoặc bị cắt ngắn không làm mất dòng: monitor đọc nốt file cũ rồi đọc file mới từ đầu (theo `st_dev`/`st_ino`).
 - Exit code: PASS 0 · FAIL 2 · INCONCLUSIVE 3. INCONCLUSIVE nghĩa là chạy lại có traffic thật, không được coi là đạt.
 
 ### 3.3 Audit sau tune
@@ -176,7 +180,7 @@ Ghi chú:
 
 Tham chiếu DNS/SSL đầy đủ: [CLOUDFLARE_DNS.md](CLOUDFLARE_DNS.md). Token: `/etc/cecp-panel/credentials.env` — **không** log.
 
-Agent audit / đổi Cloudflare **từ máy vận hành** (token không đặt lên VPS): `tools/cf-agent.sh audit|snapshot|apply|rollback` — tạo và giao token theo [CLOUDFLARE_AGENT_TOKEN.md](CLOUDFLARE_AGENT_TOKEN.md). Cache HTML cần `--yes-i-approved`, ghi DNS cần `--allow-dns`.
+Agent audit / đổi Cloudflare **từ máy vận hành** (token không đặt lên VPS): `tools/cf-agent.sh audit|snapshot|apply|rollback` — tạo và giao token theo [CLOUDFLARE_AGENT_TOKEN.md](CLOUDFLARE_AGENT_TOKEN.md). Cache HTML cần `--yes-i-approved`, ghi DNS cần `--allow-dns`. `rollback` không có `--allow-dns` không so sánh DNS (in `DNS not compared`), nên lỗi đọc DNS không chặn việc khôi phục cài đặt, Cache Rules và Redirect Rules; có `--allow-dns` mà không đọc được DNS thì từ chối trước khi ghi gì.
 
 | Việc | Lệnh | Approval |
 |---|---|---|

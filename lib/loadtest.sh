@@ -258,12 +258,12 @@ loadtest_monitor() {
   echo "=== Theo dõi tải $domain trong $duration giây, mỗi $interval giây (chỉ đọc) ==="
   echo "CSV: $csv — bắt đầu chạy k6 trên máy khác ngay bây giờ; Ctrl-C để dừng sớm (vẫn in kết luận)."
   python3 - "$domain" "$duration" "$interval" "$csv" "$FPM_ISOLATED_DIR" \
-    "$LOADTEST_MIN_SAMPLES" "$LOADTEST_SWAP_RATE_PAGES" <<'PY' || rc=$?
+    "$LOADTEST_MIN_SAMPLES" "$LOADTEST_SWAP_RATE_PAGES" "$(domain_slug "$domain")" <<'PY' || rc=$?
 import csv, glob, os, re, shutil, subprocess, sys, tempfile, time
 
 sys.stdout.reconfigure(encoding="utf-8")
 domain, duration, interval, csv_path, iso_dir = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], sys.argv[5]
-min_samples, swap_limit = int(sys.argv[6]), float(sys.argv[7])
+min_samples, swap_limit, slug = int(sys.argv[6]), float(sys.argv[7]), sys.argv[8]
 start = time.time()
 
 
@@ -307,28 +307,54 @@ def load1():
 
 
 class Tail:
-    """New complete lines appended to a file since the monitor started (survives rotation)."""
+    """New complete lines appended to a file since the monitor started.
+
+    Holds the file open and tracks (st_dev, st_ino): when the path now points at a different file (logrotate
+    rename), the remaining bytes of the OLD handle are drained first and the new file is read from offset 0.
+    A file that shrinks (copytruncate) is re-read from 0."""
 
     def __init__(self, path):
-        self.path, self.buf = path, b""
+        self.path, self.buf, self.fh, self.ident = path, b"", None, None
         try:
-            self.pos = os.path.getsize(path)
+            self.fh = open(path, "rb")
+            st = os.fstat(self.fh.fileno())
+            self.ident = (st.st_dev, st.st_ino)
+            self.fh.seek(st.st_size)
         except OSError:
-            self.pos = 0
+            self.fh = self.ident = None
+
+    def _drain(self):
+        try:
+            if os.fstat(self.fh.fileno()).st_size < self.fh.tell():
+                self.fh.seek(0)
+                self.buf = b""
+            return self.fh.read(64 << 20)
+        except OSError:
+            return b""
 
     def lines(self):
+        data = b""
         try:
-            size = os.path.getsize(self.path)
+            st = os.stat(self.path)
         except OSError:
+            st = None
+        if self.fh is not None:
+            data = self._drain()
+            if st is not None and (st.st_dev, st.st_ino) != self.ident:
+                self.fh.close()
+                self.fh = None
+                if self.buf or data:
+                    data += b"\n"  # a last line without newline in the rotated file is complete
+        if self.fh is None and st is not None:
+            try:
+                self.fh = open(self.path, "rb")
+                nst = os.fstat(self.fh.fileno())
+                self.ident = (nst.st_dev, nst.st_ino)
+                data += self.fh.read(64 << 20)
+            except OSError:
+                self.fh = None
+        if not data:
             return []
-        if size < self.pos:
-            self.pos, self.buf = 0, b""
-        if size == self.pos:
-            return []
-        with open(self.path, "rb") as f:
-            f.seek(self.pos)
-            data = f.read(min(size - self.pos, 64 << 20))
-        self.pos += len(data)
         parts = (self.buf + data).split(b"\n")
         self.buf = parts.pop()
         return [p.decode("utf-8", "replace") for p in parts]
@@ -339,15 +365,18 @@ class Journal:
 
     def __init__(self, extra):
         self.extra, self.cursor = extra, None
-        self.ok = shutil.which("journalctl") is not None
+        # TEST ONLY: CECP_LOADTEST_JOURNALCTL=FILE runs that shell script (via bash) instead of journalctl.
+        self.stub = os.environ.get("CECP_LOADTEST_JOURNALCTL", "")
+        self.ok = bool(self.stub) or shutil.which("journalctl") is not None
 
     def lines(self):
         if not self.ok:
             return None
-        cmd = ["journalctl", "-q", "--no-pager", "-o", "cat", "--show-cursor"] + self.extra
+        cmd = [shutil.which("bash") or "bash", self.stub] if self.stub else ["journalctl"]
+        cmd += ["-q", "--no-pager", "-o", "cat", "--show-cursor"] + self.extra
         cmd += ["--after-cursor=" + self.cursor] if self.cursor else ["--since", "@%d" % int(start)]
         try:
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   universal_newlines=True, errors="replace", timeout=30)
         except (OSError, subprocess.SubprocessError):
             self.ok = False
@@ -362,15 +391,18 @@ class Journal:
             else:
                 msgs.append(line)
         if proc.returncode == 1 and not msgs:
-            # journalctl (systemd 252) exits 1 when the filter matches nothing: "no entries", not a broken journal
-            return []
+            # journalctl (systemd 252) exits 1 with no output (or only "No entries") when the filter matches
+            # nothing: "no entries". Any other stderr text is a real journal error (I/O, permission, ...).
+            err = proc.stderr.strip()
+            if not err or re.fullmatch(r"-*\s*no entries\s*-*", err, re.I):
+                return []
         if proc.returncode != 0:
             self.ok = False
             return None
         return msgs
 
 
-pool_name, pool_max = "", 0
+pool_name, pool_max, isolated = "", 0, False
 for pat in ("/etc/php-fpm.d/cecp-*.conf", "/etc/opt/remi/php*/php-fpm.d/cecp-*.conf",
             os.path.join(iso_dir, "*.pool.conf"), "/etc/php/*/fpm/pool.d/cecp-*.conf"):
     for path in sorted(glob.glob(pat)):
@@ -381,11 +413,16 @@ for pat in ("/etc/php-fpm.d/cecp-*.conf", "/etc/opt/remi/php*/php-fpm.d/cecp-*.c
         mc = re.search(r"^\s*pm\.max_children\s*=\s*(\d+)", t, re.M)
         pool_name = n.group(1) if n else ""
         pool_max = int(mc.group(1)) if mc else 0
+        isolated = os.path.dirname(path) == iso_dir.rstrip("/")
 
 
 def php_workers():
     total = site = 0
-    for pid in os.listdir("/proc"):
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        pids = []
+    for pid in pids:
         if not pid.isdigit():
             continue
         cmd = read(f"/proc/{pid}/cmdline").replace("\0", " ").strip()
@@ -423,8 +460,12 @@ fpm_logs = [Tail(p) for p in sorted(set(["/var/log/php-fpm/error.log"]
                                         + glob.glob("/var/opt/remi/php*/log/php-fpm/error.log")
                                         + glob.glob("/var/log/php*-fpm.log")))]
 fpm_journal = Journal(["-u", "php-fpm*", "-u", "php*-fpm*"])
+# An isolated pool runs as its own master (cecp-php-fpm@SLUG.service, lib/limits.sh) that logs to syslog with
+# identifier cecp-php-fpm-SLUG: the shared php-fpm units never carry its pm.max_children warnings.
+iso_journal = Journal(["_SYSTEMD_UNIT=cecp-php-fpm@%s.service" % slug, "+", "SYSLOG_IDENTIFIER=cecp-php-fpm-%s" % slug]) if isolated else None
 kernel = Journal(["-k"])
-access = Tail(f"/var/log/nginx/{domain}-access.log")
+# TEST ONLY: CECP_LOADTEST_ACCESS_LOG=FILE reads that file instead of /var/log/nginx/DOMAIN-access.log.
+access = Tail(os.environ.get("CECP_LOADTEST_ACCESS_LOG") or f"/var/log/nginx/{domain}-access.log")
 status_re = re.compile(r'\] "[^"]*" (\d{3}) ')
 cs_re = re.compile(r" cs=(\S+)$")
 HIT = {"HIT", "STALE", "UPDATING", "REVALIDATED"}
@@ -432,7 +473,7 @@ HIT = {"HIT", "STALE", "UPDATING", "REVALIDATED"}
 cols = ["time", "load1", "mem_available_mb", "swap_in_pages", "swap_out_pages", "php_workers_total",
         "php_workers_site", "fpm_max_children_warnings", "mariadb_threads_running", "requests",
         "req_per_sec", "status_5xx", "status_429", "cache_hits", "cache_dynamic", "oom_kills"]
-rows, stamps, interrupted, oom_ok = [], [], False, True
+rows, stamps, interrupted, oom_ok, sat_ok = [], [], False, True, True
 fh = None
 try:
     fd, cnf = tempfile.mkstemp(prefix="cecp-loadtest-", suffix=".cnf")
@@ -450,7 +491,14 @@ try:
         sw_in, sw_out = swap_pages()
         total, site = php_workers()
         warn = sum(1 for t in fpm_logs for line in t.lines() if saturated(line))
-        warn += sum(1 for line in (fpm_journal.lines() or []) if saturated(line))
+        fj = fpm_journal.lines()
+        warn += sum(1 for line in (fj or []) if saturated(line))
+        if iso_journal is not None:
+            ij = iso_journal.lines()
+            warn += sum(1 for line in (ij or []) if saturated(line))
+            sat_ok = sat_ok and ij is not None
+        elif fj is None and not any(t.fh is not None for t in fpm_logs):
+            sat_ok = False
         kl = kernel.lines()
         if kl is None:
             oom_ok = False
@@ -494,7 +542,8 @@ finally:
 
 
 def swap_windows():
-    """(average pages/s, samples with swap-in > 0) for each smallest window of >= 3 samples spanning >= 15 s."""
+    """(average pages/s, samples with swap-in > 0, largest single sample / window total) for each smallest window of
+    >= 3 samples spanning >= 15 s."""
     times = [start] + stamps  # times[k + 1] is when rows[k] was taken
     out = []
     for b in range(len(rows)):
@@ -507,7 +556,9 @@ def swap_windows():
         if span < 15:
             continue
         win = rows[a:b + 1]
-        out.append((sum(r["swap_in_pages"] for r in win) / span, sum(1 for r in win if r["swap_in_pages"] > 0)))
+        total = sum(r["swap_in_pages"] for r in win)
+        out.append((total / span, sum(1 for r in win if r["swap_in_pages"] > 0),
+                    max(r["swap_in_pages"] for r in win) / total if total else 0.0))
     return out
 
 
@@ -520,8 +571,9 @@ hits_total = sum(r["cache_hits"] for r in rows)
 dyn_total = sum(r["cache_dynamic"] for r in rows)
 windows = swap_windows()
 swap_peak_rate = max((w[0] for w in windows), default=0.0)
-# Sustained = a window spanning >= 15 s with >= 3 samples, average >= limit, and swap-in in >= 3 of its samples.
-swap_sustained = [w[0] for w in windows if w[0] >= swap_limit and w[1] >= 3]
+# Sustained = a window spanning >= 15 s with >= 3 samples, average >= limit, swap-in in >= 3 of its samples, and
+# no single sample carrying more than 60 % of the window total (one burst such as [3000, 1, 1] is not sustained).
+swap_sustained = [w[0] for w in windows if w[0] >= swap_limit and w[1] >= 3 and w[2] <= 0.6]
 rate5 = 100 * e5_total / req_total if req_total else 0.0
 
 fails = []
@@ -545,6 +597,11 @@ if not req_total:
     reasons.append("access log không ghi nhận yêu cầu nào — k6 có đang chạy đúng BASE_URL không?")
 if not oom_ok:
     reasons.append("OOM check unavailable (journalctl không chạy được)")
+if not sat_ok:
+    reasons.append("saturation telemetry unavailable (không đọc được log/journal của pool PHP-FPM, không xác nhận được pm.max_children)")
+throttled = bool(req_total) and e429_total * 5 >= req_total
+if throttled:
+    reasons.append(f"throttled by limit_req/Cloudflare: capacity not measured ({e429_total}/{req_total} yêu cầu bị 429)")
 
 threads = [r["mariadb_threads_running"] for r in rows if r["mariadb_threads_running"] != ""]
 peaks = "chưa có lần đo nào"
@@ -561,8 +618,10 @@ if rows:
 print("Kết luận:" + (" (dừng sớm bằng Ctrl-C)" if interrupted else ""))
 if not oom_ok:
     print("OOM check unavailable — journalctl không chạy được, không xác nhận được là không có OOM.")
+if not sat_ok:
+    print("Saturation telemetry unavailable — không đọc được log/journal của pool PHP-FPM, không xác nhận được pool có bão hoà hay không.")
 if swap_peak_rate >= swap_limit and not swap_sustained:
-    print(f"  Ghi chú: swap-in {swap_peak_rate:.1f} trang/s vượt ngưỡng {swap_limit:g} nhưng chỉ trong pico ngắn, không phải swap kéo dài — không tính là FAIL.")
+    print(f"  Ghi chú: swap-in {swap_peak_rate:.1f} trang/s vượt ngưỡng {swap_limit:g} nhưng chỉ trong một đợt ngắn (burst), không phải swap kéo dài — không tính là FAIL.")
 if fails:
     for f in fails:
         print(f"FAIL loadtest — {f}")
@@ -576,7 +635,7 @@ elif reasons:
 else:
     print(f"PASS loadtest — đỉnh: {peaks}")
     code = 0
-if req_total and e429_total * 100 >= req_total:
+if req_total and e429_total * 100 >= req_total and not throttled:
     print(f"  Lưu ý: {e429_total} phản hồi 429 — limit_req/Cloudflare đang chặn máy chạy k6, số liệu không phản ánh sức chứa thật.")
 if not pool_name:
     print("  Lưu ý: không tìm thấy pool PHP-FPM của site (cecp-panel site rebuild-vhost).")

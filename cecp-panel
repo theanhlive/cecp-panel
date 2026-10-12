@@ -45,7 +45,7 @@ source "$PANEL_ROOT/lib/logview.sh"
 source "$PANEL_ROOT/lib/incident.sh"
 source "$PANEL_ROOT/lib/menu.sh"
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.13.0-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.13.1-beta}"
 
 usage() {
   cat <<EOF
