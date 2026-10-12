@@ -788,11 +788,14 @@ printf '<?php\n' | runuser -u "$SU" -- tee "$PERM_FILE" >/dev/null
 printf '<?php\nrequire_once WP_CONTENT_DIR . "/themes/cecp-perm-test/functions.php";\n' | runuser -u "$SU" -- tee "$PERM_STUB" >/dev/null
 chown nginx:nginx "$PERM_FILE"
 chmod 650 "$PERM_FILE"
+# The mu-plugin stub requires the unreadable theme file: this request makes PHP log "Failed opening required",
+# which is what turns a theme file (latent) into FAIL in security check.
+curl -s -o /dev/null "http://$D/?perm-probe=1"
 settle
-check "security check FAILs on a PHP file the pool user cannot read" \
+check "security check FAILs on a theme file the pool user cannot read (log shows it)" \
   bash -c "cecp-panel security check 2>&1 | grep -E 'FAIL' | grep -q 'unreadable by the pool user'"
-check "security check names the file, owner and mode" \
-  bash -c "cecp-panel security check 2>&1 | grep -F '$PERM_FILE' | grep -q 'nginx:nginx mode 650'"
+check "security check groups the theme folder with owner, group and mode" \
+  bash -c "cecp-panel security check 2>&1 | grep -F 'wp-content/themes/cecp-perm-test: 1 file(s)' | grep -q 'nginx:nginx mode 650'"
 check "probe FAILs (exit 2) on the permission error" probe_fails
 check "probe prints the chown remedy, not allow_putenv" \
   bash -c "out=\$(cecp-panel site probe $D 2>&1); grep -q 'chown $SU:$SU $PERM_FILE' <<<\"\$out\" && ! grep -q allow_putenv <<<\"\$out\""
@@ -800,6 +803,26 @@ check "probe did not change the file's owner" bash -c "[ \"\$(stat -c %U:%G:%a $
 rm -f "$PERM_STUB" "$PERM_FILE"
 rm -rf "$PERM_DIR"
 check "site probe passes again once the file is gone" bash -c "sleep 1; cecp-panel site probe $D"
+
+echo "=== unreadable file in an inactive plugin (latent) and at the docroot root (critical) ==="
+LAT_DIR="$DOCROOT/wp-content/plugins/cecp-latent-test"
+LAT_FILE="$LAT_DIR/main.php"
+ROOT_FILE="$DOCROOT/cecp-root-test.php"
+runuser -u "$SU" -- mkdir -p "$LAT_DIR"
+printf '<?php\n' | runuser -u "$SU" -- tee "$LAT_FILE" >/dev/null
+chown root:root "$LAT_FILE"
+chmod 650 "$LAT_FILE"
+settle
+check "inactive plugin file, no log line -> WARN latent with the folder name, not FAIL" \
+  bash -c "out=\$(cecp-panel security check 2>&1); grep -q 'WARN.*latent: breaks the site' <<<\"\$out\" && grep -qF 'wp-content/plugins/cecp-latent-test: 1 file(s)' <<<\"\$out\" && ! grep -q 'FAIL.*unreadable by the pool user' <<<\"\$out\""
+printf '<?php\n' | runuser -u "$SU" -- tee "$ROOT_FILE" >/dev/null
+chown nginx:nginx "$ROOT_FILE"
+chmod 650 "$ROOT_FILE"
+settle
+check "unreadable root-level PHP file -> FAIL (critical)" \
+  bash -c "cecp-panel security check 2>&1 | grep -E 'FAIL' | grep -q 'unreadable by the pool user'"
+rm -f "$ROOT_FILE" "$LAT_FILE"
+rm -rf "$LAT_DIR"
 
 echo "=== Per-site resource limits (own PHP-FPM) ==="
 check "site limits --cpu 50 --mem 768M --tasks 128" cecp-panel site limits "$D" --cpu 50 --mem 768M --tasks 128

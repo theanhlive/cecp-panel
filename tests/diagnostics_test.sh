@@ -312,6 +312,20 @@ else
   echo "  SKIP  rotation scenario (needs Linux: a renamed open file)"
 fi
 
+echo "=== security check: PHP path classification ==="
+# Sourced in a subshell: lib/security.sh runs `set -e` when sourced.
+# shellcheck disable=SC2034  # read when lib/security.sh is sourced
+VAR_LIB="$TMP/varlib"
+classify() { ( source "$ROOT/lib/security.sh"; security_php_path_class "$1" "/home/site_a/public_html" ); }
+D_ROOT="/home/site_a/public_html"
+assert "root-level wp-config.php is CRITICAL in the docroot" test "$(classify "$D_ROOT/wp-config.php")" = "CRITICAL ."
+assert "wp-includes file is CRITICAL" test "$(classify "$D_ROOT/wp-includes/class-wp.php")" = "CRITICAL wp-includes"
+assert "mu-plugin is CRITICAL" test "$(classify "$D_ROOT/wp-content/mu-plugins/guard.php")" = "CRITICAL wp-content/mu-plugins"
+assert "drop-in advanced-cache.php is CRITICAL" test "$(classify "$D_ROOT/wp-content/advanced-cache.php")" = "CRITICAL wp-content"
+assert "inactive plugin file is LATENT, grouped by plugin folder" test "$(classify "$D_ROOT/wp-content/plugins/shortpixel-image-optimiser/short.php")" = "LATENT wp-content/plugins/shortpixel-image-optimiser"
+assert "theme file is LATENT, grouped by theme folder" test "$(classify "$D_ROOT/wp-content/themes/twentytwentyfive/functions.php")" = "LATENT wp-content/themes/twentytwentyfive"
+assert "nested plugin path is LATENT at the plugin folder" test "$(classify "$D_ROOT/wp-content/plugins/woo/lib/inc/x.php")" = "LATENT wp-content/plugins/woo"
+
 echo
 echo "RESULT: ${PASSED} passed, ${FAILED} failed"
 [[ "$FAILED" == 0 ]]

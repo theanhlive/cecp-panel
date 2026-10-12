@@ -462,6 +462,25 @@ security_apply_production() {
   if declare -F probe_post_summary >/dev/null; then probe_post_summary || true; fi
 }
 
+# security_php_path_class FILE DOCROOT — how much an unreadable PHP file matters, from its path alone (no I/O).
+# Prints "CRITICAL DIR": code WordPress loads on every request — root *.php, wp-includes/, wp-admin/,
+#   wp-content/mu-plugins/, drop-ins (advanced-cache.php, object-cache.php, db.php) — and any other folder.
+# Prints "LATENT DIR": a file of a plugin or theme (wp-content/plugins/<slug>/, wp-content/themes/<slug>/);
+#   it breaks the site only once that plugin/theme is active. DIR is relative to DOCROOT ("." = docroot).
+security_php_path_class() {
+  local rel="${1#"$2"/}" sub kind rest
+  case "$rel" in
+    wp-content/plugins/*|wp-content/themes/*)
+      sub="${rel#wp-content/}"
+      kind="${sub%%/*}"
+      rest="${sub#*/}"
+      if [[ "$rest" == */* ]]; then echo "LATENT wp-content/$kind/${rest%%/*}"
+      else echo "LATENT wp-content/$kind/$rest"; fi ;;
+    */*) echo "CRITICAL ${rel%/*}" ;;
+    *) echo "CRITICAL ." ;;
+  esac
+}
+
 security_self_check() {
   local pass=0 warn=0 fail=0
   _ck() {
@@ -534,9 +553,17 @@ security_self_check() {
         for fn in $fnames; do probe_remedy "$dom" "$fn"; done
       fi
     fi
-    local docroot wpcfg pool_user unreadable=() pf n_test=0 n_bad=0 shown=0
+    local docroot wpcfg pool_user unreadable=() pf n_test=0 perm_log="" cls gdir n_fail=0 n_warn=0 g_shown=0
+    local -A grp_n=() grp_level=() grp_hot=() grp_info=()
+    local -a grp_order=()
     docroot="$(site_json_get_or "$dom" docroot "")"
     pool_user="$(site_json_get_or "$dom" site_user "")"
+    # PHP failures on this site's own log (24 h) decide whether a plugin/theme folder is FAIL or WARN.
+    if [[ -r "$nlog" ]]; then
+      perm_log="$(tail -n 20000 "$nlog" 2>/dev/null \
+        | awk -v since="$(date -d '24 hours ago' '+%Y/%m/%d %H:%M:%S' 2>/dev/null || true)" \
+          'since == "" || $1 " " $2 >= since' | grep -E 'Permission denied|Failed opening required' || true)"
+    fi
     if [[ -n "$docroot" && -d "$docroot" && -n "$pool_user" ]] && id "$pool_user" &>/dev/null; then
       while IFS= read -r pf; do
         [[ -n "$pf" ]] || continue
@@ -544,17 +571,45 @@ security_self_check() {
         n_test=$((n_test + 1))
         runuser -u "$pool_user" -- test -r "$pf" 2>/dev/null || unreadable+=("$pf")
       done < <(find "$docroot" -type f -name '*.php' ! -user "$pool_user" -print 2>/dev/null | head -n 500 || true)
-      n_bad=${#unreadable[@]}
-      if (( n_bad == 0 )); then
+      # Group by folder: one line per folder, not per file.
+      for pf in "${unreadable[@]}"; do
+        read -r cls gdir <<<"$(security_php_path_class "$pf" "$docroot")"
+        if [[ -z "${grp_n[$gdir]+x}" ]]; then
+          grp_order+=("$gdir")
+          grp_level[$gdir]="$cls"
+          grp_hot[$gdir]=0
+          grp_info[$gdir]="$(stat -c '%U:%G' "$pf" 2>/dev/null || echo '?:?') mode $(stat -c %a "$pf" 2>/dev/null || echo '?')"
+        fi
+        grp_n[$gdir]=$(( ${grp_n[$gdir]:-0} + 1 ))
+      done
+      for gdir in "${grp_order[@]}"; do
+        if [[ "${grp_level[$gdir]}" == LATENT ]] && grep -qF -- "$docroot/$gdir/" <<<"$perm_log"; then
+          grp_hot[$gdir]=1
+        fi
+        if [[ "${grp_level[$gdir]}" == CRITICAL || "${grp_hot[$gdir]}" == 1 ]]; then
+          n_fail=$(( n_fail + grp_n[$gdir] ))
+        else
+          n_warn=$(( n_warn + grp_n[$gdir] ))
+        fi
+      done
+      if (( n_fail + n_warn == 0 )); then
         _ck PASS "$dom: every PHP file is readable by the pool user ($pool_user)"
       else
-        _ck FAIL "$dom: ${n_bad} PHP file(s) unreadable by the pool user $pool_user — PHP answers 500 on uncached pages (fix: chown $pool_user:$pool_user <file>  or  cecp-panel security harden-docroot $dom)"
-        for pf in "${unreadable[@]}"; do
-          (( shown < 10 )) || break
-          shown=$((shown + 1))
-          echo "        $pf  owner $(stat -c '%U:%G' "$pf" 2>/dev/null || echo '?') mode $(stat -c %a "$pf" 2>/dev/null || echo '?') pool user $pool_user"
+        if (( n_fail > 0 )); then
+          _ck FAIL "$dom: ${n_fail} PHP file(s) unreadable by the pool user $pool_user — PHP answers 500 on uncached pages when this code is loaded (fix: chown $pool_user:$pool_user <file>  or  cecp-panel security harden-docroot $dom)"
+        fi
+        if (( n_warn > 0 )); then
+          _ck WARN "$dom: ${n_warn} PHP file(s) in inactive plugin/theme folders unreadable by $pool_user — latent: breaks the site as soon as this plugin/theme is activated"
+        fi
+        for gdir in "${grp_order[@]}"; do
+          (( g_shown < 10 )) || break
+          g_shown=$((g_shown + 1))
+          echo "        $gdir: ${grp_n[$gdir]} file(s), owner:group ${grp_info[$gdir]}"
+          if [[ "${grp_level[$gdir]}" == LATENT && "${grp_hot[$gdir]}" != 1 ]]; then
+            echo "          remedy (not run): chown -R $pool_user:$pool_user $docroot/$gdir"
+          fi
         done
-        (( n_bad <= 10 )) || echo "        ... and $((n_bad - 10)) more"
+        (( ${#grp_order[@]} <= 10 )) || echo "        ... and $(( ${#grp_order[@]} - 10 )) more folder(s)"
       fi
     fi
     wpcfg="${docroot}/wp-config.php"

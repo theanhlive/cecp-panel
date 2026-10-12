@@ -119,6 +119,10 @@ cecp-panel site probe "$D"      # hoặc: cecp-panel site probe --all
   ("Probe: N site(s) OK" hoặc các dòng FAIL) ở cuối, **không** làm hỏng hay rollback việc nâng cấp. Sau
   cập nhật WordPress/plugin (`wp update`, `update all`) vẫn phải chạy `site probe` bằng tay.
 - `cecp-panel security check` cũng đếm `PHP Fatal error` trong 24 giờ qua của từng site.
+- `cecp-panel security check` báo file PHP mà user pool không đọc được, gom theo thư mục. FAIL với file gốc docroot,
+  `wp-includes/`, `wp-admin/`, `mu-plugins/` và drop-in, hoặc với plugin/theme mà log nginx 24 giờ đã ghi lỗi
+  "Permission denied" trỏ vào; plugin/theme còn lại (ví dụ plugin đã tắt) chỉ WARN "latent" — chưa làm site hỏng,
+  chỉ hỏng khi bật lại. Lệnh chown chỉ in ra, không tự chạy.
 - Chưa probe = chưa xong nâng cấp; ghi kết quả vào profile site.
 
 ---
