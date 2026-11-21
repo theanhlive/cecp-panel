@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # CECP Panel — full standalone CLI (LarVPS-style workflow)
 set -euo pipefail
+# Files this root tool creates (nginx/cron/MariaDB/sudoers-like config) must never come out
+# group/world-writable, whatever umask the caller has (seen: 0000 under `docker exec`):
+# MariaDB ignores such option files, logrotate skips such dirs, and writable config is root.
+umask 022
 
 if [[ -L "${BASH_SOURCE[0]}" ]]; then
   PANEL_ROOT="/opt/cecp-panel"

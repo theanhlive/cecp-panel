@@ -17,7 +17,9 @@ limits_sock() { echo "$FPM_ISOLATED_RUN/$(domain_slug "$1")/php.sock"; }
 limits_fpm_bin() {
   local v
   v="$(php_version_normalize "$(site_json_get_or "$1" php_version 80)")"
-  if [[ "$v" == 80 ]]; then echo /usr/sbin/php-fpm; else echo "/opt/remi/php${v}/root/usr/sbin/php-fpm"; fi
+  if os_is_debian; then echo "/usr/sbin/php-fpm$(php_dotted_version "$v")"
+  elif [[ "$v" == 80 ]]; then echo /usr/sbin/php-fpm
+  else echo "/opt/remi/php${v}/root/usr/sbin/php-fpm"; fi
 }
 
 limits_install_template() {
@@ -181,8 +183,7 @@ limits_off() {
     php_sock "$(php_fpm_sock_for_version "$ver" "$(site_json_get "$domain" pool_name)")"
   site_render_pool "$domain"
   # Pool added back to a shared master: restart (a reload re-owns sockets as root → 502).
-  if [[ "$ver" == 80 ]]; then php_fpm_restart_for_new_pool php-fpm
-  else php_fpm_restart_for_new_pool "$(php_remipkg_prefix "$ver")-php-fpm"; fi
+  php_fpm_restart_for_new_pool "$(php_fpm_service_for_version "$ver")"
   site_render_vhost "$domain"
   nginx_test_and_reload || panel_log "WARN: nginx rejected the vhost for $domain"
   systemctl disable --now "$unit" >/dev/null 2>&1 || true
