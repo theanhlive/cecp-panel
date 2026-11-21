@@ -1,6 +1,34 @@
-# CECP Panel v1.10 — tính năng
+# CECP Panel — tính năng (đến 1.13.1-beta)
 
 **Ưu tiên:** Bảo mật → WordPress → Tốc độ → UX → Cloudflare edge → Advanced optional
+
+Các mục bên dưới xếp theo phiên bản ra mắt; hành vi hiện tại và cờ đầy đủ: `cecp-panel help`,
+lỗi "Usage:" của từng lệnh, và [CHANGELOG.md](CHANGELOG.md). Khi một mục cũ bị thay đổi ở bản sau,
+bản sau được ghi ở đây.
+
+## v1.13 (tune theo domain + chẩn đoán sau nâng cấp) — chi tiết: [CHANGELOG.md](CHANGELOG.md)
+
+- `site probe [DOMAIN|--all]`: gọi `/wp-login.php`, `/wp-json/`, URL bỏ qua cache qua loopback; PASS/WARN/FAIL, chỉ ra nguyên nhân từ log của chính site. Chạy sau mỗi lần nâng cấp panel/WordPress
+- `optimize audit DOMAIN [--json]` (chỉ đọc), `optimize capacity`, `optimize loadtest`, `optimize rollback list|ID|latest` — runbook [docs/SITE_TUNING.md](docs/SITE_TUNING.md)
+- `security check` báo file PHP mà pool không đọc được, lỗi PHP fatal 24 giờ theo site
+- `tools/cf-agent.sh` (máy vận hành): audit/snapshot/apply/rollback Cloudflare — [docs/CLOUDFLARE_AGENT_TOKEN.md](docs/CLOUDFLARE_AGENT_TOKEN.md)
+
+## v1.12 (cách ly site, sự cố, thông báo) — chi tiết: [CHANGELOG.md](CHANGELOG.md)
+
+- Cài/cập nhật **chỉ từ GitHub** (`dist/` trong repo, đối chiếu `SHA256SUMS`); mirror isharevn cũ đã ngừng
+- Cách ly giữa các site: root không ghi trong docroot, `disable_symlinks`, wp-cron qua loopback, cấm `crontab` user site, `security php-isolation` (OPcache riêng), `putenv` tắt mặc định (`php config DOMAIN allow_putenv=on` nếu plugin cần)
+- `security scan [DOMAIN|--all] [--days N]`, `security rotate-secrets`, `security restore-clean DOMAIN|--all [--dry-run] [--yes]` — [docs/INCIDENT_RESPONSE.md](docs/INCIDENT_RESPONSE.md)
+- `security scan-schedule on [--every 14|30] [--hour H] [--auto-restore]`: quét định kỳ giờ rảnh, gắn tag `scan-clean` cho backup sạch, đóng băng retention khi nhiễm, `security scan-ack` để gỡ
+- `security cf-only on [--force]|off|status`: 80/443 chỉ nhận IP Cloudflare (firewalld hoặc ufw), `cf realip` đồng bộ lại
+- Thông báo **Telegram / Zalo Bot / Discord**: `notify setup|telegram|zalo|discord|test [KÊNH]|off KÊNH`, chọn loại theo kênh `notify events set CATS --channel KÊNH --min warning` — [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md)
+- Backup: sửa retention (trước đây không bao giờ xoá snapshot); `backup prune-dry-run` rồi xác nhận một lần `backup prune`
+- Media: upload mọi định dạng → **một** file WebP (mặc định `--format webp`, hoặc `avif`/`original`) đã thu nhỏ, không giữ gốc; `media prune-originals DOMAIN [--yes]`
+- HTTPS catch-all (nginx ≥ 1.19.4) từ chối bắt tay TLS khi truy cập bằng IP; `ssl issue` đổi URL WordPress sang https
+- Menu không thoát khi nhập sai; phím Tab gợi ý lệnh, cờ và domain
+
+## v1.11 (vá đọc chéo giữa các site)
+
+- `security harden-docroot [DOMAIN|--all]`: bỏ quyền đọc "other" trên docroot, nginx chỉ đọc file tĩnh qua ACL; tự chạy khi `site add`, `site duplicate`, `backup restore`, `wp update`, `security apply-production`
 
 ## v1.10 (mặc định thông minh + cập nhật toàn diện) — chi tiết: [CHANGELOG.md](CHANGELOG.md)
 
@@ -80,7 +108,7 @@
 
 ### Media optimize (per-site opt-in)
 - **Mặc định OFF** — chỉ bật site upload ảnh nhiều
-- On-upload: mu-plugin resize + nén + WebP sidecar
+- On-upload: mu-plugin resize + nén + WebP sidecar (từ 1.12: một file WebP, không giữ gốc — xem mục v1.12)
 - Cron daily 03:20: batch backlog (chỉ site `enabled` + `cron`)
 - State trong `/var/lib/cecp-panel/sites/<domain>.json` → `media_optimize`
 - Lệnh: `media enable|disable|status|run|run-all|enable-cron|disable-cron`
@@ -101,16 +129,21 @@ cecp-panel media status
 cecp-panel cf purge example.com
 cecp-panel notify setup && cecp-panel notify enable-cron
 cecp-panel security unattended
+cecp-panel site probe --all
+cecp-panel security scan --all
+cecp-panel security scan-schedule on --every 14
+cecp-panel backup prune-dry-run
 cecp-panel log nginx example.com
 # advanced (cẩn thận):
 # cecp-panel modsec install && cecp-panel modsec enable
 ```
 
-## Chưa có (roadmap 1.6+)
+## Chưa có (roadmap)
 
+- 2.0 ([docs/PLAN_2.0.md](docs/PLAN_2.0.md)): CI GitHub Actions, test tích hợp Ubuntu 22.04/24.04, test nâng cấp, kênh `stable`/`beta`, ký bản phát hành minisign
 - OpenLiteSpeed dual-stack
 - File Manager
-- Quét malware, SMTP cho WordPress, quota đĩa từng site, HTTP/3, ký release minisign (B7–B11)
+- SMTP cho WordPress, quota đĩa từng site
 - WebUI agency (CECP control plane)
 - HTTP/3 QUIC (phụ thuộc build nginx)
-- Media: keep-original, queue Redis
+- Media: queue Redis

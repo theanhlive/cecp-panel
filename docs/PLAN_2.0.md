@@ -11,13 +11,13 @@ Mỗi luồng = 1 nhánh `claude/2.0-<luồng>` → PR vào `main`. Không luồ
 | **W3 Upgrade test** | `tests/upgrade/` (mới), `tests/baseline/` | cài baseline (1.12.1 lấy từ tag) → nâng cấp lên checkout → site 200, `security check` 0 FAIL | — |
 | **W4 Unit bats** | `tests/unit/` (mới) | ≥ 40 test cho hàm thuần trong `lib/common.sh`, `lib/probe.sh`, `lib/optimize.sh`; `bash tests/unit/run.sh` | — |
 | **W5 Kênh + ký** | `lib/update.sh`, `build-release.sh`, `install-cecp-panel.sh`, `docs/RELEASING.md` | `update channel`, xác minh minisign (bắt buộc khi có khoá), test trong scenario; CHANGELOG mục "Chưa phát hành" | — |
-| **W6 Tài liệu + lab** | `docs/LAB_CHECKLIST.md`, `docs/RELEASE_1.12_HANDOFF.md` (lưu trữ), `README.md`, `CUSTOMER_INSTALL.md` | checklist T4 đủ mục; bỏ nhắc mirror isharevn đã ngừng | — |
+| **W6 Tài liệu + lab** | `docs/LAB_CHECKLIST.md`, `docs/archive/RELEASE_1.12_HANDOFF.md` (lưu trữ), `README.md`, `CUSTOMER_INSTALL.md` | checklist T4 đủ mục; bỏ nhắc mirror isharevn đã ngừng | — |
 
 ## Thứ tự merge đề xuất
 W6 → W4 → W1 → W2 → W3 → W5 (W5 sửa code sản phẩm, merge cuối sau khi CI đã có).
 
 ## Sau khi merge (người + agent)
-1. Chạy T4 trên VPS lab theo `docs/LAB_CHECKLIST.md`, ghi kết quả.
+1. Chạy T4 trên VPS lab theo [docs/LAB_CHECKLIST.md](LAB_CHECKLIST.md), ghi kết quả.
 2. Tạo khoá minisign ngoại tuyến **[CHỦ REPO]**, nhúng khoá công khai.
 3. `2.0.0-rc.1` → canary 1 VPS ≥ 7 ngày (quét `security scan --all` TRƯỚC khi nâng cấp).
 4. `2.0.0` → kênh `stable`; các VPS còn lại nâng cấp lần lượt.

@@ -3,8 +3,9 @@
 CECP Panel là bộ script bash (+ Python nhỏ) cài và quản lý VPS web (nginx, PHP-FPM, MariaDB,
 Redis, WordPress, Let's Encrypt, backup restic → Google Drive). CLI: `cecp-panel`, chạy bằng root.
 
-> **Phiên bản hiện tại 1.13.1-beta; GitHub là nguồn cài/cập nhật duy nhất.** Việc còn lại và lưu ý 1.12:
-> [docs/RELEASE_1.12_HANDOFF.md](docs/RELEASE_1.12_HANDOFF.md).
+> **Phiên bản hiện tại 1.13.1-beta; GitHub là nguồn cài/cập nhật duy nhất.** Lộ trình 2.0:
+> [docs/PLAN_2.0.md](docs/PLAN_2.0.md) ([ADR-0001](docs/adr/0001-release-readiness.md)); kiểm thử VPS lab trước RC:
+> [docs/LAB_CHECKLIST.md](docs/LAB_CHECKLIST.md). Bàn giao 1.12 (lưu trữ): [docs/archive/RELEASE_1.12_HANDOFF.md](docs/archive/RELEASE_1.12_HANDOFF.md).
 
 ## Triển khai trên VPS (vận hành)
 
@@ -50,6 +51,6 @@ Quy tắc vận hành:
 | Nâng cấp panel | `cecp-panel update panel latest` |
 | VPS còn mirror cũ trong `panel.env` | một lần: `cecp-panel update mirror https://raw.githubusercontent.com/theanhlive/cecp-panel/main` |
 
-**Quy trình phát hành (agent):** `bash tests/lint.sh` → `bash tests/integration/run.sh` (0 failed) → bump phiên bản ở 5 chỗ + `CHANGELOG.md` → `./build-release.sh` → commit code + `dist/` → push `main` → tag `vX.Y.Z-beta` trên commit cuối → kiểm tra raw URL + sha256 → nâng cấp từng VPS một.
+**Quy trình phát hành (agent):** `bash tests/lint.sh` → `bash tests/integration/run.sh` (0 failed) → (bản RC/chính thức) [docs/LAB_CHECKLIST.md](docs/LAB_CHECKLIST.md) → bump phiên bản ở 5 chỗ + `CHANGELOG.md` → `./build-release.sh` → commit code + `dist/` → push `main` → tag `vX.Y.Z-beta` trên commit cuối → kiểm tra raw URL + sha256 → nâng cấp từng VPS một.
 
 Mirror CDN isharevn cũ (**đã ngừng phân phối**) — chỉ dùng GitHub raw `main`.
