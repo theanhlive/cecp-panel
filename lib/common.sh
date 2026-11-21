@@ -92,6 +92,11 @@ validate_int_range() {
   [[ "$v" =~ ^[0-9]{1,6}$ ]] && (( 10#$v >= lo && 10#$v <= hi )) || panel_die "Invalid ${what}: '${v}' (expected ${lo}-${hi})"
 }
 
+# Release channel for `update panel`: stable or beta (see docs/RELEASING.md).
+validate_channel() {
+  [[ "${1:-}" =~ ^(stable|beta)$ ]] || panel_die "Invalid channel: '${1:-}' (stable|beta)"
+}
+
 # Set KEY=VALUE in a shell env file that is later sourced by root; the value is %q-quoted.
 env_set() {
   local file="$1" key="$2" val="$3" tmp

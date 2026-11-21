@@ -51,7 +51,7 @@ _cecp_panel() {
       modsec|modsecurity) words="status install enable disable blocking" ;;
       log|logs) words="panel audit nginx php mysql fail2ban notify" ;;
       php) words="list install set config" ;;
-      update) words="check mirror panel component os wp-cli all enable-cron disable-cron" ;;
+      update) words="check mirror channel panel component os wp-cli all enable-cron disable-cron" ;;
     esac
   elif [[ "$cmd $sub" == "optimize loadtest" && "${COMP_WORDS[COMP_CWORD-1]}" == --profile ]]; then
     words="cached mixed login-api"
@@ -94,6 +94,7 @@ _cecp_panel() {
     case "$cmd $sub" in
       "site add"|"site list"|"site list-json") ;;
       "php install") words="81 82 83 84" ;;
+      "update channel") words="stable beta" ;;
       "update component") words="nginx mariadb php certbot restic rclone fail2ban os all" ;;
       "db slow-log") words="on off status" ;;
       "security cf-only") words="on off status" ;;

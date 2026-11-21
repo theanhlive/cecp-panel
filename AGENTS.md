@@ -50,6 +50,6 @@ Quy tắc vận hành:
 | Nâng cấp panel | `cecp-panel update panel latest` |
 | VPS còn mirror cũ trong `panel.env` | một lần: `cecp-panel update mirror https://raw.githubusercontent.com/theanhlive/cecp-panel/main` |
 
-**Quy trình phát hành (agent):** `bash tests/lint.sh` → `bash tests/integration/run.sh` (0 failed) → bump phiên bản ở 5 chỗ + `CHANGELOG.md` → `./build-release.sh` → commit code + `dist/` → push `main` → tag `vX.Y.Z-beta` trên commit cuối → kiểm tra raw URL + sha256 → nâng cấp từng VPS một.
+**Quy trình phát hành (agent, chi tiết + ký minisign thủ công: [docs/RELEASING.md](docs/RELEASING.md)):** `bash tests/lint.sh` → `bash tests/integration/run.sh` (0 failed) → bump phiên bản ở 5 chỗ + `CHANGELOG.md` → `./build-release.sh [--channel stable|beta]` → chủ repo ký `dist/<kênh>/SHA256SUMS` ngoại tuyến → commit code + `dist/` → push `main` → tag `vX.Y.Z-beta` trên commit cuối → kiểm tra raw URL + sha256 → nâng cấp từng VPS một.
 
 Mirror CDN isharevn cũ (**đã ngừng phân phối**) — chỉ dùng GitHub raw `main`.

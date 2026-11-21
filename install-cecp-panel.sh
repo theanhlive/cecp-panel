@@ -5,6 +5,8 @@
 #
 # Custom raw base (override):
 #   curl -fsSL …/install-cecp-panel.sh | sudo bash -s -- --raw-base https://HOST/other
+# Release channel (dist/<channel>/, falls back to dist/ on mirrors without channels):
+#   curl -fsSL …/install-cecp-panel.sh | sudo bash -s -- --channel stable
 #
 set -euo pipefail
 
@@ -21,14 +23,17 @@ while [[ $# -gt 0 ]]; do
     --raw-base) CECP_PANEL_RAW_BASE="$2"; shift 2 ;;
     --version) CECP_PANEL_VERSION="$2"; shift 2 ;;
     --sha256) PIN_SHA256="$2"; shift 2 ;;
+    --channel) CHANNEL="$2"; shift 2 ;;
     --no-onboard) NO_ONBOARD=1; shift ;;
     -h|--help)
-      echo "Usage: install-cecp-panel.sh [--raw-base URL] [--version VER] [--sha256 HASH] [--no-onboard]"
+      echo "Usage: install-cecp-panel.sh [--raw-base URL] [--version VER] [--channel stable|beta] [--sha256 HASH] [--no-onboard]"
       exit 0
       ;;
     *) die "Unknown arg: $1" ;;
   esac
 done
+CHANNEL="${CHANNEL:-}"
+[[ -z "$CHANNEL" || "$CHANNEL" =~ ^(stable|beta)$ ]] || die "--channel must be stable or beta"
 
 INSTALLER_DIR=""
 if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "-" && -f "${BASH_SOURCE[0]}" ]]; then
@@ -47,20 +52,24 @@ download_and_install() {
   local base="${CECP_PANEL_RAW_BASE%/}"
   [[ -n "$base" ]] || die "Set CECP_PANEL_RAW_BASE or pass --raw-base (HTTPS raw base URL; default is GitHub main)"
   local name="cecp-panel-${CECP_PANEL_VERSION}.tar.gz"
-  local tmp expected actual
+  local tmp expected actual dir="${base}/dist"
   tmp="$(mktemp -d)"
-  log "Downloading ${base}/dist/${name} ..."
-  if ! curl -fsSL "${base}/dist/${name}" -o "$tmp/bundle.tar.gz"; then
+  # Same layout rule as `cecp-panel update panel`: dist/<channel>/ if the mirror has it.
+  if [[ -n "$CHANNEL" ]] && curl -fsSL "${base}/dist/${CHANNEL}/SHA256SUMS" -o /dev/null 2>/dev/null; then
+    dir="${base}/dist/${CHANNEL}"
+  fi
+  log "Downloading ${dir}/${name} ..."
+  if ! curl -fsSL "${dir}/${name}" -o "$tmp/bundle.tar.gz"; then
     name="cecp-panel-latest.tar.gz"
-    log "Retry: ${base}/dist/${name} ..."
-    curl -fsSL "${base}/dist/${name}" -o "$tmp/bundle.tar.gz"
+    log "Retry: ${dir}/${name} ..."
+    curl -fsSL "${dir}/${name}" -o "$tmp/bundle.tar.gz"
   fi
   # Everything below runs as root: refuse a bundle that does not match the published checksum.
   if [[ -n "${PIN_SHA256:-}" ]]; then
     expected="$PIN_SHA256"
   else
-    curl -fsSL "${base}/dist/SHA256SUMS" -o "$tmp/SHA256SUMS" \
-      || die "Mirror has no dist/SHA256SUMS — refusing an unverified install (or pass --sha256 HASH)"
+    curl -fsSL "${dir}/SHA256SUMS" -o "$tmp/SHA256SUMS" \
+      || die "Mirror has no ${dir}/SHA256SUMS — refusing an unverified install (or pass --sha256 HASH)"
     expected="$(awk -v f="$name" '{n=$2; sub(/^\*/, "", n); if (n == f) print $1}' "$tmp/SHA256SUMS" | head -1)"
   fi
   actual="$(sha256sum "$tmp/bundle.tar.gz" | cut -d' ' -f1)"
@@ -86,6 +95,9 @@ main() {
     rm -rf "$tmp"
   else
     download_and_install
+  fi
+  if [[ -n "$CHANNEL" ]] && command -v cecp-panel &>/dev/null; then
+    cecp-panel update channel "$CHANNEL"
   fi
   log "Install complete."
   if [[ -z "${NO_ONBOARD:-}" ]] && [[ -t 0 ]] && command -v cecp-panel &>/dev/null; then

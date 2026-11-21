@@ -550,6 +550,74 @@ cp "/tmp/mirror/dist/cecp-panel-${VERSION}.tar.gz" /tmp/mirror/dist/cecp-panel-l
 check "update panel latest records the installed version, not 'latest'" \
   bash -c "cecp-panel update panel latest && grep -qF '\"version\": \"$VERSION\"' /etc/cecp-panel/panel.json && ! grep -q '\"version\": \"latest\"' /etc/cecp-panel/panel.json"
 
+echo "=== Release channels (dist/<channel>/, legacy dist/ fallback) ==="
+# Output goes to a file before grep: `| grep -q` exits early and SIGPIPE would kill the update.
+upd_out() { cecp-panel update panel latest >/tmp/upd.out 2>&1; local rc=$?; cat /tmp/upd.out; return "$rc"; }
+export -f upd_out
+check "update channel rejects bad input" \
+  bash -c "! cecp-panel update channel 'beta;id' && ! cecp-panel update channel nightly && ! grep -q '^CECP_PANEL_CHANNEL=.*\(nightly\|id\)' /etc/cecp-panel/panel.env"
+check "update channel stable is saved" \
+  bash -c "cecp-panel update channel stable && grep -qx 'CECP_PANEL_CHANNEL=stable' /etc/cecp-panel/panel.env && cecp-panel update channel | grep -q 'Channel: stable'"
+check "mirror without dist/stable/ falls back to legacy dist/" \
+  bash -c "upd_out && grep -q 'using legacy dist/' /tmp/upd.out && grep -qF '\"version\": \"$VERSION\"' /etc/cecp-panel/panel.json"
+# A stable bundle with a marker file proves the download came from dist/stable/.
+rm -rf /tmp/stable-src && mkdir -p /tmp/stable-src && cp -a /root/cecp-panel /tmp/stable-src/
+touch /tmp/stable-src/cecp-panel/STABLE_MARKER
+mk_channel() {  # mk_channel DIR SRC_PARENT — tarball (+latest) and SHA256SUMS like build-release.sh
+  mkdir -p "$1"
+  tar -C "$2" --exclude=cecp-panel/tests -czf "$1/cecp-panel-${VERSION}.tar.gz" cecp-panel
+  cp "$1/cecp-panel-${VERSION}.tar.gz" "$1/cecp-panel-latest.tar.gz"
+  (cd "$1" && sha256sum "cecp-panel-${VERSION}.tar.gz" cecp-panel-latest.tar.gz >SHA256SUMS)
+  rm -f "$1/SHA256SUMS.minisig"
+}
+mk_channel /tmp/mirror/dist/stable /tmp/stable-src
+check "update panel latest uses dist/stable/ when the mirror has it" \
+  bash -c "upd_out && grep -q 'Channel stable:' /tmp/upd.out && [ -e /opt/cecp-panel/STABLE_MARKER ]"
+check "update channel beta + legacy dist/ replaces the stable bundle" \
+  bash -c "cecp-panel update channel beta && cecp-panel update panel latest && [ ! -e /opt/cecp-panel/STABLE_MARKER ]"
+check "update check shows channel and that signatures are not enforced yet" \
+  bash -c "cecp-panel update check | grep -q 'Update channel: beta' && cecp-panel update check | grep -q 'NOT enforced'"
+
+echo "=== Release signature (minisign, test key) ==="
+SIG=/tmp/sigtest; rm -rf "$SIG"; mkdir -p "$SIG"
+cp /root/cecp-panel/keys/cecp-release.pub "$SIG/placeholder.pub"
+python3 -I "$HERE/minisign_sign.py" genkey "$SIG/test.pub" "$SIG/test.pem"
+python3 -I "$HERE/minisign_sign.py" genkey "$SIG/other.pub" "$SIG/other.pem"
+# Bundles carry the test key, so the key installed by an update stays the test key.
+cp "$SIG/test.pub" /root/cecp-panel/keys/cecp-release.pub
+cp "$SIG/test.pub" /opt/cecp-panel/keys/cecp-release.pub
+mk_channel /tmp/mirror/dist/beta /root
+check "update check reports signatures as required once a key is installed" \
+  bash -c "cecp-panel update check | grep -q 'Release signature: required'"
+check "with a release key, an unsigned SHA256SUMS is refused" \
+  bash -c "! upd_out && grep -q 'refusing an unsigned update' /tmp/upd.out"
+python3 -I "$HERE/minisign_sign.py" sign "$SIG/test.pem" /tmp/mirror/dist/beta/SHA256SUMS \
+  /tmp/mirror/dist/beta/SHA256SUMS.minisig "cecp-panel $VERSION channel=beta"
+check "valid signature is accepted" \
+  bash -c "upd_out && grep -q 'Signature OK' /tmp/upd.out && grep -q '^RW' /opt/cecp-panel/keys/cecp-release.pub"
+if command -v minisign >/dev/null 2>&1; then
+  MS="$(command -v minisign)"; mv "$MS" "$MS.hidden"
+  check "openssl fallback verifies when minisign is not installed" \
+    bash -c "upd_out && grep -q 'Signature OK' /tmp/upd.out"
+  mv "$MS.hidden" "$MS"
+fi
+python3 -I "$HERE/minisign_sign.py" sign "$SIG/other.pem" /tmp/mirror/dist/beta/SHA256SUMS \
+  /tmp/mirror/dist/beta/SHA256SUMS.minisig "cecp-panel $VERSION channel=beta"
+check "signature from another key is refused" \
+  bash -c "! upd_out && grep -q 'Signature check FAILED' /tmp/upd.out"
+python3 -I "$HERE/minisign_sign.py" sign "$SIG/test.pem" /tmp/mirror/dist/beta/SHA256SUMS \
+  /tmp/mirror/dist/beta/SHA256SUMS.minisig "cecp-panel $VERSION channel=beta"
+printf 'x' >>/tmp/mirror/dist/beta/cecp-panel-latest.tar.gz
+(cd /tmp/mirror/dist/beta && sha256sum "cecp-panel-${VERSION}.tar.gz" cecp-panel-latest.tar.gz >SHA256SUMS)
+check "SHA256SUMS changed after signing (tampered bundle re-hashed) is refused" \
+  bash -c "! upd_out && grep -q 'Signature check FAILED' /tmp/upd.out"
+check "panel still works after the refused updates" bash -c "cecp-panel help | head -1 | grep -qF '$VERSION'"
+# Back to the shipped placeholder key and the default channel for the rest of the scenario.
+cp "$SIG/placeholder.pub" /root/cecp-panel/keys/cecp-release.pub
+cp "$SIG/placeholder.pub" /opt/cecp-panel/keys/cecp-release.pub
+sed -i '/^CECP_PANEL_CHANNEL=/d' /etc/cecp-panel/panel.env
+rm -rf /tmp/mirror/dist/beta /tmp/mirror/dist/stable /tmp/stable-src
+
 echo "=== Update everything (update all) ==="
 set_meta() { bash -c "source /opt/cecp-panel/lib/common.sh; site_json_set $1 $2 '$3'"; }
 check "update wp-cli (checksum verified, works even though wp-cli is already installed)" \
