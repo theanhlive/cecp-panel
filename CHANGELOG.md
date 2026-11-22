@@ -24,6 +24,18 @@
 
 **Nâng cấp từ 1.13.1-beta** (khi phát hành): VPS **Ubuntu** chạy `cecp-panel site rebuild-vhost --all` (chuyển pool sang `/etc/php/X.Y/fpm/pool.d`, sửa nhóm htpasswd: chạy lại `site protect-admin DOMAIN on` nếu đang bật) và `cecp-panel optimize redis` nếu Redis không chạy trên 22.04. AlmaLinux: không cần lệnh bổ sung.
 
+### Kênh phát hành + chữ ký minisign (W5, ADR-0001)
+- **`cecp-panel update channel [stable|beta]`** (mới): chọn dòng phát hành, lưu `CECP_PANEL_CHANNEL` vào `/etc/cecp-panel/panel.env` (giá trị khác `stable`/`beta` bị từ chối qua `validate_channel`). Không tham số = in kênh hiện tại. Chưa đặt = `beta` (giữ hành vi cũ tới 2.0.0).
+- **`update panel` đọc `dist/<kênh>/`**; mirror chưa có `dist/<kênh>/SHA256SUMS` ⇒ dùng `dist/` cũ kèm cảnh báo `using legacy dist/`. `update all` dùng cùng logic. `update check` in thêm "Update channel" và "Release signature".
+- **Xác minh chữ ký `SHA256SUMS.minisig`** bằng khoá công khai của panel ĐANG CÀI (`/opt/cecp-panel/keys/cecp-release.pub`): repo hiện chỉ có **placeholder** ⇒ hành vi cũ (chỉ SHA256SUMS) + cảnh báo "no release signing key installed". Khi chủ repo nhúng khoá thật: thiếu `.minisig` hoặc chữ ký sai/khác khoá ⇒ **từ chối cập nhật**. `--sha256 HASH` vẫn là đường khôi phục (bỏ qua chữ ký, có ghi log). Dùng `minisign` nếu có, không thì `openssl` ≥ 3.0 qua `lib/minisign_verify.py` (Ubuntu 22.04 không có gói minisign); thiếu cả hai ⇒ từ chối.
+- **`install.sh`** cài `minisign` nếu kho gói có (EPEL 9, Ubuntu 24.04+); không có thì chỉ ghi chú, không lỗi.
+- **`install-cecp-panel.sh --channel stable|beta`**: tải từ `dist/<kênh>/` (fallback `dist/`) và lưu kênh sau khi cài.
+- **`build-release.sh [--channel stable|beta]`**: build vào `dist/<kênh>/` (mặc định `beta` khi phiên bản có hậu tố, `stable` cấm phiên bản có hậu tố); kênh beta được chép thêm ra `dist/` cho panel ≤ 1.13.x. Xoá `SHA256SUMS.minisig` cũ, kiểm tra tarball có `keys/cecp-release.pub` và không có file `.key`, in lệnh `minisign -Sm` để **ký thủ công ngoại tuyến** (khoá bí mật không nằm trong repo/CI; `.gitignore` chặn `keys/*.key`).
+- Tài liệu: [docs/RELEASING.md](docs/RELEASING.md) — bố cục `dist/`, tạo/đổi/mất khoá, các bước phát hành, việc cần làm ở 2.0.0, giới hạn (chưa chống rollback về bản cũ đã ký; lần cài đầu là TOFU).
+- Test: `tests/integration/scenario.sh` thêm check cho `update channel` (input xấu, lưu, fallback `dist/`, đọc `dist/stable/`), chữ ký (thiếu `.minisig`, chữ ký đúng, fallback openssl, khoá khác, `SHA256SUMS` bị sửa sau khi ký). Helper chỉ dùng cho test: `tests/integration/minisign_sign.py` (tạo khoá/ký định dạng minisign bằng openssl).
+
+**Nâng cấp từ 1.13.1-beta**: `cecp-panel update panel latest`; không cần lệnh bổ sung — VPS tiếp tục nhận kênh beta (từ `dist/beta/`, hoặc `dist/` trên mirror cũ). Muốn kênh ổn định khi có: `cecp-panel update channel stable`. Kiểm tra: `cecp-panel update check` (dòng "Release signature: NOT enforced" là đúng cho tới khi khoá thật được nhúng). Nên `dnf install minisign` / `apt install minisign` nếu kho có (không bắt buộc).
+
 ## 1.13.3-beta — system tune không dừng vì swap
 
 - **`system tune` không còn dừng khi không bật được swap**: nếu `/swapfile` đã tồn tại nhưng `swapon` thất bại (thiếu chữ ký swap, hoặc container LXC/OpenVZ không cho phép), panel thử `mkswap` lại một lần; vẫn lỗi thì chỉ cảnh báo WARN và tiếp tục cài chính sách đĩa, cron bảo trì và quy tắc logrotate (trước đây dừng với `Swap file /swapfile already exists`). Thêm `tests/swap_test.sh`.
