@@ -1,10 +1,10 @@
 # Changelog
 
-## Chưa phát hành
+## 1.13.2-beta — rotate-secrets không còn làm site lỗi cơ sở dữ liệu
 
 - **`security rotate-secrets` nạp lại PHP-FPM**: sau khi ghi `wp-config.php` mới, panel nạp lại PHP-FPM để OPcache không giữ bản cũ; trước đây site có thể trả lỗi cơ sở dữ liệu / HTTP 500 trong tối đa 60 giây sau khi xoay mật khẩu.
 
-**Nâng cấp:** `cecp-panel update panel latest` khi bản mới phát hành; không cần lệnh bổ sung.
+**Nâng cấp từ 1.13.1-beta**: `cecp-panel update panel latest`; không cần lệnh bổ sung. Kiểm tra lại bằng `cecp-panel site probe --all` và `cecp-panel security check`.
 
 ## 1.13.1-beta — chẩn đoán đúng sau nâng cấp
 
