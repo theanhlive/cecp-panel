@@ -1,5 +1,11 @@
 # Changelog
 
+## Chưa phát hành
+
+- **`security rotate-secrets` nạp lại PHP-FPM**: sau khi ghi `wp-config.php` mới, panel nạp lại PHP-FPM để OPcache không giữ bản cũ; trước đây site có thể trả lỗi cơ sở dữ liệu / HTTP 500 trong tối đa 60 giây sau khi xoay mật khẩu.
+
+**Nâng cấp:** `cecp-panel update panel latest` khi bản mới phát hành; không cần lệnh bổ sung.
+
 ## 1.13.1-beta — chẩn đoán đúng sau nâng cấp
 
 Sự cố thật: một file theme thuộc `nginx:nginx` mode 650 làm PHP báo "Permission denied" trên `/wp-login.php` và `/wp-json/` trong khi trang chủ vẫn 200 từ cache; `site probe` báo FAIL đúng nhưng gợi ý sai `allow_putenv`. Bản này sửa các kết luận sai của probe/audit/security check.

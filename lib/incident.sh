@@ -251,6 +251,8 @@ SQL
       panel_secret "  $domain administrator ${login}: new password ${pass}"
     done < <(wp_site_exec "$domain" user list --role=administrator --field=ID --skip-plugins --skip-themes 2>/dev/null)
   fi
+  # OPcache would keep serving the old wp-config.php (old DB password) for up to revalidate_freq seconds.
+  php_fpm_reload_all >/dev/null 2>&1 || true
   optimize_purge_cache "$domain" >/dev/null 2>&1 || true
 }
 

@@ -978,6 +978,9 @@ check "security scan flags a web shell in uploads (exit 1)" bash -c "! cecp-pane
 rm -f "$DOCROOT/wp-content/uploads/shell.php"
 OLDPASS="$(meta_of "$D" db_pass)"
 check "security rotate-secrets --admins" bash -c "cecp-panel security rotate-secrets $D --admins >/tmp/rotate.out 2>&1"
+# No retry loop: right after rotation the site must answer 200 at once (PHP-FPM reloaded, OPcache fresh).
+check "rotate: site answers 200 immediately (no DB error from stale OPcache)" \
+  bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' http://$D/)\" = 200 ]"
 rotated_ok() {
   local p
   p="$(meta_of "$D" db_pass)"
