@@ -412,6 +412,8 @@ if systemctl is-active --quiet fail2ban; then
   fail2ban-client set cecp-wordpress banip 203.0.113.9 >/dev/null 2>&1
   for _ in $(seq 10); do grep -qs 'deny 203.0.113.9;' /etc/nginx/conf.d/cecp-f2b-deny.conf && break; sleep 1; done
   check "ban writes an nginx deny (works behind Cloudflare)" grep -qx 'deny 203.0.113.9;' /etc/nginx/conf.d/cecp-f2b-deny.conf
+  grep -qsx 'deny 203.0.113.9;' /etc/nginx/conf.d/cecp-f2b-deny.conf \
+    || { echo "        --- fail2ban.log (diagnostics)"; tail -25 /var/log/fail2ban.log 2>&1 | sed 's/^/        /'; }
   fail2ban-client set cecp-wordpress unbanip 203.0.113.9 >/dev/null 2>&1
   for _ in $(seq 10); do grep -qs 'deny 203.0.113.9;' /etc/nginx/conf.d/cecp-f2b-deny.conf || break; sleep 1; done
   check "unban removes the nginx deny" bash -c "! grep -qs 'deny 203.0.113.9;' /etc/nginx/conf.d/cecp-f2b-deny.conf"
