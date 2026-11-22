@@ -26,6 +26,17 @@ LOG="${UPGRADE_LOG:-/tmp/cecp-upgrade-${FROM}.log}"
 read -r -a run_opts <<<"${DOCKER_RUN_OPTS:-}"
 read -r -a exec_opts <<<"${DOCKER_EXEC_OPTS:-}"
 
+# CI diagnostics on failure: what systemd and MariaDB say inside the container.
+it_diag() {
+  echo "::group::container diagnostics ($1)"
+  docker logs --tail 40 "$1" 2>&1 || true
+  docker exec "$1" bash -c 'systemctl is-system-running; systemctl --failed --no-pager;
+    systemctl status mariadb mysql --no-pager -l 2>&1 | tail -30;
+    journalctl -u mariadb -u mysql -n 60 --no-pager 2>&1;
+    ls -l /etc/my.cnf.d /etc/mysql/mariadb.conf.d 2>/dev/null; df -h / /var/lib/mysql 2>/dev/null' 2>&1 || true
+  echo "::endgroup::"
+}
+
 cleanup() {
   rm -rf "$WORK"
   [[ "${KEEP:-0}" == "1" ]] || docker rm -f "$NAME" >/dev/null 2>&1 || true
@@ -77,7 +88,7 @@ for _ in $(seq 90); do
   if [[ "$state" == "running" || "$state" == "degraded" ]]; then booted=1; break; fi
   sleep 1
 done
-[[ "$booted" == "1" ]] || { echo "systemd did not boot in container"; exit 1; }
+[[ "$booted" == "1" ]] || { it_diag "$NAME"; echo "systemd did not boot in container"; exit 1; }
 
 # Baseline as a customer gets it (the released bundle), unpacked to /root/baseline/cecp-panel.
 docker exec -i "$NAME" bash -c 'rm -rf /root/baseline && mkdir -p /root/baseline && tar -C /root/baseline -xzf -' <"$BASE"
@@ -86,7 +97,7 @@ tar --exclude=./.git --exclude=./dist -cf - . \
   | docker exec -i "$NAME" bash -c 'rm -rf /root/cecp-panel && mkdir -p /root/cecp-panel && tar -C /root/cecp-panel -xf -'
 
 docker exec "${exec_opts[@]}" "$NAME" bash /root/baseline/cecp-panel/install.sh >"$LOG" 2>&1 \
-  || { tail -40 "$LOG"; echo "baseline $FROM install.sh failed (log: $LOG)"; exit 1; }
+  || { it_diag "$NAME"; tail -40 "$LOG"; echo "baseline $FROM install.sh failed (log: $LOG)"; exit 1; }
 echo "baseline $FROM install.sh OK (log: $LOG)"
 
 docker exec "${exec_opts[@]}" -e FROM="$FROM" -e TO="$TO" "$NAME" \

@@ -44,6 +44,17 @@ docker run -d --name "$NAME" \
   --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
   --tmpfs /run --tmpfs /run/lock \
   "$IMG" >/dev/null
+# CI diagnostics on failure: what systemd and MariaDB say inside the container.
+it_diag() {
+  echo "::group::container diagnostics ($1)"
+  docker logs --tail 40 "$1" 2>&1 || true
+  docker exec "$1" bash -c 'systemctl is-system-running; systemctl --failed --no-pager;
+    systemctl status mariadb mysql --no-pager -l 2>&1 | tail -30;
+    journalctl -u mariadb -u mysql -n 60 --no-pager 2>&1;
+    ls -l /etc/my.cnf.d /etc/mysql/mariadb.conf.d 2>/dev/null; df -h / /var/lib/mysql 2>/dev/null' 2>&1 || true
+  echo "::endgroup::"
+}
+
 cleanup() { [[ "${KEEP:-0}" == "1" ]] || docker rm -f "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
@@ -53,7 +64,7 @@ for _ in $(seq 90); do
   if [[ "$state" == "running" || "$state" == "degraded" ]]; then booted=1; break; fi
   sleep 1
 done
-[[ "$booted" == "1" ]] || { echo "systemd did not boot in container ($OS)"; exit 1; }
+[[ "$booted" == "1" ]] || { it_diag "$NAME"; echo "systemd did not boot in container ($OS)"; exit 1; }
 
 # Some Docker hosts (sandboxed kernels) cannot set up the user namespace of Ubuntu 24.04's
 # hardened redis-server unit (PrivateUsers=yes): it dies with 217/USER. Probe it once and relax
@@ -80,7 +91,7 @@ if [[ -n "${IT_HTTPS_PROXY:-}" ]]; then
 fi
 
 docker exec "${exec_env[@]}" "$NAME" bash /root/cecp-panel/install.sh >"$INSTALL_LOG" 2>&1 \
-  || { tail -40 "$INSTALL_LOG"; echo "install.sh failed ($OS)"; exit 1; }
+  || { it_diag "$NAME"; tail -40 "$INSTALL_LOG"; echo "install.sh failed ($OS)"; exit 1; }
 echo "install.sh OK on $OS (log: $INSTALL_LOG)"
 
 docker exec "${exec_env[@]}" -e "IT_OS=$OS" "$NAME" bash /root/cecp-panel/tests/integration/scenario.sh
