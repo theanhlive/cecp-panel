@@ -608,8 +608,10 @@ check "update channel rejects bad input" \
   bash -c "! cecp-panel update channel 'beta;id' && ! cecp-panel update channel nightly && ! grep -q '^CECP_PANEL_CHANNEL=.*\(nightly\|id\)' /etc/cecp-panel/panel.env"
 check "update channel stable is saved" \
   bash -c "cecp-panel update channel stable && grep -qx 'CECP_PANEL_CHANNEL=stable' /etc/cecp-panel/panel.env && cecp-panel update channel | grep -q 'Channel: stable'"
-check "mirror without dist/stable/ falls back to legacy dist/" \
-  bash -c "upd_out && grep -q 'using legacy dist/' /tmp/upd.out && grep -qF '\"version\": \"$VERSION\"' /etc/cecp-panel/panel.json"
+check "stable channel never falls back to legacy dist/ (the beta line)" \
+  bash -c "! upd_out && grep -q 'channel stable has no release' /tmp/upd.out && ! grep -q 'using legacy dist/' /tmp/upd.out"
+check "beta channel still falls back to legacy dist/" \
+  bash -c "cecp-panel update channel beta && upd_out && grep -q 'using legacy dist/' /tmp/upd.out && cecp-panel update channel stable"
 # A stable bundle with a marker file proves the download came from dist/stable/.
 rm -rf /tmp/stable-src && mkdir -p /tmp/stable-src && cp -a /root/cecp-panel /tmp/stable-src/
 touch /tmp/stable-src/cecp-panel/STABLE_MARKER
@@ -627,6 +629,13 @@ check "update channel beta + legacy dist/ replaces the stable bundle" \
   bash -c "cecp-panel update channel beta && cecp-panel update panel latest && [ ! -e /opt/cecp-panel/STABLE_MARKER ]"
 check "update check shows channel and that signatures are not enforced yet" \
   bash -c "cecp-panel update check | grep -q 'Update channel: beta' && cecp-panel update check | grep -q 'NOT enforced'"
+# Anti-rollback: a mirror serving an older release (version string lowered in the bundle).
+rm -rf /tmp/old-src && mkdir -p /tmp/old-src && cp -a /root/cecp-panel /tmp/old-src/
+sed -i 's/^CECP_PANEL_VERSION="\${CECP_PANEL_VERSION:-[^}]*}"/CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-0.9.0-beta}"/' /tmp/old-src/cecp-panel/lib/common.sh
+rm -rf /tmp/mirror-old/dist && mk_channel /tmp/mirror-old/dist/beta /tmp/old-src
+check "update panel latest refuses an older release (anti-rollback)" \
+  bash -c "cecp-panel update mirror file:///tmp/mirror-old && ! upd_out && grep -q 'refusing a downgrade' /tmp/upd.out && grep -qF '\"version\": \"$VERSION\"' /etc/cecp-panel/panel.json"
+cecp-panel update mirror file:///tmp/mirror >/dev/null
 
 echo "=== Release signature (minisign, test key) ==="
 SIG=/tmp/sigtest; rm -rf "$SIG"; mkdir -p "$SIG"

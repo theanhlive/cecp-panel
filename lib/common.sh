@@ -524,7 +524,11 @@ site_run_as() {
   local u="$1"
   shift
   [[ "$u" =~ ^site_[a-z0-9_]+$ ]] || panel_die "site_run_as: invalid site user '$u'"
-  (cd / && runuser -u "$u" -- "$@")
+  # runuser keeps root's environment (sudo used to reset it): give the site user its own HOME
+  # (wp-cli cache) and drop the backup paths root exported. Variables set on the call line
+  # (e.g. CECP_DB_PASS=... site_run_as ...) are still passed on purpose.
+  (cd / && runuser -u "$u" -- env -u RESTIC_REPOSITORY -u RESTIC_PASSWORD_FILE -u RCLONE_CONFIG \
+    HOME="/home/${u}" "$@")
 }
 
 # site_write_file USER FILE [MODE] < content — atomic replace (a symlink at FILE is replaced,

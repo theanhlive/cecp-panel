@@ -5,6 +5,11 @@
 ### Chạy WP-CLI bằng `runuser` thay vì `sudo`
 - Cài WordPress, lệnh `wp` của panel và dọn transient trong bảo trì giờ chạy qua `site_run_as` (`runuser -u SITE_USER`, cwd `/`, `HOME=/home/SITE_USER`) thay cho `sudo -u`: không phụ thuộc PAM account/sudoers (trên máy mà PAM account của sudo lỗi — ví dụ sssd không chạy — `sudo` từ chối "a password is required" và `site add --wp` hỏng).
 
+### Cập nhật an toàn hơn (review trước 2.0)
+- **Kênh `stable` không bao giờ rơi về `dist/` cũ (dòng beta)**: không tải được `dist/stable/SHA256SUMS` (mirror lỗi tạm thời hoặc bị chặn) ⇒ dừng cập nhật thay vì lặng lẽ cài bản beta. Kênh `beta` vẫn fallback `dist/` như trước.
+- **Chống hạ cấp**: `update panel latest` từ chối bản cũ hơn bản đang cài (mirror phát lại một bản cũ đã ký hợp lệ). Muốn hạ cấp: ghi rõ phiên bản (`update panel 1.13.1-beta`) hoặc `--allow-downgrade`. So sánh theo semver: `2.0.0-rc.1` < `2.0.0`.
+- `site_run_as` (mọi lệnh chạy bằng user của site) đặt `HOME=/home/SITE_USER` và bỏ biến backup của root (`RESTIC_*`, `RCLONE_CONFIG`).
+
 ### Sửa lỗi kiểm tra đầu vào
 - **`validate_ipv4` từ chối octet có số 0 đứng đầu** (`010.0.0.1`): panel từng hiểu là 10 trong khi `inet_aton`/`ping` hiểu là bát phân 8 — IP ghi vào DNS có thể lệch. Áp cho `dns` (bản ghi A).
 

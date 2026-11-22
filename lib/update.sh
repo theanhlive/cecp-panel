@@ -127,16 +127,31 @@ update_component() {
   panel_log "Update done: $comp"
 }
 
-# cecp-panel update panel [VERSION|latest] [--sha256 HASH]
+# panel_version_lt A B — true if release A is older than B (semver core, then a pre-release
+# such as -beta / -rc.1 sorts BEFORE the same core without suffix: 2.0.0-rc.1 < 2.0.0).
+panel_version_lt() {
+  local a="$1" b="$2" ac="${1%%-*}" bc="${2%%-*}"
+  [[ "$a" == "$b" ]] && return 1
+  if [[ "$ac" != "$bc" ]]; then
+    [[ "$(printf '%s\n%s\n' "$ac" "$bc" | sort -V | head -1)" == "$ac" ]]
+    return
+  fi
+  [[ "$a" == *-* && "$b" != *-* ]] && return 0
+  [[ "$a" != *-* && "$b" == *-* ]] && return 1
+  [[ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -1)" == "$a" ]]
+}
+
+# cecp-panel update panel [VERSION|latest] [--sha256 HASH] [--allow-downgrade]
 # The bundle must match dist/<channel>/SHA256SUMS on the mirror (or the pinned hash): the panel
 # runs as root, so an unverified download is remote code execution for whoever controls the
 # mirror. SHA256SUMS comes from the same mirror, so once a release key is installed its minisign
 # signature (made offline, see docs/RELEASING.md) is what actually ties the bundle to the owner.
 update_panel() {
-  local ver="" pin=""
+  local ver="" pin="" allow_down=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --sha256) pin="${2:-}"; shift 2 || true ;;
+      --allow-downgrade) allow_down=1; shift ;;
       *) ver="$1"; shift ;;
     esac
   done
@@ -157,6 +172,10 @@ update_panel() {
   if curl -fsSL "${dir}/SHA256SUMS" -o "$tmp/SHA256SUMS" 2>/dev/null; then
     has_sums=1
     panel_log "Channel $chan: ${dir}/"
+  elif [[ "$chan" != beta ]]; then
+    # Legacy dist/ is the beta line: never hand a stable VPS a beta bundle because one fetch failed.
+    rm -rf "$tmp"
+    panel_die "Could not fetch ${dir}/SHA256SUMS — channel $chan has no release on this mirror (or the mirror is unreachable). Retry later, or: cecp-panel update channel beta"
   else
     dir="${base%/}/dist"
     panel_log "WARN: mirror has no dist/${chan}/ — using legacy dist/ (pre-channel layout)"
@@ -199,6 +218,14 @@ update_panel() {
   for f in "$tmp/cecp-panel/cecp-panel" "$tmp/cecp-panel"/lib/*.sh; do
     bash -n "$f" || { rm -rf "$tmp"; panel_die "Bundle has a syntax error in $(basename "$f") — update aborted"; }
   done
+  # Anti-rollback: a mirror replaying an older, validly signed release must not downgrade the
+  # panel behind the operator's back. Asking for an exact older VERSION is an explicit choice.
+  local new_ver
+  new_ver="$(sed -nE 's/^CECP_PANEL_VERSION="\$\{CECP_PANEL_VERSION:-([0-9][0-9a-z.-]*)\}".*/\1/p' "$tmp/cecp-panel/lib/common.sh" | head -1)"
+  if [[ "$ver" == latest && -n "$new_ver" ]] && (( ! allow_down )) && panel_version_lt "$new_ver" "$CECP_PANEL_VERSION"; then
+    rm -rf "$tmp"
+    panel_die "Mirror offers $new_ver, older than the installed $CECP_PANEL_VERSION — refusing a downgrade (pass --allow-downgrade, or name the version explicitly)"
+  fi
 
   mkdir -p "$VAR_LIB/backups"
   bak="$(mktemp -d "$VAR_LIB/backups/panel-$(date +%Y%m%d_%H%M%S)-XXXX")"
