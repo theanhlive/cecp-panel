@@ -2,6 +2,9 @@
 
 ## Chưa phát hành
 
+### Chạy WP-CLI bằng `runuser` thay vì `sudo`
+- Cài WordPress, lệnh `wp` của panel và dọn transient trong bảo trì giờ chạy qua `site_run_as` (`runuser -u SITE_USER`, cwd `/`, `HOME=/home/SITE_USER`) thay cho `sudo -u`: không phụ thuộc PAM account/sudoers (trên máy mà PAM account của sudo lỗi — ví dụ sssd không chạy — `sudo` từ chối "a password is required" và `site add --wp` hỏng).
+
 ### Sửa lỗi kiểm tra đầu vào
 - **`validate_ipv4` từ chối octet có số 0 đứng đầu** (`010.0.0.1`): panel từng hiểu là 10 trong khi `inet_aton`/`ping` hiểu là bát phân 8 — IP ghi vào DNS có thể lệch. Áp cho `dns` (bản ghi A).
 

@@ -179,7 +179,7 @@ system_clean_wp_transients() {
     docroot="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["docroot"])' "$f")"
     site_user="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["site_user"])' "$f")"
     [[ -d "$docroot" ]] || continue
-    sudo -u "$site_user" wp transient delete --expired --path="$docroot" --quiet 2>/dev/null && \
+    site_run_as "$site_user" env HOME="/home/${site_user}" wp transient delete --expired --path="$docroot" --quiet 2>/dev/null && \
       panel_log "WP transients: $domain" || true
   done
   shopt -u nullglob

@@ -51,6 +51,7 @@ it_diag() {
   docker exec "$1" bash -c 'systemctl is-system-running; systemctl --failed --no-pager;
     systemctl status mariadb mysql --no-pager -l 2>&1 | tail -30;
     journalctl -u mariadb -u mysql -n 60 --no-pager 2>&1;
+    authselect current 2>&1 | head -3; grep -E "^(account|auth)" /etc/pam.d/sudo /etc/pam.d/system-auth /etc/pam.d/common-account 2>/dev/null; systemctl is-active sssd 2>&1; getent shadow root >/dev/null && echo shadow-ok;
     ls -l /etc/my.cnf.d /etc/mysql/mariadb.conf.d 2>/dev/null; df -h / /var/lib/mysql 2>/dev/null' 2>&1 || true
   echo "::endgroup::"
 }

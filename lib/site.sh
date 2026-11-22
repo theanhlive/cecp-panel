@@ -635,7 +635,7 @@ site_install_wordpress() {
   local domain="$1" docroot="$2" site_user="$3" db_name="$4" db_user="$5" db_pass="$6"
   wp_ensure_cli
   panel_log "Installing WordPress for $domain ..."
-  local wp_run=(sudo -u "$site_user" php -d memory_limit=512M "$WP_CLI_BIN")
+  local wp_run=(site_run_as "$site_user" env HOME="/home/${site_user}" php -d memory_limit=512M "$WP_CLI_BIN")
   "${wp_run[@]}" core download --path="$docroot" --quiet
   # Passwords via --prompt (stdin), not argv: site users can read argv of other processes.
   "${wp_run[@]}" config create \
