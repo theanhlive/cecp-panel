@@ -47,10 +47,29 @@ php_list_versions() {
   echo "Per site: cecp-panel php set DOMAIN 82"
 }
 
+# Debian/Ubuntu: phpX.Y-fpm from the configured apt sources (versions other than the distro one
+# need a repository such as ppa:ondrej/php).
+php_install_version_debian() {
+  local ver="$1" dv ext
+  dv="$(php_dotted_version "$ver")"
+  if [[ ! -d "/etc/php/${dv}/fpm" ]]; then
+    panel_log "Installing PHP ${dv} (apt) ..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y "php${dv}-fpm" "php${dv}-cli" "php${dv}-mysql" "php${dv}-opcache" \
+      || panel_die "Could not install PHP ${dv} from apt (other versions than the distro one need e.g. ppa:ondrej/php)"
+    for ext in gd xml mbstring intl zip bcmath soap curl imagick redis; do
+      apt-get install -y -q "php${dv}-${ext}" >/dev/null 2>&1 || true
+    done
+  fi
+  systemctl enable --now "php${dv}-fpm" 2>/dev/null || true
+  panel_log "PHP ${dv} installed. Service: php${dv}-fpm"
+}
+
 php_install_version() {
   local ver
   ver="$(php_version_normalize "${1:-}")"
   require_root
+  if os_is_debian; then php_install_version_debian "$ver"; return 0; fi
   php_ensure_remi
   local pfx ext
   pfx="$(php_remipkg_prefix "$ver")"
@@ -147,7 +166,7 @@ php_config() {
   local kv key val k
   local -a sets=()
   if [[ $# -eq 0 ]]; then
-    echo "=== PHP settings: $domain (PHP $(site_json_get_or "$domain" php_version 80)) ==="
+    echo "=== PHP settings: $domain (PHP $(site_json_get_or "$domain" php_version "$(php_default_version)")) ==="
     for k in $PHP_CFG_KEYS; do
       val="$(site_json_get_or "$domain" "php_$k" "")"
       printf '  %-20s %-8s %s\n' "$k" "$(php_cfg_get "$domain" "$k")" "$([[ -n "$val" ]] && echo "(custom)" || echo "(default)")"
@@ -191,7 +210,9 @@ php_fpm_d_dir() {
   local ver="$1"
   local norm
   norm="$(php_version_normalize "$ver")"
-  if [[ "$norm" == "80" ]] && [[ -d /etc/php-fpm.d ]]; then
+  if os_is_debian; then
+    echo "/etc/php/$(php_dotted_version "$norm")/fpm/pool.d"
+  elif [[ "$norm" == "80" ]] && [[ -d /etc/php-fpm.d ]]; then
     echo /etc/php-fpm.d
   else
     echo "/etc/opt/remi/php${norm}/php-fpm.d"
@@ -202,7 +223,8 @@ php_fpm_sock_for_version() {
   local ver="$1" pool="$2"
   local norm
   norm="$(php_version_normalize "$ver")"
-  if [[ "$norm" == "80" ]]; then
+  # Debian/Ubuntu: every version's pools listen in /run/php (pool names are unique per site).
+  if [[ "$norm" == "80" ]] || os_is_debian; then
     echo "$(detect_php_fpm_sock_dir)/${pool}.sock"
   else
     echo "/var/opt/remi/php${norm}/run/php-fpm/${pool}.sock"
@@ -216,7 +238,7 @@ php_set_site_version() {
   [[ -f "$(site_meta_path "$domain")" ]] || panel_die "Site not found: $domain"
   local norm
   norm="$(php_version_normalize "$ver")"
-  if [[ "$norm" != "80" ]]; then
+  if [[ "$norm" != "$(php_default_version)" ]]; then
     php_install_version "$norm"
   fi
   local php_sock
@@ -238,11 +260,7 @@ php_set_site_version() {
   site_render_vhost "$domain"
   # The pool left one FPM service (reload is fine for removals) and joined another (restart).
   php_fpm_reload_all
-  if [[ "$norm" == "80" ]]; then
-    php_fpm_restart_for_new_pool php-fpm
-  else
-    php_fpm_restart_for_new_pool "$(php_remipkg_prefix "$norm")-php-fpm"
-  fi
+  php_fpm_restart_for_new_pool "$(php_fpm_service_for_version "$norm")"
   nginx_test_and_reload || panel_die "nginx rejected the vhost for $domain (config rolled back)"
   panel_log "Site $domain now uses PHP ${norm}"
 }

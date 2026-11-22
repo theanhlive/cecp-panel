@@ -191,8 +191,27 @@ site_set_ssl_flag() {
   site_json_set "$1" ssl "$v"
 }
 
+# Distro family: "debian" (Ubuntu/Debian) or "rhel" (AlmaLinux/Rocky/CentOS).
+os_is_debian() { [[ -f /etc/debian_version ]]; }
+os_family() { if os_is_debian; then echo debian; else echo rhel; fi; }
+
+# The user nginx runs as: "nginx" on RHEL, "www-data" on Debian/Ubuntu (from nginx.conf when set).
+# PHP-FPM sockets are handed to it and docroot ACLs grant it read access.
+nginx_user() {
+  if [[ -z "${CECP_NGINX_USER:-}" ]]; then
+    CECP_NGINX_USER="$(awk '$1 == "user" {sub(/;.*/, "", $2); print $2; exit}' /etc/nginx/nginx.conf 2>/dev/null || true)"
+    if [[ ! "$CECP_NGINX_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || ! id "$CECP_NGINX_USER" &>/dev/null; then
+      if os_is_debian; then CECP_NGINX_USER=www-data; else CECP_NGINX_USER=nginx; fi
+    fi
+  fi
+  echo "$CECP_NGINX_USER"
+}
+
+# Socket directory of the distro PHP-FPM pools: /run/php-fpm (RHEL), /run/php (Debian/Ubuntu).
 detect_php_fpm_sock_dir() {
-  if [[ -d /run/php-fpm ]]; then
+  if os_is_debian; then
+    echo /run/php
+  elif [[ -d /run/php-fpm ]]; then
     echo /run/php-fpm
   elif [[ -d /var/run/php-fpm ]]; then
     echo /var/run/php-fpm
@@ -285,6 +304,15 @@ sshd_apply_dropin() {
   return 1
 }
 
+# A kernel without IPv6 (ipv6.disable=1, some containers) makes nginx refuse every
+# `listen [::]:...` line ("socket() [::]:80 failed (97)") — and then no site starts at all.
+nginx_has_ipv6() { [[ -f /proc/net/if_inet6 ]]; }
+# Drop the IPv6 listen lines of a rendered config when the kernel has no IPv6.
+nginx_strip_ipv6_listen() {
+  nginx_has_ipv6 && return 0
+  sed -i -E '/^[[:space:]]*listen[[:space:]]+\[::\]/d' "$@"
+}
+
 # listen lines for the HTTPS server block: `http2 on;` exists from nginx 1.25.1, older
 # versions (AlmaLinux 9: 1.20/1.22/1.24) need `listen ... ssl http2`.
 nginx_listen_ssl_lines() {
@@ -340,10 +368,11 @@ php_fpm_restart_for_new_pool() {
   php_fpm_fix_socket_owner
 }
 
-# Safety net: every panel pool socket must be owned by nginx (listen.owner).
+# Safety net: every panel pool socket must be owned by nginx's user (listen.owner).
 php_fpm_fix_socket_owner() {
-  id nginx &>/dev/null || return 0
-  local f sock owner
+  local f sock owner web
+  web="$(nginx_user)"
+  id "$web" &>/dev/null || return 0
   shopt -s nullglob
   for f in "$SITES_DIR"/*.json; do
     sock="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("php_sock",""))' "$f")"
@@ -354,8 +383,8 @@ php_fpm_fix_socket_owner() {
     done
     [[ -S "$sock" ]] || continue
     owner="$(stat -c %U:%G "$sock")"
-    if [[ "$owner" != "nginx:nginx" ]]; then
-      chown nginx:nginx "$sock"
+    if [[ "$owner" != "$web:$web" ]]; then
+      chown "$web:$web" "$sock"
       chmod 660 "$sock"
       panel_log "Fixed PHP-FPM socket owner $sock (was $owner)"
     fi
@@ -411,7 +440,7 @@ php_fpm_reload_strict() {
   done < <(php_fpm_active_units)
   if [[ "$n" == 0 && "$rc" == 0 ]]; then
     # nothing active: start the default unit (best effort, as before); strict fails if it stays down
-    systemctl restart php-fpm 2>/dev/null && n=1
+    systemctl restart "$(php_fpm_default_service)" 2>/dev/null && n=1
     [[ "$n" == 1 ]] || { echo "Không tìm thấy PHP-FPM nào để nạp lại" >&2; rc=1; }
   fi
   return "$rc"
@@ -425,8 +454,35 @@ php_fpm_reload() {
     n=$(( n + 1 ))
     systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
   done < <(php_fpm_active_units)
-  [[ "$n" -gt 0 ]] || systemctl restart php-fpm 2>/dev/null || true
+  [[ "$n" -gt 0 ]] || systemctl restart "$(php_fpm_default_service)" 2>/dev/null || true
 }
+
+# Distro PHP version, normalized like php_version_normalize: "80" stands for the AlmaLinux/Rocky
+# php-fpm (/etc/php-fpm.d, whatever AppStream version it is); Debian/Ubuntu: the packaged version
+# under /etc/php/X.Y (Ubuntu 22.04: 81, 24.04: 83).
+php_default_version() {
+  if ! os_is_debian; then echo 80; return 0; fi
+  local v
+  v="$(php -r 'echo PHP_MAJOR_VERSION, PHP_MINOR_VERSION;' 2>/dev/null || true)"
+  if [[ ! "$v" =~ ^[0-9]{2}$ || ! -d "/etc/php/${v:0:1}.${v:1}/fpm" ]]; then
+    v="$(find /etc/php -mindepth 2 -maxdepth 2 -type d -name fpm 2>/dev/null \
+      | sed -nE 's#^/etc/php/([0-9])\.([0-9])/fpm$#\1\2#p' | sort -n | tail -1)"
+  fi
+  echo "${v:-80}"
+}
+
+# "81" -> "8.1"
+php_dotted_version() { echo "${1:0:1}.${1:1:1}"; }
+
+# systemd unit of the FPM master for a normalized version: php-fpm (RHEL default),
+# php83-php-fpm (Remi), php8.3-fpm (Debian/Ubuntu).
+php_fpm_service_for_version() {
+  local v="$1"
+  if os_is_debian; then echo "php$(php_dotted_version "$v")-fpm"
+  elif [[ "$v" == 80 ]]; then echo php-fpm
+  else echo "php${v}-php-fpm"; fi
+}
+php_fpm_default_service() { php_fpm_service_for_version "$(php_default_version)"; }
 
 # template_render TPL OUT KEY VALUE ... — replaces {{KEY}}. Done in Python: bash 5.2's
 # patsub_replacement would turn "&" inside values (nginx regexes) into the matched text.

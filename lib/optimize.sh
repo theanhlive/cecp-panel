@@ -11,7 +11,7 @@ ensure_nginx_global() {
   local target="/etc/nginx/conf.d/00-cecp-global.conf"
   rm -f /etc/nginx/conf.d/cecp-global.conf
   mkdir -p /var/cache/nginx/cecp /etc/nginx/snippets
-  chown nginx:nginx /var/cache/nginx/cecp 2>/dev/null || chown www-data:www-data /var/cache/nginx/cecp 2>/dev/null || true
+  chown "$(nginx_user):$(nginx_user)" /var/cache/nginx/cecp 2>/dev/null || true
   local rendered
   rendered="$(<"$src")"
   # Ubuntu's nginx.conf already has `gzip on;` — a second one fails nginx -t.
@@ -60,6 +60,7 @@ server {
     ssl_reject_handshake on;
 }
 EOF
+  nginx_strip_ipv6_listen "$f"
   chmod 644 "$f"
   if ! nginx -t -q 2>/dev/null; then
     rm -f "$f"
@@ -247,10 +248,17 @@ EOF
     fi
   fi
 
+  # "-::1" (skip ::1 when the host has no IPv6) needs Redis >= 6.2; Ubuntu 22.04 ships 6.0, which
+  # refuses to start on it ("Could not create server TCP listening socket -::1:6379").
+  local bind_line="bind 127.0.0.1 -::1" rv
+  rv="$(redis-server --version 2>/dev/null | grep -oE 'v=[0-9]+\.[0-9]+' | cut -d= -f2)"
+  if [[ -n "$rv" && "$(printf '%s\n%s\n' 6.2 "$rv" | sort -V | head -1)" != 6.2 ]]; then
+    bind_line="bind 127.0.0.1"
+  fi
   local cecp_redis_snippet
   cecp_redis_snippet="$(cat <<EOF
 # CECP Panel Redis hardening
-bind 127.0.0.1 -::1
+${bind_line}
 protected-mode yes
 requirepass ${pass}
 maxmemory ${mem}mb
@@ -274,7 +282,7 @@ EOF
     fi
   else
     # inline sed on main conf
-    sed -i 's/^#\?bind .*/bind 127.0.0.1 -::1/' "$conf" 2>/dev/null || true
+    sed -i "s/^#\\?bind .*/${bind_line}/" "$conf" 2>/dev/null || true
     if grep -qE '^\s*requirepass' "$conf"; then
       sed -i "s/^\s*requirepass.*/requirepass ${pass}/" "$conf"
     else

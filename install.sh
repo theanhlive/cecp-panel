@@ -9,6 +9,10 @@
 # Usage (from your Mac — one command, pipes this script):
 #   ssh -i ~/.ssh/KEY root@VPS_IP 'bash -s' < install.sh
 set -euo pipefail
+# Files this root tool creates (nginx/cron/MariaDB/sudoers-like config) must never come out
+# group/world-writable, whatever umask the caller has (seen: 0000 under `docker exec`):
+# MariaDB ignores such option files, logrotate skips such dirs, and writable config is root.
+umask 022
 
 CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.13.3-beta}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/cecp-panel}"
@@ -128,6 +132,11 @@ configure_nginx_defaults() {
   if [[ -f /etc/nginx/conf.d/default.conf ]]; then
     mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.cecp-disabled 2>/dev/null || true
   fi
+  # Kernel without IPv6: the distro default server's `listen [::]:80` would keep nginx down.
+  if [[ ! -f /proc/net/if_inet6 ]]; then
+    sed -i -E 's/^([[:space:]]*)(listen[[:space:]]+\[::\])/\1# cecp: no IPv6 # \2/' \
+      /etc/nginx/nginx.conf /etc/nginx/sites-enabled/default 2>/dev/null || true
+  fi
   # Hide version early
   cat >/etc/nginx/conf.d/cecp-security.conf <<'EOF'
 server_tokens off;
@@ -136,7 +145,7 @@ EOF
     setsebool -P httpd_enable_homedirs 1 2>/dev/null || true
     setsebool -P httpd_read_user_content 1 2>/dev/null || true
   fi
-  nginx -t && systemctl reload nginx 2>/dev/null || true
+  nginx -t && systemctl reload-or-restart nginx 2>/dev/null || true
 }
 
 install_certbot_cron() {

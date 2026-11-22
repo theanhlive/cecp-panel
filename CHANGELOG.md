@@ -1,5 +1,29 @@
 # Changelog
 
+## Chưa phát hành
+
+### Test tích hợp đa OS (W2, ADR-0001)
+- **`tests/integration/run.sh` nhận `OS=alma9|ubuntu22.04|ubuntu24.04`** (mặc định `alma9`, giữ nguyên tên image/container/log cũ). Image mới `tests/integration/Dockerfile.ubuntu2204`, `Dockerfile.ubuntu2404`: Ubuntu + systemd làm PID 1, gói giống `install_packages_debian` của `install.sh` (+ openssh-server, cron, rsyslog, logrotate, redis-server — cài sẵn nhưng **tắt**, giống AlmaLinux). Mỗi OS một container riêng (`cecp-panel-it-ubuntu2204`…) nên chạy song song được.
+- Chạy sau proxy egress (sandbox/CI): `IT_HTTPS_PROXY=http://HOST:PORT` (địa chỉ container với tới được) và `IT_CA_FILE=/path/ca.pem` (CA cần tin, truyền bằng BuildKit secret). Không đặt hai biến này thì hành vi như cũ.
+- `scenario.sh`: đường dẫn/tên dịch vụ theo OS (`$FPM_SVC`, `$FPM_POOL_DIR`, `$FPM_SOCK_DIR`, `$WEBU`, `$OPCACHE_INI`, `$DB_TUNE_CNF`, `$REDIS_SVC`…) thay cho literal AlmaLinux; không check nào bị xoá hay bỏ qua. Check mới: cấu hình ghi dưới `umask 0000` vẫn 644 (mọi OS); `rebuild-vhost` chuyển site Ubuntu cũ "PHP 80" sang PHP distro (chỉ Ubuntu, gắn `if [ "$IT_FAMILY" = debian ]`).
+- Kết quả chạy thật (Docker, 2026-11-21): alma9 **401 passed, 0 failed**; ubuntu22.04 **402 passed, 0 failed**; ubuntu24.04 **402 passed, 0 failed**. Trên Docker host không dựng được user namespace cho unit `redis-server` của 24.04 (`PrivateUsers=yes` → 217/USER), `run.sh` thử khởi động một lần và chỉ nới đúng tuỳ chọn đó trong container test (VPS thật không cần).
+
+### Sửa lỗi Ubuntu 22.04/24.04 (lộ ra khi chạy scenario)
+- **PHP-FPM theo distro**: site mới trên Ubuntu dùng PHP của distro (`php_version` 81 trên 22.04, 83 trên 24.04), pool ở `/etc/php/X.Y/fpm/pool.d`, socket `/run/php`, dịch vụ `phpX.Y-fpm` (trước đây pool bị ghi vào `/etc/opt/remi/php80/…` không ai đọc → site 502). Hàm mới `php_default_version`, `php_fpm_service_for_version`, `php_fpm_default_service` (`lib/common.sh`); `php install`/`php set` trên Ubuntu cài `phpX.Y-fpm` bằng apt (phiên bản khác distro cần repo như `ppa:ondrej/php`); `site limits` dùng `/usr/sbin/php-fpmX.Y`.
+- **User của nginx**: `nginx_user` (đọc `user` trong `nginx.conf`; `www-data` trên Ubuntu) cho `listen.owner/group` của pool, ACL docroot, sửa chủ socket, nhóm của file htpasswd (`protect-admin`, mật khẩu staging — trước đây nhóm `nginx` không tồn tại nên nginx trả **500**), thư mục cache và `security check`.
+- **Redis 6.0 (Ubuntu 22.04)** không khởi động được với `bind 127.0.0.1 -::1` (cú pháp `-` chỉ có từ 6.2): panel nay ghi `bind 127.0.0.1` cho Redis < 6.2.
+- **Monitor**: theo dõi/tự khởi động lại `phpX.Y-fpm` và `redis-server` trên Ubuntu (trước đây bỏ qua vì tìm `php-fpm`/`php81-php-fpm`); drop-in restart áp cho mọi `php*-fpm.service`.
+- **`db slow-log`** trên Ubuntu ghi `/etc/mysql/mariadb.conf.d/99-cecp-slowlog.cnf` + `/var/log/mysql/mariadb-slow.log` (trước đây lỗi vì không có `/etc/my.cnf.d`).
+- **fail2ban**: jail sshd chỉ dùng `backend = systemd` khi Python có module `systemd` (`python3-systemd`); thiếu module thì fail2ban từng từ chối cả cấu hình và không jail nào chạy.
+- **Backup cấu hình site** gồm cả pool `/etc/php/*/fpm/pool.d/cecp-SLUG.conf`; `site remove` xoá pool Ubuntu và nạp lại đúng `phpX.Y-fpm`.
+
+### Sửa lỗi chung (mọi OS)
+- **`umask 022`** ở đầu `cecp-panel` và `install.sh`: gọi với umask 0000 (vd. `docker exec`) từng tạo cnf MariaDB/nginx mode 666 (MariaDB bỏ qua "world-writable config"), `/var/log/cecp-panel` 777 (logrotate từ chối xoay).
+- **Kernel không có IPv6** (`ipv6.disable=1`, một số container): vhost, catch-all HTTPS và server mặc định của distro bỏ dòng `listen [::]` (trước đây nginx không khởi động → mọi site chết). `install.sh` dùng `reload-or-restart` để nginx đang dừng được khởi động.
+- **`system tune`**: không `swapon` được (LXC/OpenVZ, container) chỉ còn là cảnh báo; dọn đĩa, cron bảo trì và logrotate vẫn được cài (trước đây dừng giữa chừng).
+
+**Nâng cấp từ 1.13.1-beta** (khi phát hành): VPS **Ubuntu** chạy `cecp-panel site rebuild-vhost --all` (chuyển pool sang `/etc/php/X.Y/fpm/pool.d`, sửa nhóm htpasswd: chạy lại `site protect-admin DOMAIN on` nếu đang bật) và `cecp-panel optimize redis` nếu Redis không chạy trên 22.04. AlmaLinux: không cần lệnh bổ sung.
+
 ## 1.13.3-beta — system tune không dừng vì swap
 
 - **`system tune` không còn dừng khi không bật được swap**: nếu `/swapfile` đã tồn tại nhưng `swapon` thất bại (thiếu chữ ký swap, hoặc container LXC/OpenVZ không cho phép), panel thử `mkswap` lại một lần; vẫn lỗi thì chỉ cảnh báo WARN và tiếp tục cài chính sách đĩa, cron bảo trì và quy tắc logrotate (trước đây dừng với `Swap file /swapfile already exists`). Thêm `tests/swap_test.sh`.
