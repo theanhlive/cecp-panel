@@ -3,8 +3,8 @@
 user = {{SITE_USER}}
 group = {{SITE_USER}}
 listen = {{PHP_SOCK}}
-listen.owner = nginx
-listen.group = nginx
+listen.owner = {{WEB_USER}}
+listen.group = {{WEB_USER}}
 listen.mode = 0660
 pm = ondemand
 ; Sized from RAM and site count at render time (cecp-panel site rebuild-vhost --all re-sizes),

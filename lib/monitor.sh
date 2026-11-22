@@ -4,7 +4,7 @@ set -euo pipefail
 
 MONITOR_STATE="$VAR_LIB/monitor/state.json"
 MONITOR_CRON="/etc/cron.d/cecp-monitor"
-MONITOR_SERVICES=(nginx php-fpm mariadb redis fail2ban)
+MONITOR_SERVICES=(nginx php-fpm mariadb redis redis-server fail2ban)
 
 monitor_env() {
   local ssl=14 disk=85 age=36
@@ -50,7 +50,7 @@ monitor_install_restart_policy() {
   local -a svcs=("${MONITOR_SERVICES[@]}")
   while read -r svc; do
     [[ -n "$svc" ]] && svcs+=("${svc%.service}")
-  done < <(systemctl list-unit-files 'php*-php-fpm.service' --no-legend 2>/dev/null | awk '{print $1}')
+  done < <(systemctl list-unit-files 'php*-fpm.service' --no-legend 2>/dev/null | awk '{print $1}')
   for svc in "${svcs[@]}"; do
     systemctl list-unit-files "${svc}.service" --no-legend 2>/dev/null | grep -q . || continue
     dir="/etc/systemd/system/${svc}.service.d"

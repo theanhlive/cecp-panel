@@ -235,7 +235,8 @@ backup_stage_config() {
   site_user="$(site_json_get "$domain" site_user)"
   local -a files=()
   for f in "/etc/nginx/conf.d/cecp-${slug}.conf" "/etc/php-fpm.d/cecp-${slug}.conf" \
-           /etc/opt/remi/php*/php-fpm.d/cecp-"${slug}".conf "/etc/cron.d/cecp-wp-${slug}" \
+           /etc/opt/remi/php*/php-fpm.d/cecp-"${slug}".conf /etc/php/*/fpm/pool.d/cecp-"${slug}".conf \
+           "/etc/cron.d/cecp-wp-${slug}" \
            "/etc/ssh/sshd_config.d/cecp-${site_user}.conf" "/etc/nginx/cecp-auth/${slug}.htpasswd" \
            "/etc/letsencrypt/renewal/${domain}.conf" "/etc/letsencrypt/live/${domain}" \
            "/etc/letsencrypt/archive/${domain}" "/etc/nginx/cecp-auth/${slug}-site.htpasswd" \

@@ -242,9 +242,11 @@ security_fail2ban_full() {
   security_audit_log "security fail2ban-full"
   mkdir -p /etc/fail2ban/jail.d /etc/fail2ban/filter.d /etc/fail2ban/action.d
 
-  # Prefer systemd backend when available (Alma/RHEL); else file-based
+  # Prefer the systemd backend when fail2ban can use it; else file-based. It needs the python
+  # systemd module (python3-systemd, only a Recommends on Ubuntu): without it fail2ban refuses the
+  # WHOLE config ("Failed to initialize any backend for Jail 'sshd'") and no jail runs at all.
   local ssh_backend="auto"
-  if systemctl is-system-running &>/dev/null; then
+  if systemctl is-system-running &>/dev/null && python3 -c 'import systemd.journal' &>/dev/null; then
     ssh_backend="systemd"
   fi
 
@@ -536,8 +538,8 @@ security_self_check() {
     else _ck WARN "$dom: old vhost (headers dropped on PHP/static) — run: cecp-panel site rebuild-vhost $dom"; fi
     local sock
     sock="$(site_json_get_or "$dom" php_sock "")"
-    if [[ -S "$sock" && "$(stat -c %U "$sock")" != "nginx" ]] && id nginx &>/dev/null; then
-      _ck FAIL "$dom: PHP-FPM socket owned by $(stat -c %U:%G "$sock") — nginx gets 502 (run: systemctl restart php-fpm)"
+    if [[ -S "$sock" && "$(stat -c %U "$sock")" != "$(nginx_user)" ]] && id "$(nginx_user)" &>/dev/null; then
+      _ck FAIL "$dom: PHP-FPM socket owned by $(stat -c %U:%G "$sock") — nginx gets 502 (run: systemctl restart $(php_fpm_default_service))"
     fi
     local fatals fnames fn nlog="${PROBE_NGINX_LOG_DIR:-/var/log/nginx}/${dom}-error.log"
     if [[ ! -r "$nlog" ]]; then
@@ -619,7 +621,7 @@ security_self_check() {
       else
         _ck PASS "$dom: wp-config.php not world-readable"
       fi
-      if command -v getfacl &>/dev/null && getfacl -p "$wpcfg" 2>/dev/null | grep -qE '^user:nginx:'; then
+      if command -v getfacl &>/dev/null && getfacl -p "$wpcfg" 2>/dev/null | grep -qE "^user:$(nginx_user):"; then
         _ck FAIL "$dom: wp-config.php still has an nginx ACL read entry (any process sharing the nginx identity — e.g. a misconfigured PHP-FPM pool — can read it) — run: cecp-panel security harden-docroot $dom"
       else
         _ck PASS "$dom: wp-config.php has no nginx ACL entry"

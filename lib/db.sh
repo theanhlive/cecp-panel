@@ -3,8 +3,14 @@
 set -euo pipefail
 
 DB_EXPORT_DIR="$VAR_LIB/db-exports"
-DB_SLOW_LOG="/var/log/mariadb/slow.log"
-DB_SLOW_CNF="/etc/my.cnf.d/cecp-slowlog.cnf"
+# RHEL: /etc/my.cnf.d + /var/log/mariadb; Debian/Ubuntu: /etc/mysql/mariadb.conf.d + /var/log/mysql.
+if [[ -d /etc/mysql/mariadb.conf.d && ! -d /etc/my.cnf.d ]]; then
+  DB_SLOW_LOG="/var/log/mysql/mariadb-slow.log"
+  DB_SLOW_CNF="/etc/mysql/mariadb.conf.d/99-cecp-slowlog.cnf"
+else
+  DB_SLOW_LOG="/var/log/mariadb/slow.log"
+  DB_SLOW_CNF="/etc/my.cnf.d/cecp-slowlog.cnf"
+fi
 
 db_require_site() {
   local domain="${1,,}"
@@ -166,6 +172,7 @@ db_slow_log() {
       [[ "$secs" =~ ^[0-9]{1,3}(\.[0-9]{1,2})?$ ]] || panel_die "SECONDS: e.g. 1 or 0.5"
       install -d -o mysql -g mysql -m 750 "$(dirname "$DB_SLOW_LOG")" 2>/dev/null || true
       printf '[mysqld]\nslow_query_log = 1\nslow_query_log_file = %s\nlong_query_time = %s\n' "$DB_SLOW_LOG" "$secs" >"$DB_SLOW_CNF"
+      chmod 644 "$DB_SLOW_CNF"  # MariaDB ignores a world-writable option file
       mysql -e "SET GLOBAL slow_query_log_file='${DB_SLOW_LOG}'; SET GLOBAL long_query_time=${secs}; SET GLOBAL slow_query_log=1;"
       printf '%s {\n    weekly\n    rotate 4\n    compress\n    missingok\n    notifempty\n    copytruncate\n}\n' "$DB_SLOW_LOG" \
         >/etc/logrotate.d/cecp-mariadb-slow

@@ -274,7 +274,11 @@ EOF
 system_tune_install() {
   require_root
   system_ensure_config
-  system_swap_ensure
+  # A host that cannot swapon (LXC/OpenVZ VPS, containers) must still get the disk policy,
+  # maintenance cron and logrotate rules below.
+  if ! (system_swap_ensure); then
+    panel_log "WARN: swap not set up (swapon not permitted here?) — continuing without it"
+  fi
   system_disk_clean
   system_enable_maintain_cron
   system_logrotate_install

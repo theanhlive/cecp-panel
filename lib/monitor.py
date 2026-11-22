@@ -73,9 +73,20 @@ def unit_exists(name):
     return rc == 0 and bool(out)
 
 
+DEBIAN = os.path.exists("/etc/debian_version")
+
+
+def php_fpm_unit(v):
+    """FPM unit of a normalized PHP version: php-fpm / php83-php-fpm (RHEL, Remi), php8.3-fpm (Debian/Ubuntu)."""
+    if DEBIAN:
+        return f"php{v[:1]}.{v[1:]}-fpm"
+    return "php-fpm" if v == "80" else f"php{v}-php-fpm"
+
+
 def check_services(site_list):
     wanted = ["nginx", "mariadb", "php-fpm"]
-    for opt in ("redis", "fail2ban"):
+    # Debian/Ubuntu: redis-server.service ("redis" is only an alias of it).
+    for opt in ("redis", "redis-server", "fail2ban"):
         if unit_exists(opt) and sh("systemctl", "is-enabled", opt)[1] == "enabled":
             wanted.append(opt)
     isolated = set()
@@ -86,8 +97,8 @@ def check_services(site_list):
             # by list-unit-files, so skip that existence check for them.
             isolated.add(f"cecp-php-fpm@{s['pool_name']}")
             wanted.append(f"cecp-php-fpm@{s['pool_name']}")
-        elif v != "80":
-            wanted.append(f"php{v}-php-fpm")
+        elif DEBIAN or v != "80":
+            wanted.append(php_fpm_unit(v))
     checks, extra = [], []
     for svc in dict.fromkeys(wanted):
         if svc not in isolated and not unit_exists(svc):
