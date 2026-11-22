@@ -78,7 +78,7 @@ echo "Upgrade test: $FROM ($src, sha256 ${got:0:12}…) -> $TO (this checkout)"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
   --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-  --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
+  --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
   --tmpfs /run --tmpfs /run/lock \
   "${run_opts[@]}" "$IMG" >/dev/null
 

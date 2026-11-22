@@ -41,7 +41,7 @@ docker build -t "$IMG" -f "$DOCKERFILE" "${build_args[@]}" tests/integration
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" \
   --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-  --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
+  --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
   --tmpfs /run --tmpfs /run/lock \
   "$IMG" >/dev/null
 # CI diagnostics on failure: what systemd and MariaDB say inside the container.
