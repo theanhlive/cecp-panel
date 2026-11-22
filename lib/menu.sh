@@ -369,7 +369,7 @@ menu_system() {
     read -r -p "Choice: " c
     case "$c" in
       1) system_info ;;
-      2) system_swap_ensure ;;
+      2) system_swap_ensure || panel_log "WARN: swap not enabled — continuing" ;;
       3)
         read -r -p "Size GB [2]: " gb
         system_swap_add "${gb:-2}"

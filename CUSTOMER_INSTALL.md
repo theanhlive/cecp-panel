@@ -16,7 +16,7 @@ Script tự tải `dist/cecp-panel-<phiên-bản>.tar.gz` (hoặc `cecp-panel-la
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/theanhlive/cecp-panel/main/install-cecp-panel.sh | sudo bash -s -- \
-  --version 1.13.2-beta \
+  --version 1.13.3-beta \
   --sha256 <64-ký-tự-hex-từ-SHA256SUMS>
 ```
 

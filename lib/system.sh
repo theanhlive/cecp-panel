@@ -91,10 +91,27 @@ system_swap_add() {
   require_root
   [[ -f "$SWAP_FILE" ]] && panel_die "Swap file $SWAP_FILE already exists (use: cecp-panel system info)"
   panel_log "Creating ${size_gb}G swap at $SWAP_FILE ..."
-  fallocate -l "${size_gb}G" "$SWAP_FILE" 2>/dev/null || dd if=/dev/zero of="$SWAP_FILE" bs=1M count=$((size_gb * 1024)) status=progress
-  chmod 600 "$SWAP_FILE"
-  mkswap "$SWAP_FILE"
-  swapon "$SWAP_FILE"
+  if ! fallocate -l "${size_gb}G" "$SWAP_FILE" 2>/dev/null &&
+    ! dd if=/dev/zero of="$SWAP_FILE" bs=1M count=$((size_gb * 1024)) status=progress; then
+    panel_log "WARN: could not create $SWAP_FILE (fallocate and dd failed) — swap not enabled"
+    rm -f "$SWAP_FILE"
+    return 1
+  fi
+  if ! chmod 600 "$SWAP_FILE"; then
+    panel_log "WARN: chmod $SWAP_FILE failed — swap not enabled"
+    rm -f "$SWAP_FILE"
+    return 1
+  fi
+  if ! mkswap "$SWAP_FILE"; then
+    panel_log "WARN: mkswap $SWAP_FILE failed — swap not enabled"
+    rm -f "$SWAP_FILE"
+    return 1
+  fi
+  if ! swapon "$SWAP_FILE"; then
+    panel_log "WARN: swapon $SWAP_FILE failed — swap not enabled (not permitted in containers such as LXC/OpenVZ?); fstab left unchanged"
+    rm -f "$SWAP_FILE"
+    return 1
+  fi
   grep -qF "$SWAP_FILE" /etc/fstab 2>/dev/null || echo "$SWAP_FILE none swap sw 0 0" >>/etc/fstab
   panel_log "Swap enabled"
   swapon --show
@@ -112,8 +129,25 @@ system_swap_ensure() {
     return 0
   fi
   if [[ -f "$SWAP_FILE" ]]; then
+    # Already active (total is just below the minimum): never mkswap an active file.
+    if awk -v f="$SWAP_FILE" '$1==f{found=1} END{exit !found}' "${PROC_SWAPS:-/proc/swaps}" 2>/dev/null; then
+      panel_log "Swap file $SWAP_FILE active but below minimum (${cur_mb}MB) — leaving it"
+      return 0
+    fi
+    local err
     panel_log "Swap file exists but inactive — enabling ..."
-    swapon "$SWAP_FILE" 2>/dev/null && return 0
+    err="$(swapon "$SWAP_FILE" 2>&1)" && return 0
+    # The file is inactive, so re-initialising it is safe (e.g. it has no swap signature).
+    panel_log "swapon failed — re-initialising $SWAP_FILE with mkswap ..."
+    if mkswap "$SWAP_FILE" >/dev/null 2>&1; then
+      err="$(swapon "$SWAP_FILE" 2>&1)" && {
+        panel_log "Swap enabled: $SWAP_FILE"
+        return 0
+      }
+    fi
+    err="$(tr '\n' ' ' <<<"$err")"
+    panel_log "WARN: swap could not be enabled on $SWAP_FILE (swapon may not be permitted, e.g. in a container): ${err:-no error output} — continuing without swap"
+    return 0
   fi
   rec_gb="$(system_swap_recommended_gb)"
   panel_log "Low swap (${cur_mb}MB) — creating ${rec_gb}G swap file ..."
@@ -229,7 +263,7 @@ system_maintain() {
   require_root
   system_load_config
   panel_log "=== CECP system maintain $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
-  system_swap_ensure
+  system_swap_ensure || panel_log "WARN: swap not enabled — continuing"
   system_disk_clean
   # Pre-restore safety copies and interrupted verify/staging leftovers older than a week.
   find "$VAR_LIB/restore" -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} + 2>/dev/null || true
@@ -274,7 +308,8 @@ EOF
 system_tune_install() {
   require_root
   system_ensure_config
-  system_swap_ensure
+  # Swap is best effort: never let it stop the disk policy, cron and logrotate steps.
+  system_swap_ensure || panel_log "WARN: swap not enabled — continuing with the rest of system tune"
   system_disk_clean
   system_enable_maintain_cron
   system_logrotate_install

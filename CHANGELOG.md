@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.13.3-beta — system tune không dừng vì swap
+
+- **`system tune` không còn dừng khi không bật được swap**: nếu `/swapfile` đã tồn tại nhưng `swapon` thất bại (thiếu chữ ký swap, hoặc container LXC/OpenVZ không cho phép), panel thử `mkswap` lại một lần; vẫn lỗi thì chỉ cảnh báo WARN và tiếp tục cài chính sách đĩa, cron bảo trì và quy tắc logrotate (trước đây dừng với `Swap file /swapfile already exists`). Thêm `tests/swap_test.sh`.
+
+**Nâng cấp từ 1.13.2-beta**: `cecp-panel update panel latest`; VPS nào thiếu `/etc/logrotate.d/cecp-panel` chạy thêm `cecp-panel system tune` một lần.
+
 ## 1.13.2-beta — rotate-secrets không còn làm site lỗi cơ sở dữ liệu
 
 - **`security rotate-secrets` nạp lại PHP-FPM**: sau khi ghi `wp-config.php` mới, panel nạp lại PHP-FPM để OPcache không giữ bản cũ; trước đây site có thể trả lỗi cơ sở dữ liệu / HTTP 500 trong tối đa 60 giây sau khi xoay mật khẩu.
