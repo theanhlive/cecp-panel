@@ -97,6 +97,7 @@ CECP Panel v$CECP_PANEL_VERSION
   cecp-panel php list|install VER|set DOMAIN VER
     php config DOMAIN [memory_limit=512M upload_max_filesize=128M max_execution_time=300 allow_putenv=on ...] | DOMAIN --reset [KEY]
   cecp-panel update check|mirror|panel|component|os|wp-cli
+    update channel [stable|beta]                        # release line for update panel (dist/<channel>/)
     update all [--skip-os] [--skip-wp] [--skip-panel]   # OS + wp-cli + every WP site + panel
     update enable-cron|disable-cron                     # weekly (Sun 04:10 UTC), runs update all
   cecp-panel wp harden|optimize|cron|status DOMAIN
@@ -513,6 +514,7 @@ case "$cmd" in
     case "$sub" in
       check) update_check ;;
       mirror) require_root; update_mirror_set "${1:-}" ;;
+      channel) update_channel_cmd "${1:-}" ;;
       panel) require_root; update_panel "$@" ;;
       component) require_root; update_component "${1:-all}" ;;
       os) require_root; update_component os ;;
@@ -520,7 +522,7 @@ case "$cmd" in
       all) update_all "$@" ;;
       enable-cron) update_all_enable_cron ;;
       disable-cron) update_all_disable_cron ;;
-      *) panel_die "Usage: cecp-panel update check|mirror|panel|component|os|all|wp-cli|enable-cron|disable-cron" ;;
+      *) panel_die "Usage: cecp-panel update check|mirror|channel|panel|component|os|all|wp-cli|enable-cron|disable-cron" ;;
     esac
     ;;
   -h|--help|help) usage ;;

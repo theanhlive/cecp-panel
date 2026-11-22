@@ -9,3 +9,5 @@ cf-snapshots/
 docs/sites/*
 !docs/sites/README.md
 !docs/sites/_TEMPLATE.md
+keys/*.key
+*.minisign.key
