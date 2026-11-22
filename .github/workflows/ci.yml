@@ -1,0 +1,80 @@
+# CI cho CECP Panel (ADR-0001, docs/PLAN_2.0.md — luồng W1).
+#   lint        : T0, mọi push/PR
+#   unit        : T1, mọi push/PR (bỏ qua nếu chưa có tests/unit/run.sh)
+#   integration : T2, PR vào main + chạy tay; matrix OS truyền qua biến môi trường OS
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck --version
+      - name: Lint
+        run: bash tests/lint.sh
+
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Install bats
+        if: hashFiles('tests/unit/run.sh') != ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bats
+          bats --version
+      - name: Unit tests
+        run: |
+          if [[ -f tests/unit/run.sh ]]; then
+            bash tests/unit/run.sh
+          else
+            echo "tests/unit/run.sh chưa có — bỏ qua (luồng W4)."
+          fi
+
+  integration:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.base_ref == 'main')
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [alma9]
+    env:
+      OS: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Docker / cgroup info
+        run: |
+          docker version
+          stat -fc %T /sys/fs/cgroup
+      - name: Integration (${{ matrix.os }})
+        run: bash tests/integration/run.sh
+      - name: Upload install log
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: cecp-it-install-${{ matrix.os }}
+          path: /tmp/cecp-it-install.log
+          if-no-files-found: ignore
+          retention-days: 14
