@@ -2,6 +2,9 @@
 
 ## Chưa phát hành
 
+### Sửa lỗi kiểm tra đầu vào
+- **`validate_ipv4` từ chối octet có số 0 đứng đầu** (`010.0.0.1`): panel từng hiểu là 10 trong khi `inet_aton`/`ping` hiểu là bát phân 8 — IP ghi vào DNS có thể lệch. Áp cho `dns` (bản ghi A).
+
 ### Test tích hợp đa OS (W2, ADR-0001)
 - **`tests/integration/run.sh` nhận `OS=alma9|ubuntu22.04|ubuntu24.04`** (mặc định `alma9`, giữ nguyên tên image/container/log cũ). Image mới `tests/integration/Dockerfile.ubuntu2204`, `Dockerfile.ubuntu2404`: Ubuntu + systemd làm PID 1, gói giống `install_packages_debian` của `install.sh` (+ openssh-server, cron, rsyslog, logrotate, redis-server — cài sẵn nhưng **tắt**, giống AlmaLinux). Mỗi OS một container riêng (`cecp-panel-it-ubuntu2204`…) nên chạy song song được.
 - Chạy sau proxy egress (sandbox/CI): `IT_HTTPS_PROXY=http://HOST:PORT` (địa chỉ container với tới được) và `IT_CA_FILE=/path/ca.pem` (CA cần tin, truyền bằng BuildKit secret). Không đặt hai biến này thì hành vi như cũ.

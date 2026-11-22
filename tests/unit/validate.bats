@@ -141,9 +141,13 @@ rejects() { run "$@"; [[ "$status" -eq 1 ]] || fail "should reject: $* -> $statu
   rejects validate_ipv4 ' 1.2.3.4'
 }
 
-@test "validate_ipv4: leading zeros are decimal (08 / 09 do not crash as octal)" {
-  accepts validate_ipv4 10.08.09.1
+@test "validate_ipv4: leading zeros are rejected (inet_aton reads 010 as octal 8)" {
+  rejects validate_ipv4 010.0.0.1
+  rejects validate_ipv4 10.08.09.1
+  rejects validate_ipv4 10.0.0.00
   rejects validate_ipv4 10.0.0.0256
+  accepts validate_ipv4 10.0.0.0
+  accepts validate_ipv4 0.0.0.0
 }
 
 # --- validate_url ----------------------------------------------------------

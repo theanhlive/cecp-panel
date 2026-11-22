@@ -77,6 +77,8 @@ validate_ipv4() {
   local ip="${1:-}" o
   [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || panel_die "Invalid IPv4: '${ip}'"
   for o in "${BASH_REMATCH[@]:1}"; do
+    # Leading zeros are ambiguous (inet_aton/ping read 010 as octal 8): reject them.
+    [[ "$o" == 0 || "$o" != 0* ]] || panel_die "Invalid IPv4 (leading zero): '${ip}'"
     (( 10#$o <= 255 )) || panel_die "Invalid IPv4: '${ip}'"
   done
 }
