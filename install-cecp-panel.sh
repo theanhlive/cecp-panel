@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.13.1-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-2.0.0-rc.1}"
 CECP_PANEL_RAW_BASE="${CECP_PANEL_RAW_BASE:-https://raw.githubusercontent.com/theanhlive/cecp-panel/main}"
 
 log() { echo "[install-cecp-panel] $*"; }

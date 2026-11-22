@@ -1,6 +1,6 @@
 # Changelog
 
-## Chưa phát hành
+## 2.0.0-rc.1 — bản ứng viên 2.0: CI đa OS, Ubuntu, kênh phát hành, chữ ký (chưa phát hành trên main — đang chạy canary)
 
 ### Chạy WP-CLI bằng `runuser` thay vì `sudo`
 - Cài WordPress, lệnh `wp` của panel và dọn transient trong bảo trì giờ chạy qua `site_run_as` (`runuser -u SITE_USER`, cwd `/`, `HOME=/home/SITE_USER`) thay cho `sudo -u`: không phụ thuộc PAM account/sudoers (trên máy mà PAM account của sudo lỗi — ví dụ sssd không chạy — `sudo` từ chối "a password is required" và `site add --wp` hỏng).
