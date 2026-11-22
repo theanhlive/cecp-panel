@@ -1,5 +1,10 @@
 # Bàn giao 1.12.0-beta — kiểm tra đầy đủ rồi đưa vào `main`
 
+> **Lưu trữ (2026-11-21).** Tài liệu lịch sử của đợt phát hành 1.12; không còn cập nhật.
+> Mirror isharevn nhắc trong mục 5–6 **đã ngừng phân phối** — cài/cập nhật chỉ từ GitHub raw `main`
+> (`cecp-panel update panel latest`). Kiểm thử VPS lab (mục 4 cũ) nay ở
+> [docs/LAB_CHECKLIST.md](../LAB_CHECKLIST.md); việc còn lại cho 2.0 ở [docs/PLAN_2.0.md](../PLAN_2.0.md).
+
 ## Trạng thái (cập nhật 2026-10-07): ĐÃ PHÁT HÀNH
 
 - **Phân phối 1.12.1-beta:** cài/cập nhật panel chỉ từ GitHub `theanhlive/cecp-panel` (`raw.githubusercontent.com/.../main`); `dist/` trong repo thay mirror isharevn.net.
@@ -23,8 +28,8 @@ cloud (không có Docker), **nhưng bộ test tích hợp đầy đủ chưa t�
 toàn bộ kiểm tra, sửa lỗi phát sinh, rồi merge vào `main`. Làm theo thứ tự; dừng lại ở các bước
 **[HỎI NGƯỜI]**.
 
-Đọc trước: [AGENTS.md](../AGENTS.md) (quy ước code, quy tắc vận hành) và mục `1.12.0-beta` trong
-[CHANGELOG.md](../CHANGELOG.md) (mô tả đầy đủ mọi thay đổi).
+Đọc trước: [AGENTS.md](../../AGENTS.md) (quy ước code, quy tắc vận hành) và mục `1.12.0-beta` trong
+[CHANGELOG.md](../../CHANGELOG.md) (mô tả đầy đủ mọi thay đổi).
 
 ---
 
@@ -131,7 +136,7 @@ cecp-panel update panel latest     # BẮT BUỘC có "latest" (không có sẽ 
 Rồi làm mục **"Nâng cấp từ 1.11"** trong CHANGELOG (apply-production, `site rebuild-vhost --all`,
 `security check`, `notify setup`, `security scan-schedule on`…).
 
-⚠ **VPS đang/nghi bị hack**: làm theo [docs/INCIDENT_RESPONSE.md](INCIDENT_RESPONSE.md), chạy
+⚠ **VPS đang/nghi bị hack**: làm theo [docs/INCIDENT_RESPONSE.md](../INCIDENT_RESPONSE.md), chạy
 `security scan --all` và báo kết quả cho chủ VPS **trước** mọi thao tác khác; **không** chạy
 `backup prune` cho tới khi đã khôi phục được bản sạch.
 

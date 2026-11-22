@@ -2,7 +2,7 @@
 
 Nguồn chính thức: repo GitHub công khai `theanhlive/cecp-panel` (raw `main`).
 
-## Khách chạy trên VPS mới (root, Alma 9 / Ubuntu 22)
+## Khách chạy trên VPS mới (root, AlmaLinux/Rocky 8–9 hoặc Ubuntu 22.04)
 
 ### Cài panel
 
@@ -20,7 +20,8 @@ curl -fsSL https://raw.githubusercontent.com/theanhlive/cecp-panel/main/install-
   --sha256 <64-ký-tự-hex-từ-SHA256SUMS>
 ```
 
-Mirror tùy chọn (ghi đè nguồn mặc định): thêm `--raw-base https://HOST/path`.
+Tuỳ chọn khác của `install-cecp-panel.sh`: `--no-onboard` (bỏ qua wizard), `--raw-base URL` (chỉ dùng khi
+thử một fork/bản build riêng; mặc định và nguồn chính thức là GitHub raw `main` — mirror isharevn cũ đã ngừng phân phối).
 
 ### Hardening + tối ưu (khuyến nghị, 1–2 phút)
 
@@ -52,10 +53,13 @@ cecp-panel security check
 ## Nâng cấp panel trên VPS đã cài
 
 ```bash
-cecp-panel update panel latest
+cecp-panel update panel latest     # bắt buộc có "latest"; thiếu sẽ tải lại đúng bản đang chạy
+cecp-panel site probe --all        # kiểm tra trang không cache (wp-login, wp-json) sau nâng cấp
 ```
 
-VPS cài **trước 1.12.1** và còn URL mirror cũ trong `/etc/cecp-panel/panel.env` — chạy **một lần**:
+Sau đó làm mục **"Nâng cấp từ …"** trong [CHANGELOG.md](CHANGELOG.md) cho các phiên bản đã bỏ qua.
+
+VPS cài **trước 1.12.1** và còn URL mirror cũ (isharevn, đã ngừng) trong `/etc/cecp-panel/panel.env` — `cecp-panel update check` hiện dòng `Update mirror:`; nếu không phải GitHub, chạy **một lần**:
 
 ```bash
 cecp-panel update mirror https://raw.githubusercontent.com/theanhlive/cecp-panel/main
