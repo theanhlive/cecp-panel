@@ -179,7 +179,7 @@ system_clean_wp_transients() {
     docroot="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["docroot"])' "$f")"
     site_user="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["site_user"])' "$f")"
     [[ -d "$docroot" ]] || continue
-    sudo -u "$site_user" wp transient delete --expired --path="$docroot" --quiet 2>/dev/null && \
+    site_run_as "$site_user" env HOME="/home/${site_user}" wp transient delete --expired --path="$docroot" --quiet 2>/dev/null && \
       panel_log "WP transients: $domain" || true
   done
   shopt -u nullglob
@@ -274,7 +274,11 @@ EOF
 system_tune_install() {
   require_root
   system_ensure_config
-  system_swap_ensure
+  # A host that cannot swapon (LXC/OpenVZ VPS, containers) must still get the disk policy,
+  # maintenance cron and logrotate rules below.
+  if ! (system_swap_ensure); then
+    panel_log "WARN: swap not set up (swapon not permitted here?) — continuing without it"
+  fi
   system_disk_clean
   system_enable_maintain_cron
   system_logrotate_install

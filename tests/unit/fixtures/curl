@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Stub curl for lib/probe.sh: the last argument is the URL. $CURL_TABLE has lines
+# "KEY|CODE REDIRECT_URL"; KEY is a glob matched first as "SCHEME:PATH", then as "PATH".
+# No match prints "000 " (nothing answered). Every call is appended to $CURL_LOG.
+url="${*: -1}"
+scheme="${url%%://*}"
+rest="${url#*://}"
+p="/${rest#*/}"
+[[ "$rest" == */* ]] || p="/"
+[[ -n "${CURL_LOG:-}" ]] && echo "$url" >>"$CURL_LOG"
+for key in "${scheme}:${p}" "$p"; do
+  while IFS='|' read -r tp out; do
+    [[ -n "$tp" ]] || continue
+    # shellcheck disable=SC2053  # glob match on purpose
+    if [[ "$key" == $tp ]]; then echo -n "$out"; exit 0; fi
+  done <"$CURL_TABLE"
+done
+echo -n "000 "

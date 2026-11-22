@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.0.0-rc.1 — bản ứng viên 2.0: CI đa OS, Ubuntu, kênh phát hành, chữ ký (chưa phát hành trên main — đang chạy canary)
+
+### Chạy WP-CLI bằng `runuser` thay vì `sudo`
+- Cài WordPress, lệnh `wp` của panel và dọn transient trong bảo trì giờ chạy qua `site_run_as` (`runuser -u SITE_USER`, cwd `/`, `HOME=/home/SITE_USER`) thay cho `sudo -u`: không phụ thuộc PAM account/sudoers (trên máy mà PAM account của sudo lỗi — ví dụ sssd không chạy — `sudo` từ chối "a password is required" và `site add --wp` hỏng).
+
+### Cập nhật an toàn hơn (review trước 2.0)
+- **Kênh `stable` không bao giờ rơi về `dist/` cũ (dòng beta)**: không tải được `dist/stable/SHA256SUMS` (mirror lỗi tạm thời hoặc bị chặn) ⇒ dừng cập nhật thay vì lặng lẽ cài bản beta. Kênh `beta` vẫn fallback `dist/` như trước.
+- **Chống hạ cấp**: `update panel latest` từ chối bản cũ hơn bản đang cài (mirror phát lại một bản cũ đã ký hợp lệ). Muốn hạ cấp: ghi rõ phiên bản (`update panel 1.13.1-beta`) hoặc `--allow-downgrade`. So sánh theo semver: `2.0.0-rc.1` < `2.0.0`.
+- `site_run_as` (mọi lệnh chạy bằng user của site) đặt `HOME=/home/SITE_USER` và bỏ biến backup của root (`RESTIC_*`, `RCLONE_CONFIG`).
+
+### Sửa lỗi kiểm tra đầu vào
+- **`validate_ipv4` từ chối octet có số 0 đứng đầu** (`010.0.0.1`): panel từng hiểu là 10 trong khi `inet_aton`/`ping` hiểu là bát phân 8 — IP ghi vào DNS có thể lệch. Áp cho `dns` (bản ghi A).
+
+### Test tích hợp đa OS (W2, ADR-0001)
+- **`tests/integration/run.sh` nhận `OS=alma9|ubuntu22.04|ubuntu24.04`** (mặc định `alma9`, giữ nguyên tên image/container/log cũ). Image mới `tests/integration/Dockerfile.ubuntu2204`, `Dockerfile.ubuntu2404`: Ubuntu + systemd làm PID 1, gói giống `install_packages_debian` của `install.sh` (+ openssh-server, cron, rsyslog, logrotate, redis-server — cài sẵn nhưng **tắt**, giống AlmaLinux). Mỗi OS một container riêng (`cecp-panel-it-ubuntu2204`…) nên chạy song song được.
+- Chạy sau proxy egress (sandbox/CI): `IT_HTTPS_PROXY=http://HOST:PORT` (địa chỉ container với tới được) và `IT_CA_FILE=/path/ca.pem` (CA cần tin, truyền bằng BuildKit secret). Không đặt hai biến này thì hành vi như cũ.
+- `scenario.sh`: đường dẫn/tên dịch vụ theo OS (`$FPM_SVC`, `$FPM_POOL_DIR`, `$FPM_SOCK_DIR`, `$WEBU`, `$OPCACHE_INI`, `$DB_TUNE_CNF`, `$REDIS_SVC`…) thay cho literal AlmaLinux; không check nào bị xoá hay bỏ qua. Check mới: cấu hình ghi dưới `umask 0000` vẫn 644 (mọi OS); `rebuild-vhost` chuyển site Ubuntu cũ "PHP 80" sang PHP distro (chỉ Ubuntu, gắn `if [ "$IT_FAMILY" = debian ]`).
+- Kết quả chạy thật (Docker, 2026-11-21): alma9 **401 passed, 0 failed**; ubuntu22.04 **402 passed, 0 failed**; ubuntu24.04 **402 passed, 0 failed**. Trên Docker host không dựng được user namespace cho unit `redis-server` của 24.04 (`PrivateUsers=yes` → 217/USER), `run.sh` thử khởi động một lần và chỉ nới đúng tuỳ chọn đó trong container test (VPS thật không cần).
+
+### Sửa lỗi Ubuntu 22.04/24.04 (lộ ra khi chạy scenario)
+- **PHP-FPM theo distro**: site mới trên Ubuntu dùng PHP của distro (`php_version` 81 trên 22.04, 83 trên 24.04), pool ở `/etc/php/X.Y/fpm/pool.d`, socket `/run/php`, dịch vụ `phpX.Y-fpm` (trước đây pool bị ghi vào `/etc/opt/remi/php80/…` không ai đọc → site 502). Hàm mới `php_default_version`, `php_fpm_service_for_version`, `php_fpm_default_service` (`lib/common.sh`); `php install`/`php set` trên Ubuntu cài `phpX.Y-fpm` bằng apt (phiên bản khác distro cần repo như `ppa:ondrej/php`); `site limits` dùng `/usr/sbin/php-fpmX.Y`.
+- **User của nginx**: `nginx_user` (đọc `user` trong `nginx.conf`; `www-data` trên Ubuntu) cho `listen.owner/group` của pool, ACL docroot, sửa chủ socket, nhóm của file htpasswd (`protect-admin`, mật khẩu staging — trước đây nhóm `nginx` không tồn tại nên nginx trả **500**), thư mục cache và `security check`.
+- **Redis 6.0 (Ubuntu 22.04)** không khởi động được với `bind 127.0.0.1 -::1` (cú pháp `-` chỉ có từ 6.2): panel nay ghi `bind 127.0.0.1` cho Redis < 6.2.
+- **Monitor**: theo dõi/tự khởi động lại `phpX.Y-fpm` và `redis-server` trên Ubuntu (trước đây bỏ qua vì tìm `php-fpm`/`php81-php-fpm`); drop-in restart áp cho mọi `php*-fpm.service`.
+- **`db slow-log`** trên Ubuntu ghi `/etc/mysql/mariadb.conf.d/99-cecp-slowlog.cnf` + `/var/log/mysql/mariadb-slow.log` (trước đây lỗi vì không có `/etc/my.cnf.d`).
+- **fail2ban**: jail sshd chỉ dùng `backend = systemd` khi Python có module `systemd` (`python3-systemd`); thiếu module thì fail2ban từng từ chối cả cấu hình và không jail nào chạy.
+- **Backup cấu hình site** gồm cả pool `/etc/php/*/fpm/pool.d/cecp-SLUG.conf`; `site remove` xoá pool Ubuntu và nạp lại đúng `phpX.Y-fpm`.
+
+### Sửa lỗi chung (mọi OS)
+- **`umask 022`** ở đầu `cecp-panel` và `install.sh`: gọi với umask 0000 (vd. `docker exec`) từng tạo cnf MariaDB/nginx mode 666 (MariaDB bỏ qua "world-writable config"), `/var/log/cecp-panel` 777 (logrotate từ chối xoay).
+- **Kernel không có IPv6** (`ipv6.disable=1`, một số container): vhost, catch-all HTTPS và server mặc định của distro bỏ dòng `listen [::]` (trước đây nginx không khởi động → mọi site chết). `install.sh` dùng `reload-or-restart` để nginx đang dừng được khởi động.
+- **`system tune`**: không `swapon` được (LXC/OpenVZ, container) chỉ còn là cảnh báo; dọn đĩa, cron bảo trì và logrotate vẫn được cài (trước đây dừng giữa chừng).
+
+**Nâng cấp từ 1.13.1-beta** (khi phát hành): VPS **Ubuntu** chạy `cecp-panel site rebuild-vhost --all` (chuyển pool sang `/etc/php/X.Y/fpm/pool.d`, sửa nhóm htpasswd: chạy lại `site protect-admin DOMAIN on` nếu đang bật) và `cecp-panel optimize redis` nếu Redis không chạy trên 22.04. AlmaLinux: không cần lệnh bổ sung.
+
+### Kênh phát hành + chữ ký minisign (W5, ADR-0001)
+- **`cecp-panel update channel [stable|beta]`** (mới): chọn dòng phát hành, lưu `CECP_PANEL_CHANNEL` vào `/etc/cecp-panel/panel.env` (giá trị khác `stable`/`beta` bị từ chối qua `validate_channel`). Không tham số = in kênh hiện tại. Chưa đặt = `beta` (giữ hành vi cũ tới 2.0.0).
+- **`update panel` đọc `dist/<kênh>/`**; mirror chưa có `dist/<kênh>/SHA256SUMS` ⇒ dùng `dist/` cũ kèm cảnh báo `using legacy dist/`. `update all` dùng cùng logic. `update check` in thêm "Update channel" và "Release signature".
+- **Xác minh chữ ký `SHA256SUMS.minisig`** bằng khoá công khai của panel ĐANG CÀI (`/opt/cecp-panel/keys/cecp-release.pub`): repo hiện chỉ có **placeholder** ⇒ hành vi cũ (chỉ SHA256SUMS) + cảnh báo "no release signing key installed". Khi chủ repo nhúng khoá thật: thiếu `.minisig` hoặc chữ ký sai/khác khoá ⇒ **từ chối cập nhật**. `--sha256 HASH` vẫn là đường khôi phục (bỏ qua chữ ký, có ghi log). Dùng `minisign` nếu có, không thì `openssl` ≥ 3.0 qua `lib/minisign_verify.py` (Ubuntu 22.04 không có gói minisign); thiếu cả hai ⇒ từ chối.
+- **`install.sh`** cài `minisign` nếu kho gói có (EPEL 9, Ubuntu 24.04+); không có thì chỉ ghi chú, không lỗi.
+- **`install-cecp-panel.sh --channel stable|beta`**: tải từ `dist/<kênh>/` (fallback `dist/`) và lưu kênh sau khi cài.
+- **`build-release.sh [--channel stable|beta]`**: build vào `dist/<kênh>/` (mặc định `beta` khi phiên bản có hậu tố, `stable` cấm phiên bản có hậu tố); kênh beta được chép thêm ra `dist/` cho panel ≤ 1.13.x. Xoá `SHA256SUMS.minisig` cũ, kiểm tra tarball có `keys/cecp-release.pub` và không có file `.key`, in lệnh `minisign -Sm` để **ký thủ công ngoại tuyến** (khoá bí mật không nằm trong repo/CI; `.gitignore` chặn `keys/*.key`).
+- Tài liệu: [docs/RELEASING.md](docs/RELEASING.md) — bố cục `dist/`, tạo/đổi/mất khoá, các bước phát hành, việc cần làm ở 2.0.0, giới hạn (chưa chống rollback về bản cũ đã ký; lần cài đầu là TOFU).
+- Test: `tests/integration/scenario.sh` thêm check cho `update channel` (input xấu, lưu, fallback `dist/`, đọc `dist/stable/`), chữ ký (thiếu `.minisig`, chữ ký đúng, fallback openssl, khoá khác, `SHA256SUMS` bị sửa sau khi ký). Helper chỉ dùng cho test: `tests/integration/minisign_sign.py` (tạo khoá/ký định dạng minisign bằng openssl).
+
+**Nâng cấp từ 1.13.1-beta**: `cecp-panel update panel latest`; không cần lệnh bổ sung — VPS tiếp tục nhận kênh beta (từ `dist/beta/`, hoặc `dist/` trên mirror cũ). Muốn kênh ổn định khi có: `cecp-panel update channel stable`. Kiểm tra: `cecp-panel update check` (dòng "Release signature: NOT enforced" là đúng cho tới khi khoá thật được nhúng). Nên `dnf install minisign` / `apt install minisign` nếu kho có (không bắt buộc).
+
 ## 1.13.1-beta — chẩn đoán đúng sau nâng cấp
 
 Sự cố thật: một file theme thuộc `nginx:nginx` mode 650 làm PHP báo "Permission denied" trên `/wp-login.php` và `/wp-json/` trong khi trang chủ vẫn 200 từ cache; `site probe` báo FAIL đúng nhưng gợi ý sai `allow_putenv`. Bản này sửa các kết luận sai của probe/audit/security check.

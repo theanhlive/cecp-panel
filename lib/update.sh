@@ -4,6 +4,11 @@ set -euo pipefail
 
 PANEL_ENV="$ETC_DIR/panel.env"
 CECP_PANEL_DEFAULT_RAW_BASE="https://raw.githubusercontent.com/theanhlive/cecp-panel/main"
+# Until 2.0.0 every release is a beta, so an unset channel keeps the pre-channel behaviour.
+CECP_PANEL_DEFAULT_CHANNEL="beta"
+# Public key the INSTALLED panel trusts for dist/<channel>/SHA256SUMS.minisig. A placeholder
+# without a key line = signatures not enforced yet (warning); a real key = mandatory.
+CECP_RELEASE_PUBKEY="$PANEL_ROOT/keys/cecp-release.pub"
 
 update_validate_mirror() {
   [[ "${1:-}" =~ ^(https://|http://|file:///)[A-Za-z0-9._~%/:@+-]+$ ]] \
@@ -20,11 +25,49 @@ update_save_mirror() {
 
 update_load_mirror() {
   CECP_PANEL_RAW_BASE=""
+  CECP_PANEL_CHANNEL=""
   if [[ -f "$PANEL_ENV" ]]; then
     secure_source "$PANEL_ENV"
   fi
   CECP_PANEL_RAW_BASE="${CECP_PANEL_RAW_BASE:-${CECP_PANEL_BUNDLE_URL:-}}"
   CECP_PANEL_RAW_BASE="${CECP_PANEL_RAW_BASE:-$CECP_PANEL_DEFAULT_RAW_BASE}"
+  CECP_PANEL_CHANNEL="${CECP_PANEL_CHANNEL:-$CECP_PANEL_DEFAULT_CHANNEL}"
+  validate_channel "$CECP_PANEL_CHANNEL"
+}
+
+# cecp-panel update channel [stable|beta] — no argument shows the current channel.
+update_channel_cmd() {
+  local ch="${1:-}"
+  if [[ -z "$ch" ]]; then
+    update_load_mirror
+    echo "Channel: $CECP_PANEL_CHANNEL (source: ${CECP_PANEL_RAW_BASE%/}/dist/$CECP_PANEL_CHANNEL/, falls back to dist/ on mirrors without channels)"
+    return 0
+  fi
+  require_root
+  validate_channel "$ch"
+  mkdir -p "$ETC_DIR"
+  env_set "$PANEL_ENV" CECP_PANEL_CHANNEL "$ch"
+  panel_log "Update channel set to $ch. Apply: cecp-panel update panel latest"
+}
+
+# 0 = the installed panel carries a real release key (signatures are mandatory).
+update_release_key_present() {
+  [[ -f "$CECP_RELEASE_PUBKEY" ]] && grep -qE '^RW[A-Za-z0-9+/]{54}$' "$CECP_RELEASE_PUBKEY"
+}
+
+# update_verify_signature SUMS SIG — minisign if installed, else openssl (lib/minisign_verify.py).
+update_verify_signature() {
+  local sums="$1" sig="$2" out
+  if command -v minisign &>/dev/null; then
+    out="$(minisign -V -p "$CECP_RELEASE_PUBKEY" -m "$sums" -x "$sig" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+  elif command -v openssl &>/dev/null && [[ -f "$PANEL_ROOT/lib/minisign_verify.py" ]]; then
+    out="$(python3 -I "$PANEL_ROOT/lib/minisign_verify.py" "$CECP_RELEASE_PUBKEY" "$sig" "$sums" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+  else
+    echo "neither minisign nor openssl is installed (dnf/apt install minisign)" >&2
+    return 1
+  fi
+  out="$(grep -m1 '^Trusted comment:' <<<"$out" || true)"
+  panel_log "Signature OK (${out:-no trusted comment})"
 }
 
 update_check() {
@@ -41,6 +84,12 @@ update_check() {
   if [[ -n "${CECP_PANEL_RAW_BASE:-}" ]]; then
     echo ""
     echo "  Update mirror: $CECP_PANEL_RAW_BASE"
+  fi
+  echo "  Update channel: $CECP_PANEL_CHANNEL"
+  if update_release_key_present; then
+    echo "  Release signature: required (key $CECP_RELEASE_PUBKEY)"
+  else
+    echo "  Release signature: NOT enforced (no release key yet — SHA256SUMS only)"
   fi
 }
 
@@ -78,14 +127,31 @@ update_component() {
   panel_log "Update done: $comp"
 }
 
-# cecp-panel update panel [VERSION|latest] [--sha256 HASH]
-# The bundle must match dist/SHA256SUMS on the mirror (or the pinned hash): the panel runs
-# as root, so an unverified download is remote code execution for whoever controls the mirror.
+# panel_version_lt A B — true if release A is older than B (semver core, then a pre-release
+# such as -beta / -rc.1 sorts BEFORE the same core without suffix: 2.0.0-rc.1 < 2.0.0).
+panel_version_lt() {
+  local a="$1" b="$2" ac="${1%%-*}" bc="${2%%-*}"
+  [[ "$a" == "$b" ]] && return 1
+  if [[ "$ac" != "$bc" ]]; then
+    [[ "$(printf '%s\n%s\n' "$ac" "$bc" | sort -V | head -1)" == "$ac" ]]
+    return
+  fi
+  [[ "$a" == *-* && "$b" != *-* ]] && return 0
+  [[ "$a" != *-* && "$b" == *-* ]] && return 1
+  [[ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -1)" == "$a" ]]
+}
+
+# cecp-panel update panel [VERSION|latest] [--sha256 HASH] [--allow-downgrade]
+# The bundle must match dist/<channel>/SHA256SUMS on the mirror (or the pinned hash): the panel
+# runs as root, so an unverified download is remote code execution for whoever controls the
+# mirror. SHA256SUMS comes from the same mirror, so once a release key is installed its minisign
+# signature (made offline, see docs/RELEASING.md) is what actually ties the bundle to the owner.
 update_panel() {
-  local ver="" pin=""
+  local ver="" pin="" allow_down=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --sha256) pin="${2:-}"; shift 2 || true ;;
+      --allow-downgrade) allow_down=1; shift ;;
       *) ver="$1"; shift ;;
     esac
   done
@@ -98,19 +164,45 @@ update_panel() {
   [[ "$ver" =~ ^([0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?|latest)$ ]] || panel_die "Invalid version: '$ver'"
   [[ -z "$pin" || "$pin" =~ ^[0-9a-f]{64}$ ]] || panel_die "--sha256 expects 64 hex chars"
 
-  local tmp bak name expected actual
+  local tmp bak name expected actual chan="$CECP_PANEL_CHANNEL" dir has_sums=0
   tmp="$(mktemp -d)"
-  name="cecp-panel-${ver}.tar.gz"
-  panel_log "Downloading panel $ver ..."
-  if ! curl -fsSL "${base%/}/dist/${name}" -o "$tmp/bundle.tar.gz"; then
-    name="cecp-panel-latest.tar.gz"
-    curl -fsSL "${base%/}/dist/${name}" -o "$tmp/bundle.tar.gz" || { rm -rf "$tmp"; panel_die "Download failed"; }
+  # dist/<channel>/ when the mirror has it (detected by its SHA256SUMS); mirrors published
+  # before channels existed only have dist/, which is the beta line.
+  dir="${base%/}/dist/${chan}"
+  if curl -fsSL "${dir}/SHA256SUMS" -o "$tmp/SHA256SUMS" 2>/dev/null; then
+    has_sums=1
+    panel_log "Channel $chan: ${dir}/"
+  elif [[ "$chan" != beta ]]; then
+    # Legacy dist/ is the beta line: never hand a stable VPS a beta bundle because one fetch failed.
+    rm -rf "$tmp"
+    panel_die "Could not fetch ${dir}/SHA256SUMS — channel $chan has no release on this mirror (or the mirror is unreachable). Retry later, or: cecp-panel update channel beta"
+  else
+    dir="${base%/}/dist"
+    panel_log "WARN: mirror has no dist/${chan}/ — using legacy dist/ (pre-channel layout)"
+    curl -fsSL "${dir}/SHA256SUMS" -o "$tmp/SHA256SUMS" 2>/dev/null && has_sums=1
   fi
   if [[ -n "$pin" ]]; then
     expected="$pin"
+    update_release_key_present && panel_log "Pinned --sha256: release signature not checked (you vouch for this hash)"
   else
-    curl -fsSL "${base%/}/dist/SHA256SUMS" -o "$tmp/SHA256SUMS" \
-      || { rm -rf "$tmp"; panel_die "Mirror has no dist/SHA256SUMS — refusing an unverified update (or pass --sha256 HASH)"; }
+    (( has_sums )) \
+      || { rm -rf "$tmp"; panel_die "Mirror has no SHA256SUMS in ${dir}/ — refusing an unverified update (or pass --sha256 HASH)"; }
+    if update_release_key_present; then
+      curl -fsSL "${dir}/SHA256SUMS.minisig" -o "$tmp/SHA256SUMS.minisig" 2>/dev/null \
+        || { rm -rf "$tmp"; panel_die "Mirror has no SHA256SUMS.minisig in ${dir}/ — refusing an unsigned update (release key is installed)"; }
+      update_verify_signature "$tmp/SHA256SUMS" "$tmp/SHA256SUMS.minisig" \
+        || { rm -rf "$tmp"; panel_die "Signature check FAILED for ${dir}/SHA256SUMS — update refused (mirror tampered or wrong key)"; }
+    else
+      panel_log "WARN: no release signing key installed ($CECP_RELEASE_PUBKEY) — SHA256SUMS is not signature-checked"
+    fi
+  fi
+  name="cecp-panel-${ver}.tar.gz"
+  panel_log "Downloading panel $ver ..."
+  if ! curl -fsSL "${dir}/${name}" -o "$tmp/bundle.tar.gz"; then
+    name="cecp-panel-latest.tar.gz"
+    curl -fsSL "${dir}/${name}" -o "$tmp/bundle.tar.gz" || { rm -rf "$tmp"; panel_die "Download failed"; }
+  fi
+  if [[ -z "$pin" ]]; then
     expected="$(awk -v f="$name" '{n=$2; sub(/^\*/, "", n); if (n == f) print $1}' "$tmp/SHA256SUMS" | head -1)"
   fi
   actual="$(sha256sum "$tmp/bundle.tar.gz" | cut -d' ' -f1)"
@@ -126,6 +218,14 @@ update_panel() {
   for f in "$tmp/cecp-panel/cecp-panel" "$tmp/cecp-panel"/lib/*.sh; do
     bash -n "$f" || { rm -rf "$tmp"; panel_die "Bundle has a syntax error in $(basename "$f") — update aborted"; }
   done
+  # Anti-rollback: a mirror replaying an older, validly signed release must not downgrade the
+  # panel behind the operator's back. Asking for an exact older VERSION is an explicit choice.
+  local new_ver
+  new_ver="$(sed -nE 's/^CECP_PANEL_VERSION="\$\{CECP_PANEL_VERSION:-([0-9][0-9a-z.-]*)\}".*/\1/p' "$tmp/cecp-panel/lib/common.sh" | head -1)"
+  if [[ "$ver" == latest && -n "$new_ver" ]] && (( ! allow_down )) && panel_version_lt "$new_ver" "$CECP_PANEL_VERSION"; then
+    rm -rf "$tmp"
+    panel_die "Mirror offers $new_ver, older than the installed $CECP_PANEL_VERSION — refusing a downgrade (pass --allow-downgrade, or name the version explicitly)"
+  fi
 
   mkdir -p "$VAR_LIB/backups"
   bak="$(mktemp -d "$VAR_LIB/backups/panel-$(date +%Y%m%d_%H%M%S)-XXXX")"

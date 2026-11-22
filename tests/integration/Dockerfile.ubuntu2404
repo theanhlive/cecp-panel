@@ -1,0 +1,40 @@
+# Ubuntu 24.04 + systemd test host for CECP Panel integration tests (run.sh OS=ubuntu24.04).
+# Packages mirror install.sh (install_packages_debian) so the in-container install is fast.
+FROM ubuntu:24.04
+ENV container=docker DEBIAN_FRONTEND=noninteractive
+
+# Optional extra CA for builds behind a TLS-intercepting egress proxy (run.sh IT_CA_FILE);
+# such a proxy only tunnels HTTPS, so apt sources switch to https:// as well.
+RUN --mount=type=secret,id=it_ca if [ -s /run/secrets/it_ca ]; then mkdir -p /usr/local/share/ca-certificates \
+      && install -m 644 /run/secrets/it_ca /usr/local/share/ca-certificates/it-proxy.crt \
+      && echo 'Acquire::https::CAInfo "/usr/local/share/ca-certificates/it-proxy.crt";' >/etc/apt/apt.conf.d/99it-ca \
+      && sed -i 's#http://#https://#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true; fi
+
+# systemd as PID 1; drop units that cannot work in a container (udev, getty, kernel modules).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends systemd systemd-sysv dbus ca-certificates \
+ && update-ca-certificates && rm -f /etc/apt/apt.conf.d/99it-ca \
+ && find /etc/systemd/system /lib/systemd/system -path '*.wants/*' \
+      \( -name '*udev*' -o -name '*getty*' -o -name 'systemd-modules-load*' -o -name '*remount-fs*' \) -delete \
+ && systemctl mask systemd-udevd.service systemd-udevd-kernel.socket systemd-udevd-control.socket \
+      systemd-modules-load.service sys-kernel-config.mount sys-kernel-debug.mount getty.target \
+      systemd-logind.service systemd-firstboot.service \
+ && rm -f /usr/sbin/policy-rc.d
+
+# Same apt-get as install.sh (recommends included), plus what a stock Ubuntu server already has.
+RUN apt-get update && apt-get install -y nginx mariadb-server mariadb-client fail2ban ufw \
+      python3 python3-pip curl wget tar unzip \
+      php-fpm php-mysql php-cli php-gd php-xml php-mbstring php-curl \
+      certbot python3-certbot-nginx restic rclone bash-completion acl \
+      openssh-server sudo cron procps redis-server rsync iproute2 less openssl rsyslog logrotate \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp \
+ && chmod +x /usr/local/bin/wp \
+ && systemctl enable ssh cron rsyslog \
+ && systemctl disable redis-server
+# redis-server is pre-installed only to speed up the run: like AlmaLinux (and a fresh VPS before
+# `optimize redis`), it must not be running, or the panel refuses to take over a foreign Redis.
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

@@ -45,16 +45,18 @@ site_harden_docroot_perms() {
   setfacl -R -d -m o::--- "$docroot" 2>/dev/null || true
   # Functional default for anything created from now on (mostly media uploads; dirs need
   # traversal too) — narrowed for .php specifically below, on whatever exists right now.
-  setfacl -R -m u:nginx:rx "$docroot" 2>/dev/null || true
-  setfacl -R -d -m u:nginx:rx "$docroot" 2>/dev/null || true
+  local web
+  web="$(nginx_user)"
+  setfacl -R -m "u:${web}:rx" "$docroot" 2>/dev/null || true
+  setfacl -R -d -m "u:${web}:rx" "$docroot" 2>/dev/null || true
   # nginx opens (openat) directories and files itself for try_files / index lookups, even for
   # .php it only hands to PHP-FPM, so it needs read on them: a "--x"-only or no-entry grant makes
   # every WordPress page a 404 (nginx: openat() ... Permission denied). Directories: r-x (nginx
   # never lists them, no autoindex). The one secret nginx never has to open is wp-config.php (its
   # location is deny all, PHP-FPM reads it as the site user): drop nginx's entry from it so a
   # process sharing the "nginx" identity still cannot read the DB password / salts.
-  find "$docroot" -type d -exec setfacl -m u:nginx:r-x {} + 2>/dev/null
-  find "$docroot" -type f -name 'wp-config*.php' -exec setfacl -x u:nginx {} + 2>/dev/null
+  find "$docroot" -type d -exec setfacl -m "u:${web}:r-x" {} + 2>/dev/null
+  find "$docroot" -type f -name 'wp-config*.php' -exec setfacl -x "u:${web}" {} + 2>/dev/null
 }
 
 # Site users never need their own crontab or at jobs (the panel's jobs live in /etc/cron.d):
@@ -200,9 +202,9 @@ site_admin_write_htpasswd() {
   slug="$(domain_slug "$domain")"
   pass="$(rand_alnum 20)"
   hash="$(printf '%s' "$pass" | openssl passwd -6 -stdin)"
-  install -d -m 750 -o root -g nginx "$ADMIN_AUTH_DIR" 2>/dev/null || install -d -m 750 "$ADMIN_AUTH_DIR"
+  install -d -m 750 -o root -g "$(nginx_user)" "$ADMIN_AUTH_DIR" 2>/dev/null || install -d -m 750 "$ADMIN_AUTH_DIR"
   printf '%s:%s\n' "$user" "$hash" >"${ADMIN_AUTH_DIR}/${slug}.htpasswd"
-  chown root:nginx "${ADMIN_AUTH_DIR}/${slug}.htpasswd" 2>/dev/null || true
+  chown "root:$(nginx_user)" "${ADMIN_AUTH_DIR}/${slug}.htpasswd" 2>/dev/null || true
   chmod 640 "${ADMIN_AUTH_DIR}/${slug}.htpasswd"
   site_json_set "$domain" admin_protect_user "$user" admin_protect_pass "$pass"
   panel_secret "wp-admin protection for $domain — user: $user  password: $pass"
@@ -300,9 +302,9 @@ site_auth() {
         pass="$(rand_alnum 20)"
       fi
       hash="$(printf '%s' "$pass" | openssl passwd -6 -stdin)"
-      install -d -m 750 -o root -g nginx "$ADMIN_AUTH_DIR" 2>/dev/null || install -d -m 750 "$ADMIN_AUTH_DIR"
+      install -d -m 750 -o root -g "$(nginx_user)" "$ADMIN_AUTH_DIR" 2>/dev/null || install -d -m 750 "$ADMIN_AUTH_DIR"
       printf '%s:%s\n' "$user" "$hash" >"$htfile"
-      chown root:nginx "$htfile" 2>/dev/null || true
+      chown "root:$(nginx_user)" "$htfile" 2>/dev/null || true
       chmod 640 "$htfile"
       site_json_set "$domain" site_auth true site_auth_user "$user" site_auth_pass "$pass"
       panel_secret "Basic auth for $domain — user: $user  password: $pass"
@@ -379,6 +381,7 @@ site_render_vhost() {
     site_set_ssl_flag "$domain" false
   fi
   rm -f "$body"
+  nginx_strip_ipv6_listen "$out"
   chmod 644 "$out"
 }
 
@@ -394,7 +397,8 @@ site_render_pool() {
   php_ver="$(php_version_normalize "$(site_json_get_or "$domain" php_version 80)")"
   fpm_dir="$(php_fpm_d_dir "$php_ver")"
   site_ensure_tmp "$site_user"
-  rm -f "/etc/php-fpm.d/cecp-${slug}.conf" /etc/opt/remi/php*/php-fpm.d/cecp-"${slug}".conf
+  rm -f "/etc/php-fpm.d/cecp-${slug}.conf" /etc/opt/remi/php*/php-fpm.d/cecp-"${slug}".conf \
+    /etc/php/*/fpm/pool.d/cecp-"${slug}".conf
   local pool_file="${fpm_dir}/cecp-${slug}.conf" children
   # Sites with resource limits run their pool under their own FPM master (cecp-php-fpm@SLUG).
   if [[ "$(site_json_get_or "$domain" php_isolated false)" == "True" ]]; then
@@ -408,7 +412,7 @@ site_render_pool() {
   [[ "$children" == auto ]] && children="$(php_pool_max_children)"
   template_render "$PANEL_ROOT/templates/php-fpm-pool.conf.tpl" "$pool_file" \
     DOMAIN "$domain" POOL_NAME "$pool_name" SITE_USER "$site_user" DOCROOT "$docroot" \
-    SITE_HOME "/home/${site_user}" PHP_SOCK "$php_sock" PHP_VERSION "$php_ver" \
+    SITE_HOME "/home/${site_user}" PHP_SOCK "$php_sock" PHP_VERSION "$php_ver" WEB_USER "$(nginx_user)" \
     PM_MAX_CHILDREN "$children" \
     MEMORY_LIMIT "$(php_cfg_get "$domain" memory_limit)" \
     POST_MAX_SIZE "$(php_cfg_get "$domain" post_max_size)" \
@@ -417,6 +421,22 @@ site_render_pool() {
     MAX_INPUT_TIME "$(php_cfg_get "$domain" max_input_time)" \
     MAX_INPUT_VARS "$(php_cfg_get "$domain" max_input_vars)" \
     DISABLE_FUNCTIONS "$(php_cfg_disable_functions "$domain")"
+}
+
+# Ubuntu sites created before 2.0 were stored as PHP "80" (the AlmaLinux default) with a socket in
+# /run/php-fpm, so their pool landed where no PHP-FPM reads it. Move them to the distro PHP.
+site_migrate_debian_php() {
+  local domain="$1" v
+  os_is_debian || return 0
+  v="$(site_json_get_or "$domain" php_version 80)"
+  [[ "$v" == 80 && ! -d /etc/php/8.0/fpm ]] || return 0
+  v="$(php_default_version)"
+  [[ "$v" != 80 ]] || return 0
+  [[ "$(site_json_get_or "$domain" php_isolated false)" == "True" ]] \
+    && { site_json_set "$domain" php_version "$v"; return 0; }
+  site_json_set "$domain" php_version "$v" \
+    php_sock "$(php_fpm_sock_for_version "$v" "$(site_json_get "$domain" pool_name)")"
+  panel_log "$domain: PHP 80 (AlmaLinux default) -> distro PHP $v"
 }
 
 # Re-apply current templates (vhost + pool) to an existing site, with nginx rollback on error.
@@ -435,6 +455,7 @@ site_rebuild_vhost() {
   if [[ -f "/etc/cron.d/cecp-wp-$(domain_slug "$domain")" ]]; then
     wp_cron_write "$domain"
   fi
+  site_migrate_debian_php "$domain"
   site_render_pool "$domain"
   site_render_vhost "$domain"
   php_fpm_reload_all
@@ -533,7 +554,8 @@ site_add() {
   site_ensure_tmp "$site_user"
   selinux_fixup_path "$docroot"
   mkdir -p "$sock_dir"
-  chown nginx:nginx "$sock_dir" 2>/dev/null || true
+  # Debian/Ubuntu: /run/php belongs to the php-fpm packages (root:root 755) — leave it.
+  os_is_debian || chown nginx:nginx "$sock_dir" 2>/dev/null || true
 
   panel_log "MariaDB database $db_name ..."
   mysql_create_site_db "$domain" "$db_name" "$db_user" "$db_pass"
@@ -546,7 +568,7 @@ site_add() {
   "site_user": "$site_user",
   "docroot": "$docroot",
   "pool_name": "$pool_name",
-  "php_version": "80",
+  "php_version": "$(php_default_version)",
   "php_sock": "$php_sock",
   "db_name": "$db_name",
   "db_user": "$db_user",
@@ -596,7 +618,7 @@ EOF
   # down before the site ever goes live.
   site_harden_docroot_perms "$domain"
 
-  php_fpm_restart_for_new_pool php-fpm
+  php_fpm_restart_for_new_pool "$(php_fpm_default_service)"
   nginx_test_and_reload || panel_die "nginx rejected the new vhost for $domain (config rolled back)"
 
   panel_log "Site added: http://$domain"
@@ -613,7 +635,7 @@ site_install_wordpress() {
   local domain="$1" docroot="$2" site_user="$3" db_name="$4" db_user="$5" db_pass="$6"
   wp_ensure_cli
   panel_log "Installing WordPress for $domain ..."
-  local wp_run=(sudo -u "$site_user" php -d memory_limit=512M "$WP_CLI_BIN")
+  local wp_run=(site_run_as "$site_user" env HOME="/home/${site_user}" php -d memory_limit=512M "$WP_CLI_BIN")
   "${wp_run[@]}" core download --path="$docroot" --quiet
   # Passwords via --prompt (stdin), not argv: site users can read argv of other processes.
   "${wp_run[@]}" config create \
@@ -665,6 +687,13 @@ site_remove() {
     [[ -f "$remi_pool" ]] || continue
     rm -f "$remi_pool"
     svc="$(echo "$remi_pool" | sed -E 's#^/etc/opt/remi/(php[0-9]+)/.*#\1#')-php-fpm"
+    systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
+  done
+  # Debian/Ubuntu pools (/etc/php/X.Y/fpm/pool.d): same reason, reload that version's FPM.
+  for remi_pool in /etc/php/*/fpm/pool.d/cecp-"${slug}".conf; do
+    [[ -f "$remi_pool" ]] || continue
+    rm -f "$remi_pool"
+    svc="$(echo "$remi_pool" | sed -E 's#^/etc/php/([0-9.]+)/.*#php\1-fpm#')"
     systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
   done
   systemctl disable --now "cecp-purge@${slug}.path" >/dev/null 2>&1 || true

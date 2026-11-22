@@ -65,7 +65,7 @@ wp_site_exec() {
   local docroot site_user
   docroot="$(wp_site_meta "$domain" "docroot")"
   site_user="$(wp_site_meta "$domain" "site_user")"
-  sudo -u "$site_user" php -d memory_limit=512M "$WP_CLI_BIN" --path="$docroot" "$@"
+  site_run_as "$site_user" env HOME="/home/${site_user}" php -d memory_limit=512M "$WP_CLI_BIN" --path="$docroot" "$@"
 }
 
 wp_harden_site() {

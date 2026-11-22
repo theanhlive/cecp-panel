@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs INSIDE the AlmaLinux test container after install.sh. Exit code = number of failures.
+# Runs INSIDE the test container (AlmaLinux 9, Ubuntu 22.04/24.04) after install.sh.
+# Exit code = number of failures.
 set -uo pipefail
 
 PASS=0
@@ -22,6 +23,37 @@ D="hotfix.test"; SLUG="hotfix_test"; SU="site_hotfix_test"
 D2="second.test"; SU2="site_second_test"
 DOCROOT="/home/$SU/public_html"
 DROPIN="/etc/ssh/sshd_config.d/cecp-${SU}.conf"
+# Distro-specific paths and names. Checks use these instead of AlmaLinux literals; a check that
+# only applies to one family says so with `if [ "$IT_FAMILY" = ... ]`.
+if [ -f /etc/debian_version ]; then
+  IT_FAMILY=debian
+  PHPV="$(php -r 'echo PHP_MAJOR_VERSION, PHP_MINOR_VERSION;')"
+  PHPD="${PHPV:0:1}.${PHPV:1}"
+  WEBU=www-data
+  FPM_SVC="php${PHPD}-fpm"
+  FPM_POOL_DIR="/etc/php/$PHPD/fpm/pool.d"
+  FPM_SOCK_DIR=/run/php
+  PHP_CONF_DIR="/etc/php/$PHPD/mods-available"
+  OPCACHE_INI="$PHP_CONF_DIR/cecp-opcache.ini"
+  ISOLATION_INI="$PHP_CONF_DIR/cecp-isolation.ini"
+  DB_CNF_DIR=/etc/mysql/mariadb.conf.d
+  DB_TUNE_CNF="$DB_CNF_DIR/99-cecp-tune.cnf"
+  REDIS_SVC=redis-server
+else
+  IT_FAMILY=rhel
+  PHPV=80
+  WEBU=nginx
+  FPM_SVC=php-fpm
+  FPM_POOL_DIR=/etc/php-fpm.d
+  FPM_SOCK_DIR=/run/php-fpm
+  PHP_CONF_DIR=/etc/php.d
+  OPCACHE_INI="$PHP_CONF_DIR/99-cecp-opcache.ini"
+  ISOLATION_INI="$PHP_CONF_DIR/98-cecp-isolation.ini"
+  DB_CNF_DIR=/etc/my.cnf.d
+  DB_TUNE_CNF="$DB_CNF_DIR/cecp-tune.cnf"
+  REDIS_SVC=redis
+fi
+echo "=== Target: ${IT_OS:-$IT_FAMILY} (php $PHPV, nginx user $WEBU, $FPM_SVC) ==="
 VERSION="$(sed -nE 's/^CECP_PANEL_VERSION="\$\{CECP_PANEL_VERSION:-([^}]+)\}"$/\1/p' /opt/cecp-panel/lib/common.sh)"
 for h in "$D" "$D2" a-b.test a.b.test "shop.$D" "staging.$D"; do
   grep -q " $h\$" /etc/hosts || echo "127.0.0.1 $h" >>/etc/hosts
@@ -63,8 +95,22 @@ check "site add --wp $D" cecp-panel site add "$D" --wp
 check "site serves WordPress" serves_wp
 check "site add --wp $D2" cecp-panel site add "$D2" --wp
 settle
-check "adding a site keeps the other site's PHP socket owned by nginx" test "$(stat -c %U /run/php-fpm/${SLUG}.sock)" = nginx
+check "adding a site keeps the other site's PHP socket owned by nginx" test "$(stat -c %U "$FPM_SOCK_DIR/${SLUG}.sock")" = "$WEBU"
 check "other site still reaches PHP (no 502)" expect_cache '/?s=after-add' BYPASS
+if [ "$IT_FAMILY" = debian ]; then
+  # Ubuntu only: sites from before 2.0 were stored as PHP "80" with a /run/php-fpm socket (never served).
+  legacy_php_migrated() {
+    python3 - "/var/lib/cecp-panel/sites/$D2.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["php_version"] = "80"; d["php_sock"] = "/run/php-fpm/%s.sock" % d["pool_name"]
+json.dump(d, open(p, "w"), indent=2)
+PY
+    cecp-panel site rebuild-vhost "$D2" >/dev/null && [ "$(meta_of "$D2" php_version)" = "$PHPV" ] \
+      && [ "$(meta_of "$D2" php_sock)" = "$FPM_SOCK_DIR/$(meta_of "$D2" pool_name).sock" ] && settle && serves_wp "$D2"
+  }
+  check "ubuntu: rebuild-vhost moves a legacy PHP 80 site to the distro PHP" legacy_php_migrated
+fi
 check "WordPress admin is not 'admin'" \
   bash -c "! runuser -u $SU -- php /usr/local/bin/wp --path=$DOCROOT user list --field=user_login | grep -qx admin"
 WPPASS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("wp_admin_pass",""))' "/var/lib/cecp-panel/sites/$D.json")"
@@ -122,11 +168,13 @@ settle
 check "sysctl file requests bbr" grep -qx 'net.ipv4.tcp_congestion_control = bbr' /etc/sysctl.d/99-cecp-bbr.conf
 check "tcp_bbr loaded at boot" grep -qx tcp_bbr /etc/modules-load.d/cecp-bbr.conf
 check "nginx perf conf installed" test -f /etc/nginx/conf.d/cecp-perf.conf
-check "opcache ini installed" test -f /etc/php.d/99-cecp-opcache.ini
+check "opcache ini installed" test -f "$OPCACHE_INI"
 check "JIT is off by default (crashed php-fpm with SIGSEGV under real traffic on PHP 8.0 — see CHANGELOG)" \
-  bash -c "grep -qx 'opcache.jit=disable' /etc/php.d/99-cecp-opcache.ini && grep -qx 'opcache.jit_buffer_size=0' /etc/php.d/99-cecp-opcache.ini"
-check "mariadb tune installed" grep -q 'table_open_cache = 2000' /etc/my.cnf.d/cecp-tune.cnf
-check "redis secured and running" bash -c 'test -f /etc/cecp-panel/redis.env && systemctl is-active --quiet redis'
+  bash -c "grep -qx 'opcache.jit=disable' $OPCACHE_INI && grep -qx 'opcache.jit_buffer_size=0' $OPCACHE_INI"
+check "mariadb tune installed" grep -q 'table_open_cache = 2000' "$DB_TUNE_CNF"
+check "config written under umask 0000 is not world-writable" \
+  bash -c "rm -f $DB_TUNE_CNF; umask 0000; cecp-panel optimize mariadb >/dev/null && [ \"\$(stat -c %a $DB_TUNE_CNF)\" = 644 ]"
+check "redis secured and running" bash -c "test -f /etc/cecp-panel/redis.env && systemctl is-active --quiet $REDIS_SVC"
 check "redis config not world-readable" bash -c '[ "$(stat -c %a /etc/redis/cecp.conf)" = 640 ]'
 check "site still serves WordPress after tuning" serves_wp
 
@@ -135,7 +183,7 @@ TB=/var/lib/cecp-panel/tune-backups
 check "optimize stack snapshotted configs (root-only dir, MANIFEST per step)" \
   bash -c "[ \"\$(stat -c '%a %U' $TB)\" = '700 root' ] && for l in kernel nginx opcache mariadb; do ls -d $TB/*-\$l >/dev/null || exit 1; done && [ \"\$(stat -c %a \$(ls -d $TB/*-mariadb | tail -1))\" = 700 ]"
 check "MANIFEST records the original sha256 of the tuned file" \
-  bash -c "grep -qF \"\$(sha256sum /etc/my.cnf.d/cecp-tune.cnf | cut -d' ' -f1)\" \$(ls -d $TB/*-mariadb | tail -1)/MANIFEST || grep -q \$'^absent\t.*/etc/my.cnf.d/cecp-tune.cnf\$' \$(ls -d $TB/*-mariadb | tail -1)/MANIFEST"
+  bash -c "grep -qF \"\$(sha256sum $DB_TUNE_CNF | cut -d' ' -f1)\" \$(ls -d $TB/*-mariadb | tail -1)/MANIFEST || grep -q \$'^absent\t.*$DB_TUNE_CNF\$' \$(ls -d $TB/*-mariadb | tail -1)/MANIFEST"
 echo '# it-rollback-marker' >>/etc/nginx/conf.d/cecp-perf.conf
 cp /etc/nginx/conf.d/cecp-perf.conf /tmp/cecp-perf.before
 check "optimize nginx snapshots then rewrites cecp-perf.conf" \
@@ -170,10 +218,10 @@ check "tune-backups keeps at most 20 snapshots" \
 
 echo "=== PHP-FPM pool isolation ==="
 check "open_basedir uses per-site tmp (no shared /tmp)" \
-  grep -qx "php_admin_value\[open_basedir\] = $DOCROOT:/home/$SU/tmp" "/etc/php-fpm.d/cecp-$SLUG.conf"
-check "sessions in per-site tmp" grep -qx "php_admin_value\[session.save_path\] = /home/$SU/tmp" "/etc/php-fpm.d/cecp-$SLUG.conf"
+  grep -qx "php_admin_value\[open_basedir\] = $DOCROOT:/home/$SU/tmp" "$FPM_POOL_DIR/cecp-$SLUG.conf"
+check "sessions in per-site tmp" grep -qx "php_admin_value\[session.save_path\] = /home/$SU/tmp" "$FPM_POOL_DIR/cecp-$SLUG.conf"
 check "per-site tmp is 700 and owned by the site user" test "$(stat -c '%a %U' "/home/$SU/tmp")" = "700 $SU"
-check "pm.max_children sized (2..32)" bash -c "v=\$(sed -nE 's/^pm.max_children = ([0-9]+)$/\1/p' /etc/php-fpm.d/cecp-$SLUG.conf); [ \"\$v\" -ge 2 ] && [ \"\$v\" -le 32 ]"
+check "pm.max_children sized (2..32)" bash -c "v=\$(sed -nE 's/^pm.max_children = ([0-9]+)$/\1/p' $FPM_POOL_DIR/cecp-$SLUG.conf); [ \"\$v\" -ge 2 ] && [ \"\$v\" -le 32 ]"
 
 echo "=== nginx hardening ==="
 check "security headers on PHP responses" \
@@ -212,8 +260,8 @@ check "optimize report shows hit ratio" bash -c "cecp-panel optimize report $D |
 
 echo "=== optimize capacity / optimize audit (read-only) ==="
 ro_state() {
-  find /etc/nginx /etc/php-fpm.d /etc/php.d /etc/my.cnf.d /etc/cecp-panel -type f -exec md5sum {} + 2>/dev/null | sort
-  for u in nginx php-fpm mariadb; do systemctl show -p MainPID --value "$u"; done
+  find /etc/nginx "$FPM_POOL_DIR" "$PHP_CONF_DIR" "$DB_CNF_DIR" /etc/cecp-panel -type f -exec md5sum {} + 2>/dev/null | sort
+  for u in nginx "$FPM_SVC" mariadb; do systemctl show -p MainPID --value "$u"; done
 }
 ro_state >/tmp/ro.before
 check "optimize capacity prints RAM verdicts" \
@@ -355,7 +403,7 @@ check "old shared password no longer works" bash -c "REDISCLI_AUTH='$OLDPASS' re
 check "$D still connected after rotation" \
   bash -c "runuser -u $SU -- php /usr/local/bin/wp --path=$DOCROOT redis status | grep -qi 'status: connected'"
 check "ACL users survive a Redis restart" \
-  bash -c "systemctl restart redis && sleep 1 && [ \"\$(redis-cli --no-auth-warning --user $UA --pass $PA PING)\" = PONG ]"
+  bash -c "systemctl restart $REDIS_SVC && sleep 1 && [ \"\$(redis-cli --no-auth-warning --user $UA --pass $PA PING)\" = PONG ]"
 
 echo "=== fail2ban ==="
 check "fail2ban-full applies" cecp-panel security fail2ban-full
@@ -364,6 +412,8 @@ if systemctl is-active --quiet fail2ban; then
   fail2ban-client set cecp-wordpress banip 203.0.113.9 >/dev/null 2>&1
   for _ in $(seq 10); do grep -qs 'deny 203.0.113.9;' /etc/nginx/conf.d/cecp-f2b-deny.conf && break; sleep 1; done
   check "ban writes an nginx deny (works behind Cloudflare)" grep -qx 'deny 203.0.113.9;' /etc/nginx/conf.d/cecp-f2b-deny.conf
+  grep -qsx 'deny 203.0.113.9;' /etc/nginx/conf.d/cecp-f2b-deny.conf \
+    || { echo "        --- fail2ban.log (diagnostics)"; tail -25 /var/log/fail2ban.log 2>&1 | sed 's/^/        /'; }
   fail2ban-client set cecp-wordpress unbanip 203.0.113.9 >/dev/null 2>&1
   for _ in $(seq 10); do grep -qs 'deny 203.0.113.9;' /etc/nginx/conf.d/cecp-f2b-deny.conf || break; sleep 1; done
   check "unban removes the nginx deny" bash -c "! grep -qs 'deny 203.0.113.9;' /etc/nginx/conf.d/cecp-f2b-deny.conf"
@@ -467,7 +517,7 @@ cecp-panel backup run "$D" >/dev/null 2>&1
 BROKEN_SNAP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]]["last_snapshot"])' /var/lib/cecp-panel/backup-state.json "$D")"
 install -m 644 -o "$SU" -g "$SU" /tmp/index.php.good "$DOCROOT/index.php"
 # OPcache revalidates every 60 s: reload so file edits take effect immediately.
-php_live() { systemctl reload php-fpm; settle; }
+php_live() { systemctl reload "$FPM_SVC"; settle; }
 uncached_ok() { [[ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Cookie: wordpress_logged_in_x=1' "http://$D/")" =~ ^(200|301|302)$ ]]; }
 php_live
 check "precondition: site healthy (uncached) before restoring a broken snapshot" uncached_ok
@@ -482,8 +532,8 @@ check "monitor enable" cecp-panel monitor enable
 check "restart-on-failure drop-in installed" test -f /etc/systemd/system/nginx.service.d/cecp-restart.conf
 check "first run raises no alerts on a healthy host" test "$(wh_count site_down)" = 0
 check "monitor status lists checks" bash -c "cecp-panel monitor status | grep -q 'site:$D'"
-systemctl stop php-fpm
-check "stopped php-fpm is restarted by the monitor" bash -c "cecp-panel monitor run && systemctl is-active --quiet php-fpm"
+systemctl stop "$FPM_SVC"
+check "stopped php-fpm is restarted by the monitor" bash -c "cecp-panel monitor run && systemctl is-active --quiet $FPM_SVC"
 check "service_restarted event delivered" wait_event service_restarted
 printf '<?php http_response_code(500); exit;\n' >"$DOCROOT/index.php"
 php_live
@@ -495,9 +545,9 @@ install -m 644 -o "$SU" -g "$SU" /tmp/index.php.good "$DOCROOT/index.php"
 php_live
 cecp-panel monitor run >/dev/null 2>&1
 check "site_recovered alert raised" wait_event site_recovered
-chown root:root "/run/php-fpm/${SLUG}.sock"
+chown root:root "$FPM_SOCK_DIR/${SLUG}.sock"
 check "monitor repairs PHP-FPM socket ownership" \
-  bash -c "cecp-panel monitor run && [ \"\$(stat -c %U /run/php-fpm/${SLUG}.sock)\" = nginx ]"
+  bash -c "cecp-panel monitor run && [ \"\$(stat -c %U $FPM_SOCK_DIR/${SLUG}.sock)\" = $WEBU ]"
 check "socket_fixed event delivered" wait_event socket_fixed
 cecp-panel backup enable-cron >/dev/null
 touch -d '3 days ago' /etc/cron.d/cecp-panel-backup
@@ -549,6 +599,83 @@ cp "/tmp/mirror/dist/cecp-panel-${VERSION}.tar.gz" /tmp/mirror/dist/cecp-panel-l
 (cd /tmp/mirror/dist && sha256sum "cecp-panel-${VERSION}.tar.gz" cecp-panel-latest.tar.gz >SHA256SUMS)
 check "update panel latest records the installed version, not 'latest'" \
   bash -c "cecp-panel update panel latest && grep -qF '\"version\": \"$VERSION\"' /etc/cecp-panel/panel.json && ! grep -q '\"version\": \"latest\"' /etc/cecp-panel/panel.json"
+
+echo "=== Release channels (dist/<channel>/, legacy dist/ fallback) ==="
+# Output goes to a file before grep: `| grep -q` exits early and SIGPIPE would kill the update.
+upd_out() { cecp-panel update panel latest >/tmp/upd.out 2>&1; local rc=$?; cat /tmp/upd.out; return "$rc"; }
+export -f upd_out
+check "update channel rejects bad input" \
+  bash -c "! cecp-panel update channel 'beta;id' && ! cecp-panel update channel nightly && ! grep -q '^CECP_PANEL_CHANNEL=.*\(nightly\|id\)' /etc/cecp-panel/panel.env"
+check "update channel stable is saved" \
+  bash -c "cecp-panel update channel stable && grep -qx 'CECP_PANEL_CHANNEL=stable' /etc/cecp-panel/panel.env && cecp-panel update channel | grep -q 'Channel: stable'"
+check "stable channel never falls back to legacy dist/ (the beta line)" \
+  bash -c "! upd_out && grep -q 'channel stable has no release' /tmp/upd.out && ! grep -q 'using legacy dist/' /tmp/upd.out"
+check "beta channel still falls back to legacy dist/" \
+  bash -c "cecp-panel update channel beta && upd_out && grep -q 'using legacy dist/' /tmp/upd.out && cecp-panel update channel stable"
+# A stable bundle with a marker file proves the download came from dist/stable/.
+rm -rf /tmp/stable-src && mkdir -p /tmp/stable-src && cp -a /root/cecp-panel /tmp/stable-src/
+touch /tmp/stable-src/cecp-panel/STABLE_MARKER
+mk_channel() {  # mk_channel DIR SRC_PARENT — tarball (+latest) and SHA256SUMS like build-release.sh
+  mkdir -p "$1"
+  tar -C "$2" --exclude=cecp-panel/tests -czf "$1/cecp-panel-${VERSION}.tar.gz" cecp-panel
+  cp "$1/cecp-panel-${VERSION}.tar.gz" "$1/cecp-panel-latest.tar.gz"
+  (cd "$1" && sha256sum "cecp-panel-${VERSION}.tar.gz" cecp-panel-latest.tar.gz >SHA256SUMS)
+  rm -f "$1/SHA256SUMS.minisig"
+}
+mk_channel /tmp/mirror/dist/stable /tmp/stable-src
+check "update panel latest uses dist/stable/ when the mirror has it" \
+  bash -c "upd_out && grep -q 'Channel stable:' /tmp/upd.out && [ -e /opt/cecp-panel/STABLE_MARKER ]"
+check "update channel beta + legacy dist/ replaces the stable bundle" \
+  bash -c "cecp-panel update channel beta && cecp-panel update panel latest && [ ! -e /opt/cecp-panel/STABLE_MARKER ]"
+check "update check shows channel and that signatures are not enforced yet" \
+  bash -c "cecp-panel update check | grep -q 'Update channel: beta' && cecp-panel update check | grep -q 'NOT enforced'"
+# Anti-rollback: a mirror serving an older release (version string lowered in the bundle).
+rm -rf /tmp/old-src && mkdir -p /tmp/old-src && cp -a /root/cecp-panel /tmp/old-src/
+sed -i 's/^CECP_PANEL_VERSION="\${CECP_PANEL_VERSION:-[^}]*}"/CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-0.9.0-beta}"/' /tmp/old-src/cecp-panel/lib/common.sh
+rm -rf /tmp/mirror-old/dist && mk_channel /tmp/mirror-old/dist/beta /tmp/old-src
+check "update panel latest refuses an older release (anti-rollback)" \
+  bash -c "cecp-panel update mirror file:///tmp/mirror-old && ! upd_out && grep -q 'refusing a downgrade' /tmp/upd.out && grep -qF '\"version\": \"$VERSION\"' /etc/cecp-panel/panel.json"
+cecp-panel update mirror file:///tmp/mirror >/dev/null
+
+echo "=== Release signature (minisign, test key) ==="
+SIG=/tmp/sigtest; rm -rf "$SIG"; mkdir -p "$SIG"
+cp /root/cecp-panel/keys/cecp-release.pub "$SIG/placeholder.pub"
+python3 -I "$HERE/minisign_sign.py" genkey "$SIG/test.pub" "$SIG/test.pem"
+python3 -I "$HERE/minisign_sign.py" genkey "$SIG/other.pub" "$SIG/other.pem"
+# Bundles carry the test key, so the key installed by an update stays the test key.
+cp "$SIG/test.pub" /root/cecp-panel/keys/cecp-release.pub
+cp "$SIG/test.pub" /opt/cecp-panel/keys/cecp-release.pub
+mk_channel /tmp/mirror/dist/beta /root
+check "update check reports signatures as required once a key is installed" \
+  bash -c "cecp-panel update check | grep -q 'Release signature: required'"
+check "with a release key, an unsigned SHA256SUMS is refused" \
+  bash -c "! upd_out && grep -q 'refusing an unsigned update' /tmp/upd.out"
+python3 -I "$HERE/minisign_sign.py" sign "$SIG/test.pem" /tmp/mirror/dist/beta/SHA256SUMS \
+  /tmp/mirror/dist/beta/SHA256SUMS.minisig "cecp-panel $VERSION channel=beta"
+check "valid signature is accepted" \
+  bash -c "upd_out && grep -q 'Signature OK' /tmp/upd.out && grep -q '^RW' /opt/cecp-panel/keys/cecp-release.pub"
+if command -v minisign >/dev/null 2>&1; then
+  MS="$(command -v minisign)"; mv "$MS" "$MS.hidden"
+  check "openssl fallback verifies when minisign is not installed" \
+    bash -c "upd_out && grep -q 'Signature OK' /tmp/upd.out"
+  mv "$MS.hidden" "$MS"
+fi
+python3 -I "$HERE/minisign_sign.py" sign "$SIG/other.pem" /tmp/mirror/dist/beta/SHA256SUMS \
+  /tmp/mirror/dist/beta/SHA256SUMS.minisig "cecp-panel $VERSION channel=beta"
+check "signature from another key is refused" \
+  bash -c "! upd_out && grep -q 'Signature check FAILED' /tmp/upd.out"
+python3 -I "$HERE/minisign_sign.py" sign "$SIG/test.pem" /tmp/mirror/dist/beta/SHA256SUMS \
+  /tmp/mirror/dist/beta/SHA256SUMS.minisig "cecp-panel $VERSION channel=beta"
+printf 'x' >>/tmp/mirror/dist/beta/cecp-panel-latest.tar.gz
+(cd /tmp/mirror/dist/beta && sha256sum "cecp-panel-${VERSION}.tar.gz" cecp-panel-latest.tar.gz >SHA256SUMS)
+check "SHA256SUMS changed after signing (tampered bundle re-hashed) is refused" \
+  bash -c "! upd_out && grep -q 'Signature check FAILED' /tmp/upd.out"
+check "panel still works after the refused updates" bash -c "cecp-panel help | head -1 | grep -qF '$VERSION'"
+# Back to the shipped placeholder key and the default channel for the rest of the scenario.
+cp "$SIG/placeholder.pub" /root/cecp-panel/keys/cecp-release.pub
+cp "$SIG/placeholder.pub" /opt/cecp-panel/keys/cecp-release.pub
+sed -i '/^CECP_PANEL_CHANNEL=/d' /etc/cecp-panel/panel.env
+rm -rf /tmp/mirror/dist/beta /tmp/mirror/dist/stable /tmp/stable-src
 
 echo "=== Update everything (update all) ==="
 set_meta() { bash -c "source /opt/cecp-panel/lib/common.sh; site_json_set $1 $2 '$3'"; }
@@ -735,7 +862,7 @@ kill "$MOCK" 2>/dev/null
 rm -f /etc/cecp-panel/credentials.env
 
 meta_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "/var/lib/cecp-panel/sites/$1.json" "$2"; }
-POOL="/etc/php-fpm.d/cecp-$SLUG.conf"
+POOL="$FPM_POOL_DIR/cecp-$SLUG.conf"
 VHOST="/etc/nginx/conf.d/cecp-$SLUG.conf"
 runuser -u "$SU" -- bash -c "printf '%s' '<?php echo ini_get(\"memory_limit\"), \"|\", ini_get(\"upload_max_filesize\"), \"|\", ini_get(\"max_input_vars\");' >$DOCROOT/cecp-ini.php"
 php_ini() { curl -s "http://$D/cecp-ini.php?r=$RANDOM"; }
@@ -779,14 +906,14 @@ check "allow_putenv=on makes the probe pass again" \
 rm -f "$PUTENV_STUB"
 cecp-panel php config "$D" --reset allow_putenv >/dev/null 2>&1 || true
 
-echo "=== theme file owned by nginx, mode 650 (permission incident) ==="
+echo "=== theme file owned by the nginx user, mode 650 (permission incident) ==="
 PERM_DIR="$DOCROOT/wp-content/themes/cecp-perm-test"
 PERM_FILE="$PERM_DIR/functions.php"
 PERM_STUB="$DOCROOT/wp-content/mu-plugins/cecp-perm-stub.php"
 runuser -u "$SU" -- mkdir -p "$PERM_DIR" "$DOCROOT/wp-content/mu-plugins"
 printf '<?php\n' | runuser -u "$SU" -- tee "$PERM_FILE" >/dev/null
 printf '<?php\nrequire_once WP_CONTENT_DIR . "/themes/cecp-perm-test/functions.php";\n' | runuser -u "$SU" -- tee "$PERM_STUB" >/dev/null
-chown nginx:nginx "$PERM_FILE"
+chown "$WEBU:$WEBU" "$PERM_FILE"
 chmod 650 "$PERM_FILE"
 # The mu-plugin stub requires the unreadable theme file: this request makes PHP log "Failed opening required",
 # which is what turns a theme file (latent) into FAIL in security check.
@@ -795,11 +922,11 @@ settle
 check "security check FAILs on a theme file the pool user cannot read (log shows it)" \
   bash -c "cecp-panel security check 2>&1 | grep -E 'FAIL' | grep -q 'unreadable by the pool user'"
 check "security check groups the theme folder with owner, group and mode" \
-  bash -c "cecp-panel security check 2>&1 | grep -F 'wp-content/themes/cecp-perm-test: 1 file(s)' | grep -q 'nginx:nginx mode 650'"
+  bash -c "cecp-panel security check 2>&1 | grep -F 'wp-content/themes/cecp-perm-test: 1 file(s)' | grep -q '$WEBU:$WEBU mode 650'"
 check "probe FAILs (exit 2) on the permission error" probe_fails
 check "probe prints the chown remedy, not allow_putenv" \
   bash -c "out=\$(cecp-panel site probe $D 2>&1); grep -q 'chown $SU:$SU $PERM_FILE' <<<\"\$out\" && ! grep -q allow_putenv <<<\"\$out\""
-check "probe did not change the file's owner" bash -c "[ \"\$(stat -c %U:%G:%a $PERM_FILE)\" = nginx:nginx:650 ]"
+check "probe did not change the file's owner" bash -c "[ \"\$(stat -c %U:%G:%a $PERM_FILE)\" = $WEBU:$WEBU:650 ]"
 rm -f "$PERM_STUB" "$PERM_FILE"
 rm -rf "$PERM_DIR"
 check "site probe passes again once the file is gone" bash -c "sleep 1; cecp-panel site probe $D"
@@ -816,7 +943,7 @@ settle
 check "inactive plugin file, no log line -> WARN latent with the folder name, not FAIL" \
   bash -c "out=\$(cecp-panel security check 2>&1); grep -q 'WARN.*latent: breaks the site' <<<\"\$out\" && grep -qF 'wp-content/plugins/cecp-latent-test: 1 file(s)' <<<\"\$out\" && ! grep -q 'FAIL.*unreadable by the pool user' <<<\"\$out\""
 printf '<?php\n' | runuser -u "$SU" -- tee "$ROOT_FILE" >/dev/null
-chown nginx:nginx "$ROOT_FILE"
+chown "$WEBU:$WEBU" "$ROOT_FILE"
 chmod 650 "$ROOT_FILE"
 settle
 check "unreadable root-level PHP file -> FAIL (critical)" \
@@ -835,7 +962,7 @@ check "vhost uses the unit's socket; pool left the shared FPM" \
 check "site serves WordPress through its own PHP-FPM" serves_wp
 check "the site's PHP workers run in the limited cgroup" \
   bash -c "php_pid=\$(pgrep -u $SU -f 'pool $SLUG' | head -1); [ -n \"\$php_pid\" ] && grep -q 'cecp-php-fpm@$SLUG.service' /proc/\$php_pid/cgroup"
-systemctl restart php-fpm
+systemctl restart "$FPM_SVC"
 settle
 check "restarting the shared PHP-FPM does not cut the limited site off" serves_wp
 check "other sites unaffected" serves_wp "$D2"
@@ -847,7 +974,7 @@ check "invalid limits rejected" bash -c "! cecp-panel site limits $D --cpu 5 && 
 check "monitor watches the limited PHP-FPM" bash -c "cecp-panel monitor run >/dev/null 2>&1; cecp-panel monitor status | grep -q 'service:cecp-php-fpm@$SLUG'"
 check "site limits off" cecp-panel site limits "$D" off
 settle
-check "back on the shared PHP-FPM" bash -c "grep -q 'unix:/run/php-fpm/$SLUG.sock' $VHOST && [ -e $POOL ] && ! systemctl is-active --quiet $UNIT"
+check "back on the shared PHP-FPM" bash -c "grep -q 'unix:$FPM_SOCK_DIR/$SLUG.sock' $VHOST && [ -e $POOL ] && ! systemctl is-active --quiet $UNIT"
 check "site serves WordPress after limits off" serves_wp
 
 echo "=== Staging ==="
@@ -917,15 +1044,15 @@ check "wp auto-update rejects bad exclusions" bash -c "! cecp-panel wp auto-upda
 echo "=== status --json ==="
 status_json_ok() {
   cecp-panel status --json >/tmp/status.json || return 1
-  python3 - "$D" /tmp/status.json <<'PY'
+  python3 - "$D" /tmp/status.json "$PHPV" <<'PY'
 import json, sys
-dom, path = sys.argv[1], sys.argv[2]
+dom, path, phpv = sys.argv[1], sys.argv[2], sys.argv[3]
 d = json.load(open(path))
 s = next(x for x in d["sites"] if x["domain"] == dom)
 assert d["schema"] == 2 and dom in d["domains_hosted"] and d["services"]["nginx"] == "active", d
 assert s["cache"]["ttl"] == "1h" and s["cache"]["auto_purge"] is True, s
 assert s["disk_mb"] and s["disk_mb"] > 0 and s["db_mb"] is not None and s["wp"]["auto_update"] is True, s
-assert s["php_version"] == "80" and s["limits"] is None, s
+assert s["php_version"] == phpv and s["limits"] is None, s
 PY
 }
 heartbeat_ok() {
@@ -971,7 +1098,7 @@ check "panel does not chown/write through A's planted symlink (root takeover)" \
   bash -c "[ \"\$(stat -c %U /root/decoy)\" = root ] && [ -z \"\$(ls -A /root/decoy)\" ]"
 runuser -u "$SU" -- bash -c "rm -f $DOCROOT/wp-content/mu-plugins $DOCROOT/b-config.txt $DOCROOT/passwd.txt && mkdir -p $DOCROOT/wp-content/mu-plugins"
 check "site users cannot use crontab" bash -c "grep -qx $SU /etc/cron.deny && runuser -u $SU -- crontab -l 2>&1 | grep -qi 'not allowed'"
-check "OPcache isolation ini installed" bash -c "cecp-panel security php-isolation && grep -rqs 'opcache.validate_permission=1' /etc/php.d/98-cecp-isolation.ini"
+check "OPcache isolation ini installed" bash -c "cecp-panel security php-isolation && grep -rqs 'opcache.validate_permission=1' $ISOLATION_INI"
 check "site still serves after php-isolation" serves_wp
 runuser -u "$SU" -- bash -c "printf '<?php eval(base64_decode(\$_POST[1]));' >$DOCROOT/wp-content/uploads/shell.php"
 check "security scan flags a web shell in uploads (exit 1)" bash -c "! cecp-panel security scan $D >/tmp/scan.out; grep -q 'PHP files inside uploads' /tmp/scan.out"
@@ -1007,7 +1134,7 @@ check "site remove $D" cecp-panel site remove "$D"
 check "site artifacts are gone" bash -c "
   ! test -e /var/lib/cecp-panel/sites/$D.json &&
   ! test -e /etc/nginx/conf.d/cecp-$SLUG.conf &&
-  ! test -e /etc/php-fpm.d/cecp-$SLUG.conf &&
+  ! test -e $FPM_POOL_DIR/cecp-$SLUG.conf &&
   ! test -e /etc/cron.d/cecp-wp-$SLUG &&
   ! test -e $DROPIN &&
   ! id $SU && ! id $SU2 &&

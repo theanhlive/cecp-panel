@@ -1,0 +1,7 @@
+untrusted comment: CECP Panel release signing key - PLACEHOLDER
+# PLACEHOLDER: no release signing key has been generated yet.
+# While this file holds no key line ("RW..." base64, 56 characters), `cecp-panel update panel`
+# only checks SHA256SUMS and prints a warning. Once the repo owner replaces this file with the
+# public key from `minisign -G` (see docs/RELEASING.md), every update REQUIRES a valid
+# dist/<channel>/SHA256SUMS.minisig signed by the matching offline secret key.
+# Never commit the secret key (.key) to this repository or to CI.
