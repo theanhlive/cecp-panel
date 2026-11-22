@@ -4,8 +4,8 @@ set -euo pipefail
 
 PANEL_ENV="$ETC_DIR/panel.env"
 CECP_PANEL_DEFAULT_RAW_BASE="https://raw.githubusercontent.com/theanhlive/cecp-panel/main"
-# Until 2.0.0 every release is a beta, so an unset channel keeps the pre-channel behaviour.
-CECP_PANEL_DEFAULT_CHANNEL="beta"
+# From 2.0.0 an unset channel means stable; panels that chose beta keep it.
+CECP_PANEL_DEFAULT_CHANNEL="stable"
 # Public key the INSTALLED panel trusts for dist/<channel>/SHA256SUMS.minisig. A placeholder
 # without a key line = signatures not enforced yet (warning); a real key = mandatory.
 CECP_RELEASE_PUBKEY="$PANEL_ROOT/keys/cecp-release.pub"

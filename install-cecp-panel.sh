@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.13.3-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-2.0.0}"
 CECP_PANEL_RAW_BASE="${CECP_PANEL_RAW_BASE:-https://raw.githubusercontent.com/theanhlive/cecp-panel/main}"
 
 log() { echo "[install-cecp-panel] $*"; }
@@ -32,7 +32,7 @@ while [[ $# -gt 0 ]]; do
     *) die "Unknown arg: $1" ;;
   esac
 done
-CHANNEL="${CHANNEL:-}"
+CHANNEL="${CHANNEL:-stable}"
 [[ -z "$CHANNEL" || "$CHANNEL" =~ ^(stable|beta)$ ]] || die "--channel must be stable or beta"
 
 INSTALLER_DIR=""

@@ -1,6 +1,10 @@
 # Changelog
 
-## Chưa phát hành
+## 2.0.0 — bản chính thức đầu tiên (kênh stable)
+
+- **Bản chính thức đầu tiên**: từ 2.0.0 VPS chưa chọn kênh nhận kênh `stable` (`dist/stable/`); cài mới mặc định `--channel stable`. VPS muốn tiếp tục nhận bản thử: `cecp-panel update channel beta`.
+- **Kiểm thử trước phát hành** (ADR-0001): CI GitHub Actions (lint, unit, tích hợp AlmaLinux 9), 83 unit test bats (`bash tests/unit/run.sh`), test tích hợp Ubuntu 22.04/24.04, test nâng cấp từ bản đã phát hành (`tests/upgrade/`), checklist VPS lab (`docs/LAB_CHECKLIST.md`).
+- **Chữ ký bản phát hành chưa bắt buộc**: repo mới có khoá công khai giữ chỗ (placeholder), nên `update check` hiện "Release signature: NOT enforced" — panel vẫn kiểm tra SHA256SUMS như trước. Chủ repo tạo khoá minisign ngoại tuyến theo [docs/RELEASING.md](docs/RELEASING.md); từ bản chứa khoá thật, chữ ký sẽ bắt buộc.
 
 ### Test tích hợp đa OS (W2, ADR-0001)
 - **`tests/integration/run.sh` nhận `OS=alma9|ubuntu22.04|ubuntu24.04`** (mặc định `alma9`, giữ nguyên tên image/container/log cũ). Image mới `tests/integration/Dockerfile.ubuntu2204`, `Dockerfile.ubuntu2404`: Ubuntu + systemd làm PID 1, gói giống `install_packages_debian` của `install.sh` (+ openssh-server, cron, rsyslog, logrotate, redis-server — cài sẵn nhưng **tắt**, giống AlmaLinux). Mỗi OS một container riêng (`cecp-panel-it-ubuntu2204`…) nên chạy song song được.
@@ -22,8 +26,6 @@
 - **Kernel không có IPv6** (`ipv6.disable=1`, một số container): vhost, catch-all HTTPS và server mặc định của distro bỏ dòng `listen [::]` (trước đây nginx không khởi động → mọi site chết). `install.sh` dùng `reload-or-restart` để nginx đang dừng được khởi động.
 - **`system tune`**: không `swapon` được (LXC/OpenVZ, container) chỉ còn là cảnh báo; dọn đĩa, cron bảo trì và logrotate vẫn được cài (trước đây dừng giữa chừng).
 
-**Nâng cấp từ 1.13.1-beta** (khi phát hành): VPS **Ubuntu** chạy `cecp-panel site rebuild-vhost --all` (chuyển pool sang `/etc/php/X.Y/fpm/pool.d`, sửa nhóm htpasswd: chạy lại `site protect-admin DOMAIN on` nếu đang bật) và `cecp-panel optimize redis` nếu Redis không chạy trên 22.04. AlmaLinux: không cần lệnh bổ sung.
-
 ### Kênh phát hành + chữ ký minisign (W5, ADR-0001)
 - **`cecp-panel update channel [stable|beta]`** (mới): chọn dòng phát hành, lưu `CECP_PANEL_CHANNEL` vào `/etc/cecp-panel/panel.env` (giá trị khác `stable`/`beta` bị từ chối qua `validate_channel`). Không tham số = in kênh hiện tại. Chưa đặt = `beta` (giữ hành vi cũ tới 2.0.0).
 - **`update panel` đọc `dist/<kênh>/`**; mirror chưa có `dist/<kênh>/SHA256SUMS` ⇒ dùng `dist/` cũ kèm cảnh báo `using legacy dist/`. `update all` dùng cùng logic. `update check` in thêm "Update channel" và "Release signature".
@@ -34,7 +36,7 @@
 - Tài liệu: [docs/RELEASING.md](docs/RELEASING.md) — bố cục `dist/`, tạo/đổi/mất khoá, các bước phát hành, việc cần làm ở 2.0.0, giới hạn (chưa chống rollback về bản cũ đã ký; lần cài đầu là TOFU).
 - Test: `tests/integration/scenario.sh` thêm check cho `update channel` (input xấu, lưu, fallback `dist/`, đọc `dist/stable/`), chữ ký (thiếu `.minisig`, chữ ký đúng, fallback openssl, khoá khác, `SHA256SUMS` bị sửa sau khi ký). Helper chỉ dùng cho test: `tests/integration/minisign_sign.py` (tạo khoá/ký định dạng minisign bằng openssl).
 
-**Nâng cấp từ 1.13.1-beta**: `cecp-panel update panel latest`; không cần lệnh bổ sung — VPS tiếp tục nhận kênh beta (từ `dist/beta/`, hoặc `dist/` trên mirror cũ). Muốn kênh ổn định khi có: `cecp-panel update channel stable`. Kiểm tra: `cecp-panel update check` (dòng "Release signature: NOT enforced" là đúng cho tới khi khoá thật được nhúng). Nên `dnf install minisign` / `apt install minisign` nếu kho có (không bắt buộc).
+**Nâng cấp từ 1.13.x-beta**: `cecp-panel update panel latest` (panel 1.13.x đọc `dist/`, nơi có bản 2.0.0). Sau đó `cecp-panel update check` phải hiện "Update channel: stable". VPS **Ubuntu** chạy thêm `cecp-panel site rebuild-vhost --all` (chuyển pool sang `/etc/php/X.Y/fpm/pool.d`; site đang bật protect-admin chạy lại `cecp-panel site protect-admin DOMAIN on`), và `cecp-panel optimize redis` nếu Redis không chạy trên 22.04. AlmaLinux: không cần lệnh bổ sung. Nên `dnf install minisign` / `apt install minisign` nếu kho có (không bắt buộc).
 
 ## 1.13.3-beta — system tune không dừng vì swap
 

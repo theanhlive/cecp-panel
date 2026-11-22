@@ -14,7 +14,7 @@ set -euo pipefail
 # MariaDB ignores such option files, logrotate skips such dirs, and writable config is root.
 umask 022
 
-CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-1.13.3-beta}"
+CECP_PANEL_VERSION="${CECP_PANEL_VERSION:-2.0.0}"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/cecp-panel}"
 ETC_DIR="/etc/cecp-panel"
 VAR_LIB="/var/lib/cecp-panel"
