@@ -51,7 +51,7 @@ it_diag() {
   docker exec "$1" bash -c 'systemctl is-system-running; systemctl --failed --no-pager;
     systemctl status mariadb mysql --no-pager -l 2>&1 | tail -30;
     journalctl -u mariadb -u mysql -n 60 --no-pager 2>&1;
-    authselect current 2>&1 | head -3; grep -E "^(account|auth)" /etc/pam.d/sudo /etc/pam.d/system-auth /etc/pam.d/common-account 2>/dev/null; systemctl is-active sssd 2>&1; getent shadow root >/dev/null && echo shadow-ok; for u in $(getent passwd | cut -d: -f1 | grep "^site_"); do echo "== $u"; getent shadow "$u" | cut -d: -f1,3-9 || echo "no shadow entry"; sudo -n -u "$u" true 2>&1 | head -2; done; ls -l /etc/shadow; tail -5 /var/log/secure 2>/dev/null;
+    authselect current 2>&1 | head -3; grep -E "^(account|auth)" /etc/pam.d/sudo /etc/pam.d/system-auth /etc/pam.d/common-account 2>/dev/null; systemctl is-active sssd 2>&1; getent shadow root >/dev/null && echo shadow-ok; for u in $(getent passwd | cut -d: -f1 | grep "^site_"); do echo "== $u"; getent shadow "$u" | cut -d: -f1,3-9 || echo "no shadow entry"; sudo -n -u "$u" true 2>&1 | head -2; journalctl --no-pager -n 8 _COMM=sudo _COMM=unix_chkpwd 2>&1 | tail -8; done; grep Cap /proc/self/status; ls -l /etc/shadow; tail -5 /var/log/secure 2>/dev/null;
     ls -l /etc/my.cnf.d /etc/mysql/mariadb.conf.d 2>/dev/null; df -h / /var/lib/mysql 2>/dev/null' 2>&1 || true
   echo "::endgroup::"
 }
