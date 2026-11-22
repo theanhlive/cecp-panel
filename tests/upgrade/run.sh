@@ -101,5 +101,11 @@ docker exec "${exec_opts[@]}" "$NAME" bash /root/baseline/cecp-panel/install.sh 
   || { it_diag "$NAME"; tail -40 "$LOG"; echo "baseline $FROM install.sh failed (log: $LOG)"; exit 1; }
 echo "baseline $FROM install.sh OK (log: $LOG)"
 
+# Test-container workaround (never on a VPS): on GitHub's runner, sudo's PAM account step fails
+# in the AlmaLinux container ("unix_chkpwd: could not obtain user info (root)" ->
+# "PAM account management error"), and baselines <= 1.13.1 install WordPress with `sudo -u`.
+# The current panel uses runuser (no PAM account step), so only the old baseline needs this.
+docker exec "$NAME" bash -c 'f=/etc/pam.d/sudo; [ -f "$f" ] && sed -i "s/^account[[:space:]].*/account    sufficient   pam_permit.so/" "$f"'
+
 docker exec "${exec_opts[@]}" -e FROM="$FROM" -e TO="$TO" "$NAME" \
   bash /root/cecp-panel/tests/upgrade/scenario.sh || { rc=$?; it_diag "$NAME"; exit "$rc"; }
