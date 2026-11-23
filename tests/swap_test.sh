@@ -34,7 +34,9 @@ source "$ROOT/lib/common.sh"
 source "$ROOT/lib/system.sh"
 
 # Redirect every path the libs write to (after sourcing, so the defaults are overridden).
+# shellcheck disable=SC2034  # read by the sourced libs
 ETC_DIR="$TMP/etc"
+# shellcheck disable=SC2034
 LOG_DIR="$TMP/log"
 SWAP_FILE="$TMP/swapfile"
 PROC_SWAPS="$TMP/proc_swaps"
@@ -42,6 +44,7 @@ PROC_SWAPS="$TMP/proc_swaps"
 : >"$SWAP_FILE"
 require_root() { :; }
 system_ensure_config() { :; }
+# shellcheck disable=SC2034  # read by system_swap_ensure
 system_load_config() { SWAP_MIN_TOTAL_MB=512; }
 system_swap_total_mb() { echo 0; }
 system_swap_recommended_gb() { echo 1; }
