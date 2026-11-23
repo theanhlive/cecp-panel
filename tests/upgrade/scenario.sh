@@ -63,6 +63,12 @@ upgrade_steps() {
       echo "site probe --all"
       echo "security check"
       ;;
+    1.13.1-beta|1.13.2-beta|1.13.3-beta)  # 1.13.2/1.13.3/2.0.0 "Nâng cấp từ …" (AlmaLinux: no extra command)
+      echo "update panel latest"
+      echo "update check"
+      echo "site probe --all"
+      echo "security check"
+      ;;
     *) return 1 ;;
   esac
 }
